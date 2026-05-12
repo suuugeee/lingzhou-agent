@@ -86,8 +86,7 @@
     "_doc": [
       "copilot 模型的 thinking 通过 reasoning_effort 字符串控制（low/medium/high），",
       "不使用 Qwen 的 enable_thinking/budget_tokens 体系。",
-      "reasoning_effort 须通过 lingzhou.json providers.copilot.extra_body 传入，",
-      "代码层面通过 extra_body 合并到 payload，无需在此记录为 thinking spec。",
+      "代码层面会把顶层 thinking 自动映射到 reasoning_effort，无需在 extra_body 手填。",
       "reasoning=true 仅作元数据标记（展示/路由用），不影响 payload 构造。"
     ],
     "models": [

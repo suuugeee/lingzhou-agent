@@ -65,7 +65,7 @@ def list_provider_models(provider_name: str) -> list[dict[str, Any]]:
 def is_reasoning_model(model_id: str) -> bool:
     """返回该模型是否具备推理能力（reasoning=true 元数据标记）。
 
-    copilot 的 gpt-5.4 / o3 等模型通过 extra_body.reasoning_effort 控制推理深度，
+    copilot 的 gpt-5.4 / o3 等模型由顶层 thinking 自动映射到 reasoning_effort，
     bailian 的 Qwen3 模型通过 thinking.budget_tokens 控制。
     两套机制不同，此函数仅供展示/路由层判断，不影响 payload 构造逻辑。
     """

@@ -44,7 +44,7 @@
     "  bailian/qwen-plus          — 131K 经济型，无思考模式",
     "",
     "GitHub Copilot 模型（需先配置 copilot provider）：",
-    "  copilot/gpt-5.4            — 131K GPT-5.4 thinking，reasonging_effort 可调",
+    "  copilot/gpt-5.4            — 131K GPT-5.4 thinking，reasoning_effort 可调",
     "  copilot/gpt-5.4-mini       — 131K GPT-5.4-mini thinking",
     "  copilot/gpt-4.5            — 131K 无 thinking，速度快",
     "  copilot/o3                 — 200K o3 推理模型",

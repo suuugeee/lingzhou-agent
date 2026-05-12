@@ -34,7 +34,7 @@ def find_config(hint: Path) -> Path:
             return candidate
     # 未找到配置 — 自动引导 setup
     console.print("[yellow]未找到 lingzhou.json，自动启动初始化向导…[/yellow]\n")
-    from cli.soul import setup as _setup
+    from cli.bootstrap import setup as _setup
     _setup()
     # setup 默认写到 ./lingzhou.json
     default_out = Path("lingzhou.json")
