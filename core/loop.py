@@ -627,6 +627,7 @@ class CognitionLoop:
                     _tool_history,
                     user_message=user_message,
                     prefer_tier=_next_tier or None,
+                    routing_overrides=self._pending_routing_overrides,
                 )
 
                 # 内层行为追踪
@@ -636,6 +637,8 @@ class CognitionLoop:
                     _kp = _cp.get("path") or _cp.get("name") or _cp.get("title") or str(_cp.get("id") or "") or _cp.get("key") or ""
                     for _bi in self._behavior.on_act(_t, _kp, str(active_task.id) if active_task else None):
                         self._wm.add(_bi)
+                    # 每次 on_act 后同步 cognitive_signals，确保 gate 看到最新计数
+                    self._behavior.apply_cognitive_probe(cognitive_signals)
                 _cont = self._behavior.apply_execution_gate(_cont, cognitive_signals)
                 _cont_result = await self._execution.dispatch(_cont, ctx)
 

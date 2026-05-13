@@ -369,6 +369,13 @@ class JudgmentLayer:
             if chosen_model == self._cfg.model
             else self._routing_providers.get(chosen_route_key, self._provider)
         )
+        # routing provider 创建失败时会缺失，打印警告并修正 model_ref 以免日志误导
+        if provider is self._provider and chosen_model != self._cfg.model:
+            _log.warning(
+                "[routing] tier=%s 期望模型 %s 的 provider 不存在（创建失败或未配置），实际回退至默认 %s",
+                chosen_tier, chosen_model, self._cfg.model,
+            )
+            chosen_model = self._cfg.model
         thinking = thinking_override if thinking_override is not None else self._cfg.thinking
         return provider, ModelSelection(phase=phase, tier=chosen_tier, model_ref=chosen_model, thinking=thinking)
 
@@ -631,6 +638,7 @@ class JudgmentLayer:
         tool_history: list[dict],
         user_message: str = "",
         prefer_tier: str | None = None,
+        routing_overrides: "dict[str, str] | None" = None,
     ) -> JudgmentOutput:
         """内层工具循环的续判请求。
 
@@ -686,6 +694,7 @@ class JudgmentLayer:
             current_action=current_action,
             tool_history=tool_history,
             prefer_tier=prefer_tier,
+            routing_overrides=routing_overrides,
         )
         # chat 模式 reasoner 阶段用 "low" 加快内层链推理；其余情况跟随配置
         thinking_override = "low" if (selection.tier == "reasoner" and user_message) else "off"

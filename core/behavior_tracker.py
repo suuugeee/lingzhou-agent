@@ -193,6 +193,8 @@ class BehaviorTracker:
         repeat_read_count = int(getattr(cognitive_signals, "repeat_read_count", 0) or 0)
         repeat_read_path = str(getattr(cognitive_signals, "repeat_read_path", "") or "")
 
+        # 只对真正会造成死锁的工具做硬门控（task.advance/update 幂等失败会无限重试）
+        # shell.run / file.list 等探索类工具让 LLM 通过 WMItem 警告自主决策，不硬拦
         if (
             repeat_action_count >= 3
             and repeat_action_tool in {"task.advance", "task.update"}
@@ -204,21 +206,6 @@ class BehaviorTracker:
                     "本轮强制进入 wait 状态。\n"
                     "必须改变策略：先通过 task.list 确认任务当前真实状态，"
                     "再决定下一步行动；不要直接再次调用 task.advance/update。"
-                )
-            )
-
-        # 补强硬门控：连续重复的 shell.run / file.list 直接止损，避免高成本空转。
-        if (
-            repeat_action_count >= 3
-            and repeat_action_tool in {"shell.run", "file.list"}
-            and tool_id == repeat_action_tool
-        ):
-            return JudgmentOutput.wait(
-                reason=(
-                    f"[反循环门控] 已连续 {repeat_action_count} 次调用 {repeat_action_tool}，"
-                    "本轮强制进入 wait 状态。\n"
-                    "必须改变策略：你已经收集了足够信息，停止继续探索，"
-                    "转为根据已有信息做出决策或总结结论。"
                 )
             )
 
