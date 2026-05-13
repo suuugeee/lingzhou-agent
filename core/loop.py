@@ -143,6 +143,7 @@ class CognitionLoop:
         self._pending_tier: str | None = None
         self._pending_idle_gap: float | None = None  # LLM 通过 model_strategy.next_idle_gap_secs 动态调控等待时长
         self._pending_routing_overrides: dict[str, str] | None = None  # LLM 通过 routing_overrides 临时覆盖 tier→model
+        self._pending_thinking_override: str | None = None  # LLM 通过 thinking_override 覆盖下轮 thinking 等级
         _cfg_file = cfg._base_dir / "lingzhou.json"
         self._cfg_file: Path = _cfg_file
         self._cfg_mtime: float = _cfg_file.stat().st_mtime if _cfg_file.exists() else 0.0
@@ -531,6 +532,7 @@ class CognitionLoop:
             #   有用户消息 → chat_thinking（默认 low，~3-10s，保证响应性）
             #   自主循环   → autonomous_thinking（默认 medium，~10-20s，平衡质量与速度）
             #   两者均与顶层 thinking 相同时不传 override（保持原有行为）
+            #   LLM 通过 model_strategy.thinking_override 可在此基础上进一步覆盖
             _thinking_override: str | None = None
             if user_message:
                 if cfg.loop.chat_thinking != cfg.thinking:
@@ -538,6 +540,9 @@ class CognitionLoop:
             else:
                 if cfg.loop.autonomous_thinking != cfg.thinking:
                     _thinking_override = cfg.loop.autonomous_thinking
+            # LLM 上轮表达的 thinking_override 优先级最高（覆盖自动策略）
+            if self._pending_thinking_override is not None:
+                _thinking_override = self._pending_thinking_override
             action = await self._judgment.decide(
                 percept, self._wm, self._task_store, self._episodic, self._semantic, self._emotion,
                 user_message=user_message,
@@ -551,8 +556,9 @@ class CognitionLoop:
                 prefer_tier=self._pending_tier,
                 routing_overrides=self._pending_routing_overrides,
             )
-            # 消费上一轮 LLM 表达的 tier 偏好（用完即清）
+            # 消费上一轮 LLM 表达的 tier 偏好和 thinking 覆盖（用完即清）
             self._pending_tier = None
+            self._pending_thinking_override = None
             self._ticks_since_judge = 0
 
         # 决策结果输出到 stdout
@@ -737,6 +743,25 @@ class CognitionLoop:
                 }
                 if _valid:
                     self._pending_routing_overrides = _valid
+
+        # LLM 通过 model_strategy.thinking_override 覆盖下轮 thinking 等级
+        _VALID_THINKING = {"off", "minimal", "low", "medium", "high"}
+        _raw_thinking = (action.model_strategy or {}).get("thinking_override")
+        if _raw_thinking is None:
+            self._pending_thinking_override = None
+        elif isinstance(_raw_thinking, str) and _raw_thinking in _VALID_THINKING:
+            self._pending_thinking_override = _raw_thinking
+        # 无效字符串则保持不变（不清除上次有效设置）
+
+        # LLM 通过 model_strategy.thinking_override 覆盖下轮 thinking 等级（一次性）
+        _VALID_THINKING = {"off", "minimal", "low", "medium", "high"}
+        _raw_thinking = (action.model_strategy or {}).get("thinking_override")
+        if _raw_thinking is None:
+            pass  # 未设置，保持上轮状态（不清除）
+        elif isinstance(_raw_thinking, str) and _raw_thinking in _VALID_THINKING:
+            self._pending_thinking_override = _raw_thinking
+        else:
+            self._pending_thinking_override = None  # null 或无效字符串 = 清除
 
         # 情绪状态持久化（跨重启情绪连续性，与 ethos_baseline 对称）
         await self._task_store.set_fact("soul:emotion_state", json.dumps({

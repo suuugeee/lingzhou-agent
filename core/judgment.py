@@ -127,7 +127,7 @@ class JudgmentOutput:
                     next_step="",
                     model_strategy={},
                 )
-            return cls.wait(reason=f"LLM 输出解析失败: {text[:100]}")
+            return cls.wait(reason=f"LLM 输出解析失败: {text}")
 
         return cls(
             decision=str(data.get("decision", "wait")).lower(),
@@ -418,6 +418,7 @@ class JudgmentLayer:
                 "cost_level": self._cost_level_for_model(model_ref, reasoning),
                 "latency_level": self._latency_level_for_model(model_ref, reasoning),
                 "context_window": spec.get("context_window") or self._cfg.context_window_tokens,
+                "current_thinking": self._cfg.thinking,
                 "last_error": last_error,
                 "last_error_code": health.last_code or None,
                 "cooldown_remaining_sec": max(0, int(health.cooldown_until - time.time())),
@@ -457,6 +458,10 @@ class JudgmentLayer:
                 "• routing_overrides：临时覆盖 tier→model 映射，格式 {\"reader\": \"bailian/qwen3.6-plus\"}。"
                 "可选 tier: reader / reasoner / repair。从 catalog_models 中选择可用模型。"
                 "设为 {} 可清除覆盖。覆盖持久到显式修改，无需每轮重复设置。\n"
+                "• thinking_override：覆盖下一轮的 thinking 等级，可选局 off / minimal / low / medium / high。"
+                "当前等级见 available_models[].current_thinking。"
+                "示例：下轮需要深度推理 → thinking_override=\"high\"；下轮只需快速响应 → thinking_override=\"low\"。"
+                "设为 null 或不填则恢复全局配置。仅对支持 thinking 的模型有效（reasoning=true）。\n"
                 "没有明确偏好时用 default，进化机制将决定。"
             ),
             "budget_state": {
