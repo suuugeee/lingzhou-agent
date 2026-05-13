@@ -176,12 +176,17 @@ async def _interactive(
 
 
 def _read_line() -> str:
-    """在 executor 线程中打印提示符并读取一行输入。"""
+    """在 executor 线程中打印提示符并读取一行输入。
+
+    服务器环境 locale 可能不是 UTF-8（如 POSIX/C locale），
+    直接读 buffer 字节后手动 decode(errors='replace') 避免 UnicodeDecodeError。
+    """
     import sys
     try:
         sys.stdout.write("[你] ")
         sys.stdout.flush()
-        return sys.stdin.readline()
+        raw = sys.stdin.buffer.readline()
+        return raw.decode("utf-8", errors="replace")
     except (EOFError, KeyboardInterrupt, OSError):
         return ""
 
