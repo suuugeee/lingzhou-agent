@@ -110,9 +110,15 @@ async def _interactive(
     store: "TaskStore",
     session_id: str,
     agent_name: str,
-    reply_timeout: int = 300,
+    reply_timeout: int = 300,  # noqa: ARG001 — 保留签名兼容，异步模式不再阻塞等待
 ) -> None:
-    """交互式对话 REPL：持续接收用户输入，显示 loop 回复。"""
+    """交互式对话 REPL：发送消息不阻塞，回复异步展示。
+
+    设计：
+      - _input_task  读取用户输入，写入 DB，立即返回等待下一条
+      - _reply_task  持续轮询 DB，新回复到达时随时打印
+      两个 task 并发运行，互不阻塞。LLM 慢/宕机时用户可继续输入。
+    """
     # 显示最近历史（最多 10 条）
     history = await store.get_chat_messages_since(0, session_id)
     last_id = 0
@@ -129,48 +135,54 @@ async def _interactive(
 
     console.print(Panel(
         f"已连接到 [bold green]{agent_name}[/bold green]\n"
-        "[dim]输入消息后按 Enter 发送。Ctrl-C 退出。[/dim]",
+        "[dim]输入消息后按 Enter 发送（无需等待回复）。Ctrl-C 退出。[/dim]",
         title="💬 Chat",
         border_style="green",
     ))
 
-    loop = asyncio.get_event_loop()
+    ev_loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+
+    async def _input_task() -> None:
+        """读取用户输入，写入 DB，立即允许下一条输入。"""
+        try:
+            while not stop.is_set():
+                line = await ev_loop.run_in_executor(None, _read_line)
+                if not line:  # EOF / Ctrl-D
+                    stop.set()
+                    break
+                user_text = line.strip()
+                if user_text:
+                    await store.add_chat_message("user", user_text, session_id)
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            stop.set()
+
+    async def _reply_task(cur_last_id: int) -> None:
+        """持续轮询 DB，新 assistant 回复到达时立即打印。"""
+        try:
+            while not stop.is_set():
+                await asyncio.sleep(0.5)
+                new_msgs = await store.get_chat_messages_since(cur_last_id, session_id)
+                for m in new_msgs:
+                    cur_last_id = m["id"]
+                    if m["role"] == "assistant":
+                        # 换行前缀避免回复打断用户正在输入的提示符行
+                        console.print(f"\n[bold green][{agent_name}][/bold green] {m['content']}")
+        except asyncio.CancelledError:
+            pass
+
+    t_input = asyncio.create_task(_input_task())
+    t_reply = asyncio.create_task(_reply_task(last_id))
 
     try:
-        while True:
-            # 阻塞等待用户输入（executor 线程里打印提示符 + readline）
-            line = await loop.run_in_executor(None, _read_line)
-            if not line:  # EOF / Ctrl-D
-                break
-
-            user_text = line.strip()
-            if not user_text:
-                continue
-
-            await store.add_chat_message("user", user_text, session_id)
-
-            # 等待回复（最长 reply_timeout 秒，默认来自 cfg.loop.chat_reply_timeout）
-            wait_start = time.monotonic()
-            replied = False
-
-            while time.monotonic() - wait_start < reply_timeout:
-                await asyncio.sleep(0.5)
-                new_msgs = await store.get_chat_messages_since(last_id, session_id)
-                for m in new_msgs:
-                    last_id = m["id"]
-                    if m["role"] == "assistant":
-                        console.print(f"[bold green][{agent_name}][/bold green] {m['content']}")
-                        replied = True
-                if replied:
-                    break
-
-            if not replied:
-                console.print(
-                    f"[yellow](等待超时 {reply_timeout}s。请确认 loop 正在运行：[bold]lingzhou run -d[/bold])[/yellow]"
-                )
-
-    except KeyboardInterrupt:
+        # 等待用户主动退出（EOF / Ctrl-D）；Ctrl-C 由外层 KeyboardInterrupt 捕获
+        await t_input
+    except (KeyboardInterrupt, asyncio.CancelledError):
         pass
+    finally:
+        stop.set()
+        t_reply.cancel()
+        await asyncio.gather(t_input, t_reply, return_exceptions=True)
 
     console.print("\n[dim]再见。[/dim]")
 
