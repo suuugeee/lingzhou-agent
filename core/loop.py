@@ -30,7 +30,7 @@ from core.perception import (
     build_perception_replay, build_emotion_replay,
     derive_ethos_state, compute_judgment_signals,
 )
-from core.judgment import JudgmentLayer, JudgmentOutput
+from core.judgment import JudgmentLayer, JudgmentOutput, READER_TOOLS
 from core.execution import ExecutionLayer
 from core.evolution import EvolutionEngine
 from memory.working import WorkingMemory, WMItem
@@ -743,7 +743,11 @@ class CognitionLoop:
         if _next_tier in {"reader", "reasoner", "repair"}:
             self._pending_tier = _next_tier
         else:
-            self._pending_tier = None
+            # 自动推断：若本轮工具是 reader 类且 LLM 未显式设 tier，下轮自动用 reader
+            if action.decision == "act" and action.chosen_action_id in READER_TOOLS:
+                self._pending_tier = "reader"
+            else:
+                self._pending_tier = None
 
         # LLM 通过 model_strategy.next_idle_gap_secs 动态调控下一轮空闲等待时长
         # 有任务时有效范围 2-30s，无任务时 5-300s

@@ -26,7 +26,7 @@ from provider.catalog import lookup_model
 
 _log = logging.getLogger("lingzhou.judgment")
 
-# 低成本读取/枚举类工具 → reader tier
+# 低成本读取/枚举类工具 → reader tier（也被 loop.py 用于自动 tier 推断）
 _READER_TOOLS = frozenset({
     "file.list", "file.read",
     "memory.get_fact",
@@ -35,6 +35,7 @@ _READER_TOOLS = frozenset({
     "task.list",
     "failure.dismiss",
 })
+READER_TOOLS = _READER_TOOLS  # 公开别名，供外部模块引用
 # 写入/推理/高风险工具 → reasoner tier
 _REASONER_TOOLS = frozenset({
     "shell.run",
