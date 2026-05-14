@@ -208,7 +208,16 @@ class PromptsConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
-    working_capacity: int = Field(default=20, ge=1, description="工作记忆最大条目数")
+    working_capacity: int = Field(default=20, ge=1, description="工作记忆最大条目数（条目数上限兜底）")
+    wm_token_budget: int = Field(
+        default=8000, ge=256,
+        description=(
+            "工作记忆 token 预算。pressure 按 total_tokens/wm_token_budget 计算，"
+            "比条目数更准确反映对 LLM 上下文的实际占用。"
+            "设为 0 回退到纯条目数压力（不推荐）。"
+            "建议设为 context_window 的 5-10%：131K 模型 → 6000-13000；1M 模型 → 50000-100000。"
+        ),
+    )
     episodic_max_chars: int = Field(default=40000, ge=100, description="注入 context 的情节记忆字符上限")
     semantic_top_k: int = Field(default=5, ge=1, description="语义检索返回条目数")
     failure_limit: int = Field(default=10, ge=1, description="注入 bundle 的失败记录数")

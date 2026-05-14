@@ -24,6 +24,13 @@ class WMItem:
     def __post_init__(self) -> None:
         self._neg_priority = -self.priority
 
+    @property
+    def estimated_tokens(self) -> int:
+        """粗估 token 数：中英混合取 len//4 作保守下界，中文字符按 2x 修正。"""
+        n = len(self.content)
+        zh = sum(1 for c in self.content if "\u4e00" <= c <= "\u9fff")
+        return max(1, (n + zh) // 4)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "kind": self.kind,
@@ -34,23 +41,42 @@ class WMItem:
 
 
 class WorkingMemory:
-    """容量有界的工作记忆。线程/协程安全（asyncio 单线程模型下天然安全）。"""
+    """容量有界的工作记忆。线程/协程安全（asyncio 单线程模型下天然安全）。
 
-    def __init__(self, capacity: int = 20) -> None:
+    双重上限：
+      - capacity：条目数上限（防止无限碎片化写入）
+      - token_budget：token 估算上限（压力指标，超出时驱逐低优条目）
+    pressure 属性基于 token 估算，比条目数更准确反映对 LLM 上下文的实际占用。
+    """
+
+    def __init__(self, capacity: int = 20, token_budget: int = 0) -> None:
         self._capacity = capacity
+        # token_budget=0 表示禁用 token 压力（回退到条目数压力）
+        self._token_budget = token_budget
         self._items: list[WMItem] = []
 
     @property
+    def total_tokens(self) -> int:
+        """当前 WM 所有条目的估算 token 总数。"""
+        return sum(item.estimated_tokens for item in self._items)
+
+    @property
     def pressure(self) -> float:
-        """当前占用率 [0, 1]，供感知层判断是否触发整合任务。"""
+        """当前压力 [0, 1]。优先用 token 估算；未配置 token_budget 时回退到条目数比例。"""
+        if self._token_budget > 0:
+            return min(1.0, self.total_tokens / self._token_budget)
         return len(self._items) / self._capacity if self._capacity > 0 else 0.0
 
     def add(self, item: WMItem) -> None:
-        """添加条目，若超容量则驱逐优先级最低的。"""
+        """添加条目，若超条目上限或超 token 预算则驱逐优先级最低的。"""
         heapq.heappush(self._items, item)
+        # 先按条目数收敛
         while len(self._items) > self._capacity:
-            # heappop 弹出最小（即负优先级最大 = 真实优先级最低）
             heapq.heappop(self._items)
+        # 再按 token 预算收敛（至少保留 1 条）
+        if self._token_budget > 0:
+            while len(self._items) > 1 and self.total_tokens > self._token_budget:
+                heapq.heappop(self._items)
 
     def get_top(self, n: int | None = None) -> list[dict[str, Any]]:
         """按优先级降序返回前 n 条（不修改内部状态）。"""

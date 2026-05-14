@@ -918,7 +918,8 @@ class JudgmentLayer:
             "emotion_arousal": f"{emotion.arousal:.2f}",
             "emotion_dominant": emotion.dominant or "（未确定）",
             "emotion_regulation": f"{emotion.regulation.strategy}（{emotion.regulation.reason}）" if emotion.regulation.reason else emotion.regulation.strategy,
-            "wm_section": _fmt_wm(_wm_items, wm_count=len(wm), wm_capacity=wm._capacity),
+            "wm_section": _fmt_wm(_wm_items, wm_count=len(wm), wm_capacity=wm._capacity,
+                                   wm_tokens=wm.total_tokens, wm_token_budget=wm._token_budget),
             "failures_section": _fmt_failures(failures),
             "episodic_section": episodic_text or "（暂无情节记忆）",
             "entity_section": entity_section,
@@ -994,8 +995,12 @@ def _fmt_current_time() -> str:
     return f"当前时间: {local_iso}\n参考 UTC: {utc_str}"
 
 
-def _fmt_wm(items: list[dict[str, Any]], wm_count: int = 0, wm_capacity: int = 20) -> str:
-    header = f"[{wm_count}/{wm_capacity}，{wm_count / wm_capacity:.0%}]"
+def _fmt_wm(items: list[dict[str, Any]], wm_count: int = 0, wm_capacity: int = 20,
+             wm_tokens: int = 0, wm_token_budget: int = 0) -> str:
+    if wm_token_budget > 0:
+        header = f"[{wm_count}/{wm_capacity} 条，~{wm_tokens} tokens / {wm_token_budget} 预算，{wm_tokens / wm_token_budget:.0%}]"
+    else:
+        header = f"[{wm_count}/{wm_capacity}，{wm_count / wm_capacity:.0%}]"
     if not items:
         return f"{header} （工作记忆为空）"
     # 反循环感知条目（self_awareness / heartbeat 中的循环警告）强制置顶，

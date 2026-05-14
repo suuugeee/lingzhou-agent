@@ -96,7 +96,7 @@ class CognitionLoop:
         self._registry.discover(tools_dir)
 
         # 记忆层
-        self._wm = WorkingMemory(capacity=cfg.memory.working_capacity)
+        self._wm = WorkingMemory(capacity=cfg.memory.working_capacity, token_budget=cfg.memory.wm_token_budget)
         self._episodic = EpisodicMemory(cfg.memory_dir, max_events=cfg.memory.max_events)
         self._task_store = TaskStore(cfg.db_path)
 
