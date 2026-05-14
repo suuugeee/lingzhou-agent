@@ -108,16 +108,31 @@ class LoopConfig(BaseModel):
     active_idle_gap: int = Field(
         default=15, ge=2,
         description=(
-            "有活跃任务但 decision=wait/pause 时的等待上限（秒），默认 15s。"
-            "LLM 通过 model_strategy.next_idle_gap_secs 可覆盖（有任务时有效范围 2-30s）。"
+            "有活跃任务但 decision=wait/pause 时的默认等待上限（秒）。"
+            "LLM 未表达偏好时使用此值作为备用；如设了 idle_with_task_bounds 面板 LLM 可覆盖的范围。"
         ),
     )
     max_idle_gap: int = Field(
         default=60, ge=5,
         description=(
-            "无活跃任务时的最长等待上限（秒），默认 60s。"
+            "无活跃任务时的默认等待上限（秒）。"
             "chat 消息、task 状态变化任一事件即立即唤醒，不等满此值。"
-            "LLM 通过 model_strategy.next_idle_gap_secs 可覆盖（无任务时有效范围 5-300s）。"
+            "LLM 未表达偏好时使用；如设了 idle_no_task_bounds 面板 LLM 可覆盖的范围。"
+        ),
+    )
+    idle_with_task_bounds: list[float] = Field(
+        default=[2.0, 30.0],
+        description=(
+            "[min, max]：LLM 通过 next_idle_gap_secs 在有活跃任务时可指定的等待时长范围（秒）。"
+            "对 min_act_gap 后的短等待同样起下限保护作用（防止紧循环）。"
+            "示例：[1.0, 60.0] 表示 LLM 最快 1s 最慢 60s。"
+        ),
+    )
+    idle_no_task_bounds: list[float] = Field(
+        default=[5.0, 300.0],
+        description=(
+            "[min, max]：LLM 通过 next_idle_gap_secs 在无活跃任务时可指定的等待时长范围（秒）。"
+            "示例：[10.0, 600.0] 表示籺闲时 LLM 至少等 10s、最多 600s。"
         ),
     )
     wake_poll_interval: float = Field(default=0.2, gt=0, description="事件轮询粒度（秒），越小响应越快但 CPU 开销越高")

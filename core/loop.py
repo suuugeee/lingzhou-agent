@@ -313,14 +313,17 @@ class CognitionLoop:
                 # LLM 随时可通过 model_strategy.next_idle_gap_secs 覆盖
                 after_task = await self._task_store.get_active()
                 if self._last_decision == "act" and after_task is not None:
-                    await asyncio.sleep(cfg.loop.min_act_gap)
+                    # act 后短等：让副作用落地，但用事件驱动（chat 消息到了也能立即唤醒）
+                    _min_w = cfg.loop.idle_with_task_bounds[0] if cfg.loop.idle_with_task_bounds else cfg.loop.min_act_gap
+                    _act_gap = max(float(_min_w), float(cfg.loop.min_act_gap))
+                    await self._wait_for_event(_act_gap, after_task)
                 else:
                     if self._pending_idle_gap is not None:
                         _gap = self._pending_idle_gap
                     elif after_task is not None:
-                        _gap = cfg.loop.active_idle_gap   # 有任务：短等待
+                        _gap = cfg.loop.active_idle_gap   # 有任务：默认短等待
                     else:
-                        _gap = cfg.loop.max_idle_gap      # 无任务：长等待
+                        _gap = cfg.loop.max_idle_gap      # 无任务：默认长等待
                     await self._wait_for_event(_gap, after_task)
                 # 事件驱动等待结束后检测配置变更（模型热换）
                 await self._maybe_hot_reload_provider()
@@ -748,9 +751,12 @@ class CognitionLoop:
                 _gap_f = float(_raw_gap)
                 _has_task = (await self._task_store.get_active()) is not None
                 if _has_task:
-                    self._pending_idle_gap = max(2.0, min(30.0, _gap_f))
+                    _bounds = cfg.loop.idle_with_task_bounds
+                    _lo, _hi = (float(_bounds[0]), float(_bounds[1])) if len(_bounds) >= 2 else (2.0, 30.0)
                 else:
-                    self._pending_idle_gap = max(5.0, min(300.0, _gap_f))
+                    _bounds = cfg.loop.idle_no_task_bounds
+                    _lo, _hi = (float(_bounds[0]), float(_bounds[1])) if len(_bounds) >= 2 else (5.0, 300.0)
+                self._pending_idle_gap = max(_lo, min(_hi, _gap_f))
             except (TypeError, ValueError):
                 self._pending_idle_gap = None
         else:
