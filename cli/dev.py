@@ -174,6 +174,7 @@ def model(
                 "mode": defaults["mode"],
                 "base_url": defaults["base_url"],
                 "api_key_env": defaults["api_key_env"],
+                "auth_profile_id": f"{chosen_provider}:default",
             }
 
             # copilot 走 auth login 的 token exchange 链，不需要手动填 key

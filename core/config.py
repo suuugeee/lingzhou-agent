@@ -20,6 +20,10 @@ class ProviderDefinition(BaseModel):
     type: str = "openai_compat"
     base_url: str
     api_key_env: str = "OPENAI_API_KEY"
+    auth_profile_id: str = Field(
+        default="",
+        description="可选 auth profile id（如 'bailian:default'），用于从 ~/.lingzhou/auth-profiles.json 读取 token",
+    )
     mode: str = Field(
         default="openai",
         description=(
@@ -58,6 +62,19 @@ class ProviderDefinition(BaseModel):
             except Exception:
                 pass
 
+        # 3. 回退：~/.lingzhou/auth-profiles.json（需显式配置 auth_profile_id）
+        if self.auth_profile_id:
+            try:
+                from auth_store import get_auth_profile
+
+                profile = get_auth_profile(self.auth_profile_id)
+                if isinstance(profile, dict):
+                    token = str(profile.get("token", "")).strip()
+                    if token:
+                        return token
+            except Exception:
+                pass
+
         if self.mode == "copilot":
             raise EnvironmentError(
                 f"未找到 {self.api_key_env!r} 的 GitHub token。\n"
@@ -67,9 +84,10 @@ class ProviderDefinition(BaseModel):
             )
 
         raise EnvironmentError(
-            f"未找到环境变量 {self.api_key_env!r}。\n"
+            f"未找到 {self.api_key_env!r}（环境变量/credentials/auth-profile 均为空）。\n"
             f"请执行以下任一操作：\n"
-            f"  export {self.api_key_env}=your_token"
+            f"  export {self.api_key_env}=your_token\n"
+            f"  lingzhou auth set-token --provider <provider>"
         )
 
 

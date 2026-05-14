@@ -284,3 +284,46 @@ def auth_copilot(
 ) -> None:
     """Copilot 登录的兼容别名。"""
     _login_copilot_impl(config, force, method=method, oauth_client_id=oauth_client_id)
+
+
+@auth_app.command("set-token")
+def auth_set_token(
+    provider: Annotated[str, typer.Option("--provider", "-p", help="provider 名称，如 bailian / copilot")],
+    token: Annotated[str, typer.Option("--token", help="访问 token", prompt=True, hide_input=True)],
+    env_name: Annotated[str, typer.Option("--env", help="写入 credentials.json 的键名；空则按 provider 自动推断")] = "",
+    profile_id: Annotated[str, typer.Option("--profile-id", help="auth profile id；空则自动使用 <provider>:default")] = "",
+) -> None:
+    """写入通用 provider token（auth-profiles + legacy credentials）。
+
+    适用于 bailian/openai_compat 等 provider。
+    """
+    provider_name = provider.strip().lower()
+    if not provider_name:
+        console.print("[red]provider 不能为空[/red]")
+        raise typer.Exit(1)
+
+    profile = profile_id.strip() or (
+        COPILOT_PROFILE_ID if provider_name == "copilot" else f"{provider_name}:default"
+    )
+    env_key = env_name.strip()
+    if not env_key:
+        env_key = {
+            "bailian": "DASHSCOPE_API_KEY",
+            "copilot": "GITHUB_TOKEN",
+        }.get(provider_name, f"{provider_name.upper()}_API_KEY")
+
+    set_token_profile(profile_id=profile, provider=provider_name, token=token)
+
+    legacy = load_legacy_credentials()
+    legacy[env_key] = token
+    save_legacy_credentials(legacy)
+
+    console.print(
+        f"[green]✓ token 已保存[/green]\n"
+        f"  provider: [dim]{provider_name}[/dim]\n"
+        f"  profile:  [dim]{profile}[/dim]\n"
+        f"  env key:  [dim]{env_key}[/dim]\n"
+        f"  auth:     [dim]{AUTH_PROFILES_PATH}[/dim]\n"
+        f"  legacy:   [dim]{LEGACY_CREDENTIALS_PATH}[/dim]\n"
+        "  [dim]提示：若要优先使用 auth profile，请在对应 provider 配置中设置 auth_profile_id。[/dim]"
+    )
