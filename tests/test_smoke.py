@@ -2635,6 +2635,26 @@ def test_behavior_list_result_aware():
     assert any("行为信号" in i.content for i in same), "同路径且结果相同，才应触发 file.list 重复信号"
 
 
+def test_behavior_explore_awareness_requires_task_context():
+    from core.behavior_tracker import BehaviorTracker
+
+    tracker = BehaviorTracker()
+    items = []
+    for _ in range(10):
+        items = tracker.on_act("file.list", "/root", task_id=None)
+
+    assert items == []
+
+
+def test_next_thinking_override_is_one_shot_and_strict():
+    from core.loop import _next_thinking_override
+
+    assert _next_thinking_override({"thinking_override": "low"}) == "low"
+    assert _next_thinking_override({"thinking_override": "invalid"}) is None
+    assert _next_thinking_override({}) is None
+    assert _next_thinking_override(None) is None
+
+
 def test_action_made_progress_result_aware():
     from core.judgment import JudgmentOutput
     from core.loop import _action_made_progress, _result_fingerprint

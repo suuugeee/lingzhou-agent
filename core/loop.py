@@ -101,6 +101,14 @@ def _clip_reply_for_log(text: str, limit: int = _LOG_REPLY_CHARS) -> str:
     return cleaned[:limit] + "..."
 
 
+def _next_thinking_override(model_strategy: dict[str, Any] | None) -> str | None:
+    raw = (model_strategy or {}).get("thinking_override")
+    valid = {"off", "minimal", "low", "medium", "high"}
+    if isinstance(raw, str) and raw in valid:
+        return raw
+    return None
+
+
 def _action_key_param(params: dict[str, Any] | None) -> str:
     """提取动作的主键参数，用于行为追踪与 WM 前缀。"""
     p = params or {}
@@ -1607,24 +1615,8 @@ class CognitionLoop:
                     self._pending_routing_overrides = _valid
                     await self._task_store.set_fact("pref:routing_overrides", json.dumps(_valid), scope="system")
 
-        # LLM 通过 model_strategy.thinking_override 覆盖下轮 thinking 等级
-        _VALID_THINKING = {"off", "minimal", "low", "medium", "high"}
-        _raw_thinking = (action.model_strategy or {}).get("thinking_override")
-        if _raw_thinking is None:
-            self._pending_thinking_override = None
-        elif isinstance(_raw_thinking, str) and _raw_thinking in _VALID_THINKING:
-            self._pending_thinking_override = _raw_thinking
-        # 无效字符串则保持不变（不清除上次有效设置）
-
-        # LLM 通过 model_strategy.thinking_override 覆盖下轮 thinking 等级（一次性）
-        _VALID_THINKING = {"off", "minimal", "low", "medium", "high"}
-        _raw_thinking = (action.model_strategy or {}).get("thinking_override")
-        if _raw_thinking is None:
-            pass  # 未设置，保持上轮状态（不清除）
-        elif isinstance(_raw_thinking, str) and _raw_thinking in _VALID_THINKING:
-            self._pending_thinking_override = _raw_thinking
-        else:
-            self._pending_thinking_override = None  # null 或无效字符串 = 清除
+        # LLM 通过 model_strategy.thinking_override 一次性覆盖下轮 thinking 等级；未设置或无效值都视为不覆盖。
+        self._pending_thinking_override = _next_thinking_override(action.model_strategy)
 
         # 情绪状态持久化（跨重启情绪连续性，与 ethos_baseline 对称）
         await self._task_store.set_fact("soul:emotion_state", json.dumps({

@@ -101,25 +101,30 @@ class BehaviorTracker:
         items: list[WMItem] = []
 
         # 探索预算感知（file.list 和 file.read 均计入）
-        if task_id != self._explore_task_id:
-            self._explore_task_id = task_id
+        if not task_id:
+            self._explore_task_id = None
             self._explore_count = 0
             self._explore_warned = set()
-        if tool_id in _EXPLORE_TOOLS:
-            self._explore_count += 1
-        for thresh in _EXPLORE_THRESHOLDS:
-            if self._explore_count >= thresh and thresh not in self._explore_warned:
-                self._explore_warned.add(thresh)
-                _log.warning("[explore-awareness] 任务 %s 已探索 %d 次", task_id, self._explore_count)
-                items.append(WMItem(
-                    kind="self_awareness",
-                    content=(
-                        f"[自我感知] 当前任务已执行 {self._explore_count} 次文件探索，"
-                        "请评估是否已有足够信息推进或完成任务。继续探索的边际收益正在递减。"
-                    ),
-                    priority=0.92,
-                ))
-                break  # 每次 tick 最多触发一个梯度
+        else:
+            if task_id != self._explore_task_id:
+                self._explore_task_id = task_id
+                self._explore_count = 0
+                self._explore_warned = set()
+            if tool_id in _EXPLORE_TOOLS:
+                self._explore_count += 1
+            for thresh in _EXPLORE_THRESHOLDS:
+                if self._explore_count >= thresh and thresh not in self._explore_warned:
+                    self._explore_warned.add(thresh)
+                    _log.warning("[explore-awareness] 任务 %s 已探索 %d 次", task_id, self._explore_count)
+                    items.append(WMItem(
+                        kind="self_awareness",
+                        content=(
+                            f"[自我感知] 当前任务已执行 {self._explore_count} 次文件探索，"
+                            "请评估是否已有足够信息推进或完成任务。继续探索的边际收益正在递减。"
+                        ),
+                        priority=0.92,
+                    ))
+                    break  # 每次 tick 最多触发一个梯度
 
         if tool_id in {"file.read", "file.list"}:
             return items  # file.read / file.list streak 由结果感知处理
