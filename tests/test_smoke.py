@@ -168,10 +168,39 @@ def test_chat_erase_last_input_echo_when_tty(monkeypatch):
     assert fake_stdout.getvalue() == "\x1b[1A\r\x1b[2K\r"
 
 
-def test_chat_input_prompt_prefers_agent_name_then_session_id():
+def test_chat_infer_user_title_from_session_history_prefers_explicit_user_identity():
+    from cli.chat import _infer_user_title_from_messages
+
+    messages = [
+        {"role": "assistant", "content": "爸爸，我先确认一下。"},
+        {"role": "user", "content": "你可以叫我老爹"},
+    ]
+
+    assert _infer_user_title_from_messages(messages) == "老爹"
+
+
+def test_chat_infer_user_title_from_session_history_uses_assistant_address_when_available():
+    from cli.chat import _infer_user_title_from_messages
+
+    messages = [
+        {"role": "assistant", "content": "爸爸，我先确认一下该目录结构。"},
+    ]
+
+    assert _infer_user_title_from_messages(messages) == "爸爸"
+
+
+def test_chat_parse_user_title_from_llm_output_supports_plain_and_json():
+    from cli.chat import _parse_user_title_from_llm_output
+
+    assert _parse_user_title_from_llm_output("爸爸") == "爸爸"
+    assert _parse_user_title_from_llm_output('{"user_title": "老爹"}') == "老爹"
+    assert _parse_user_title_from_llm_output("NONE") == ""
+
+
+def test_chat_input_prompt_prefers_user_title_then_session_id():
     from cli.chat import _chat_input_prompt
 
-    assert _chat_input_prompt("小懒", "chat-42") == "小懒> "
+    assert _chat_input_prompt("爸爸", "chat-42") == "爸爸> "
     assert _chat_input_prompt("", "chat-42") == "chat-42> "
     assert _chat_input_prompt("", "") == "chat> "
 
@@ -4276,6 +4305,57 @@ async def _file_edit_json_string_edits():
 
         content = await file_read({"path": str(fpath)}, ctx)
         assert content.summary == "v = 2\n"
+
+
+def test_file_edit_resolves_workspace_logical_path_for_existing_file():
+    asyncio.run(_file_edit_resolves_workspace_logical_path_for_existing_file())
+
+
+async def _file_edit_resolves_workspace_logical_path_for_existing_file():
+    from tools.file import file_edit
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        workspace = root / ".lingzhou" / "workspace"
+        workspace.mkdir(parents=True)
+        target = workspace / "MEMORY.md"
+        target.write_text("hello\nworld\n", encoding="utf-8")
+
+        wrong_path = root / "root" / "lingzhou" / "MEMORY.md"
+        ctx = _tool_ctx(workspace_dir=str(workspace))
+
+        res = await file_edit(
+            {"path": str(wrong_path), "edits": [{"oldText": "world", "newText": "dad"}]},
+            ctx,
+        )
+
+        assert res.error is None
+        assert target.read_text(encoding="utf-8") == "hello\ndad\n"
+        assert not wrong_path.exists()
+
+
+def test_file_write_resolves_workspace_logical_path_for_existing_file():
+    asyncio.run(_file_write_resolves_workspace_logical_path_for_existing_file())
+
+
+async def _file_write_resolves_workspace_logical_path_for_existing_file():
+    from tools.file import file_write
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        workspace = root / ".lingzhou" / "workspace"
+        workspace.mkdir(parents=True)
+        target = workspace / "MEMORY.md"
+        target.write_text("old\n", encoding="utf-8")
+
+        wrong_path = root / "root" / "lingzhou" / "MEMORY.md"
+        ctx = _tool_ctx(workspace_dir=str(workspace))
+
+        res = await file_write({"path": str(wrong_path), "content": "new\n"}, ctx)
+
+        assert res.error is None
+        assert target.read_text(encoding="utf-8") == "new\n"
+        assert not wrong_path.exists()
 
 
 def test_file_read_max_chars():

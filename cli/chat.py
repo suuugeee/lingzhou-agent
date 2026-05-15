@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 from pathlib import Path
 from typing import Annotated, Optional  # noqa: F401
@@ -40,9 +42,50 @@ def _erase_last_input_echo() -> None:
         pass
 
 
-def _chat_input_prompt(agent_name: str = "", session_id: str = "") -> str:
-    """优先使用对方 chat 名称；未知时退回 session/chat id。"""
-    label = str(agent_name or "").strip() or str(session_id or "").strip() or "chat"
+def _normalize_user_title(raw: str) -> str:
+    title = str(raw or "").strip().strip("[]()<>\"'`，,。.!！?？:：")
+    if not title or len(title) > 12 or any(ch.isspace() for ch in title):
+        return ""
+    blocked = {
+        "收到", "好的", "明白", "了解", "现在", "当前", "状态", "结果", "下一步", "进展", "回复",
+        "assistant", "user", "chat", "you",
+    }
+    return "" if title.lower() in blocked or title in blocked else title
+
+
+def _infer_user_title_from_messages(messages: list[dict[str, object]]) -> str:
+    """从当前 chat 会话历史中推断用户称谓。"""
+    user_patterns = (
+        re.compile(r"(?:你可以)?叫我([^\s，,。.!！?？:：]{1,12})"),
+        re.compile(r"我是([^\s，,。.!！?？:：]{1,12})"),
+        re.compile(r"我的称呼是([^\s，,。.!！?？:：]{1,12})"),
+    )
+    assistant_pattern = re.compile(r"^([^\s，,：:]{1,12})[，,:：]")
+
+    for msg in reversed(messages[-50:]):
+        role = str(msg.get("role") or "")
+        content = str(msg.get("content") or "").strip()
+        if not content:
+            continue
+        if role == "user":
+            for pattern in user_patterns:
+                match = pattern.search(content)
+                if match:
+                    title = _normalize_user_title(match.group(1))
+                    if title:
+                        return title
+        elif role == "assistant":
+            match = assistant_pattern.match(content)
+            if match:
+                title = _normalize_user_title(match.group(1))
+                if title:
+                    return title
+    return ""
+
+
+def _chat_input_prompt(user_title: str = "", session_id: str = "") -> str:
+    """优先使用会话中已识别的用户称谓；未知时退回 session/chat id。"""
+    label = str(user_title or "").strip() or str(session_id or "").strip() or "chat"
     return f"{label}> "
 
 
@@ -58,6 +101,75 @@ def _print_input_prompt(prompt: str) -> None:
         stdout.flush()
     except OSError:
         pass
+
+
+def _history_excerpt(messages: list[dict[str, object]], limit: int = 12) -> str:
+    lines: list[str] = []
+    for msg in messages[-limit:]:
+        role = str(msg.get("role") or "").strip() or "unknown"
+        content = " ".join(str(msg.get("content") or "").split()).strip()
+        if not content:
+            continue
+        if len(content) > 160:
+            content = content[:157] + "..."
+        lines.append(f"{role}: {content}")
+    return "\n".join(lines)
+
+
+def _parse_user_title_from_llm_output(raw: str) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+        if text.lower().startswith("json"):
+            text = text[4:].strip()
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            data = json.loads(text)
+        except Exception:
+            data = None
+        if isinstance(data, dict):
+            for key in ("user_title", "title", "appellation"):
+                if key in data:
+                    return _normalize_user_title(str(data.get(key) or ""))
+    head = text.splitlines()[0].strip()
+    if head.upper() in {"NONE", "NULL", "UNKNOWN", "UNSURE", "不确定", "未知", "无"}:
+        return ""
+    return _normalize_user_title(head)
+
+
+async def _infer_user_title_with_llm(provider: object, messages: list[dict[str, object]]) -> str:
+    excerpt = _history_excerpt(messages)
+    if not excerpt:
+        return ""
+
+    from provider.base import Message
+
+    raw = await provider.chat(
+        [
+            Message(
+                role="system",
+                content=(
+                    "你是一个只负责识别聊天中‘assistant 对 user 的当前称谓’的提取器。"
+                    "只输出一个称谓本身；若无法确定，输出 NONE。"
+                    "不要解释，不要输出多余文字。"
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    "从下面对话中识别 assistant 当前对 user 的称谓。"
+                    "优先使用 assistant 已经采用的称呼；若 user 明确说‘叫我 X’，也可用该称呼。"
+                    "若仍不明确，输出 NONE。\n\n"
+                    f"{excerpt}"
+                ),
+            ),
+        ],
+        temperature=0,
+        thinking_override="off",
+    )
+    return _parse_user_title_from_llm_output(raw)
 
 
 def chat(
@@ -115,7 +227,7 @@ async def _main(
         else:
             # 交互模式：从配置读 chat_reply_timeout
             interactive_timeout = cfg.loop.chat_reply_timeout
-            await _interactive(store, session_id, name_val, interactive_timeout)
+            await _interactive(store, cfg, session_id, name_val, interactive_timeout)
     finally:
         await store.close()
 
@@ -148,6 +260,7 @@ async def _ask_once(
 
 async def _interactive(
     store: "TaskStore",
+    cfg,
     session_id: str,
     agent_name: str,
     reply_timeout: int = 300,  # noqa: ARG001 — 保留签名兼容，异步模式不再阻塞等待
@@ -162,6 +275,7 @@ async def _interactive(
     # 显示最近历史（最多 10 条）
     history = await store.get_chat_messages_since(0, session_id)
     last_id = 0
+    prompt_state = {"value": _chat_input_prompt(_infer_user_title_from_messages(history), session_id)}
     if history:
         recent = history[-10:]
         last_id = history[-1]["id"]
@@ -179,22 +293,55 @@ async def _interactive(
         title="💬 Chat",
         border_style="green",
     ))
-    input_prompt = _chat_input_prompt(agent_name, session_id)
 
     ev_loop = asyncio.get_running_loop()
     stop = asyncio.Event()
+    title_task: asyncio.Task | None = None
+    title_provider = None
+
+    async def _refresh_prompt_from_history(*, redraw: bool = False) -> None:
+        inferred = _infer_user_title_from_messages(history)
+        if title_provider is not None:
+            try:
+                llm_title = await _infer_user_title_with_llm(title_provider, history)
+                if llm_title:
+                    inferred = llm_title
+            except Exception:
+                pass
+        prompt_state["value"] = _chat_input_prompt(inferred, session_id)
+        if redraw:
+            _print_input_prompt(prompt_state["value"])
+
+    def _schedule_prompt_refresh(*, redraw: bool = False) -> None:
+        nonlocal title_task
+        if title_task is not None and not title_task.done():
+            title_task.cancel()
+        title_task = asyncio.create_task(_refresh_prompt_from_history(redraw=redraw))
+
+    try:
+        from provider import create_provider
+
+        title_provider = create_provider(cfg)
+    except Exception:
+        title_provider = None
+
+    if history:
+        _schedule_prompt_refresh(redraw=False)
 
     async def _input_task() -> None:
         """读取用户输入，写入 DB，立即允许下一条输入。"""
         try:
             while not stop.is_set():
-                line = await ev_loop.run_in_executor(None, _read_line, input_prompt)
+                line = await ev_loop.run_in_executor(None, _read_line, prompt_state["value"])
                 if not line:  # EOF / Ctrl-D
                     stop.set()
                     break
                 user_text = line.strip()
                 if user_text:
                     await store.add_chat_message("user", user_text, session_id)
+                    history.append({"role": "user", "content": user_text})
+                    prompt_state["value"] = _chat_input_prompt(_infer_user_title_from_messages(history), session_id)
+                    _schedule_prompt_refresh(redraw=False)
                     _erase_last_input_echo()
                     # 告知用户消息已入队，loop 在后台处理（异步模式核心体验）
                     console.print("[dim]  ↑ 已发送，等待回复中…（可继续输入下一条）[/dim]")
@@ -209,10 +356,13 @@ async def _interactive(
                 new_msgs = await store.get_chat_messages_since(cur_last_id, session_id)
                 for m in new_msgs:
                     cur_last_id = m["id"]
+                    history.append({"role": str(m.get("role") or ""), "content": str(m.get("content") or "")})
+                    prompt_state["value"] = _chat_input_prompt(_infer_user_title_from_messages(history), session_id)
                     if m["role"] == "assistant":
                         # \n 前缀避免把回复直接挤到用户当前输入后面。
                         console.print(f"\n[bold green][{agent_name}][/bold green] {m['content']}\n")
-                        _print_input_prompt(input_prompt)
+                        _print_input_prompt(prompt_state["value"])
+                    _schedule_prompt_refresh(redraw=(m["role"] == "assistant"))
         except asyncio.CancelledError:
             pass
 
@@ -227,7 +377,14 @@ async def _interactive(
     finally:
         stop.set()
         t_reply.cancel()
-        await asyncio.gather(t_input, t_reply, return_exceptions=True)
+        if title_task is not None and not title_task.done():
+            title_task.cancel()
+        tasks = [t_input, t_reply]
+        if title_task is not None:
+            tasks.append(title_task)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if title_provider is not None:
+            await title_provider.close()
 
     console.print("\n[dim]再见。[/dim]")
 

@@ -81,6 +81,63 @@ def _resolve_read_path(path: Path) -> Path:
     return path
 
 
+def _workspace_dir(ctx: ToolContext) -> Path | None:
+    raw = getattr(getattr(ctx.config, "loop", None), "workspace_dir", "")
+    if not raw:
+        return None
+    try:
+        return Path(str(raw)).expanduser()
+    except (TypeError, ValueError):
+        return None
+
+
+def _workspace_candidate_path(path: Path, ctx: ToolContext) -> Path | None:
+    workspace = _workspace_dir(ctx)
+    if workspace is None:
+        return None
+
+    rels: list[Path] = []
+    if not path.is_absolute():
+        rels.append(path)
+
+    for anchor in ("workspace", "lingzhou", ".lingzhou"):
+        rel = _tail_after_anchor(path, anchor)
+        if rel is None:
+            continue
+        if rel.parts and rel.parts[0] == "workspace" and len(rel.parts) > 1:
+            rel = Path(*rel.parts[1:])
+        rels.append(rel)
+
+    if not rels:
+        return None
+
+    seen: set[str] = set()
+    for rel in rels:
+        key = str(rel)
+        if key in seen or key in ("", "."):
+            continue
+        seen.add(key)
+        candidate = workspace / rel
+        if candidate.exists() or candidate.parent.exists():
+            return candidate
+    return None
+
+
+def _resolve_mutation_path(path: Path, ctx: ToolContext) -> Path:
+    if path.exists():
+        return path
+
+    resolved = _resolve_read_path(path)
+    if resolved.exists():
+        return resolved
+
+    workspace_candidate = _workspace_candidate_path(path, ctx)
+    if workspace_candidate is not None:
+        return workspace_candidate
+
+    return path
+
+
 @tool(ToolManifest(
     name="file.list",
     description="列出目录内容。支持 shallow list，用于替代 shell.run 的 ls/find 场景。",
@@ -194,7 +251,7 @@ async def file_read(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     ],
 ))
 async def file_write(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    path = Path(params.get("path") or "").expanduser()
+    path = _resolve_mutation_path(Path(params.get("path") or "").expanduser(), ctx)
     content = params.get("content")
 
     if content is None:
@@ -233,7 +290,7 @@ async def file_write(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     ],
 ))
 async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    path = Path(params.get("path") or "").expanduser()
+    path = _resolve_mutation_path(Path(params.get("path") or "").expanduser(), ctx)
     edits_raw = params.get("edits")
 
     if not path.exists():
