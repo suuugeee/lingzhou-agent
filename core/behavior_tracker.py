@@ -363,3 +363,26 @@ class BehaviorTracker:
         if tool_id == "file.list" and repeat_list_count >= 3:
             _log.info("[behavior-sense] repeated list delegated to llm: path=%s count=%d", repeat_list_path, repeat_list_count)
         return action
+
+    def on_edit_failure(self, error: str) -> list:
+        """追踪 file.edit 失败，连续失败时返回感知信号。
+        
+        LLM 可感知信号，自行决定是否切换策略（如用 file.write 或 shell.run sed 代替 file.edit）。
+        """
+        from memory.working import WMItem
+        if "OldTextNotFound" in (error or ""):
+            self._edit_fail_count = getattr(self, '_edit_fail_count', 0) + 1
+            if self._edit_fail_count >= 2:
+                return [WMItem(
+                    kind="behavior_sense",
+                    content=(
+                        f"[感知] file.edit 已连续 {self._edit_fail_count} 次因 oldText 不匹配而失败。"
+                        f"考虑换策略：① 用 shell.run sed/python 做精确插入"
+                        f"② 用 file.read 读更大范围（≥500字符）获取完整上下文后重试"
+                        f"③ 用 file.write 全量覆写（先 file.read 全文）"
+                    ),
+                    priority=0.80,
+                )]
+        else:
+            self._edit_fail_count = 0
+        return []

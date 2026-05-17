@@ -1100,6 +1100,10 @@ class CognitionLoop:
             elif _tool == "file.list":
                 for _item in self._behavior.on_list(_path, result.summary):
                     self._wm.add(_item)
+            elif _tool == "file.edit" and result.error and "OldTextNotFound" in (result.error or ""):
+                # 连续 OldTextNotFound → 注入感知信号
+                for _item in self._behavior.on_edit_failure(result.error or ""):
+                    self._wm.add(_item)
 
         # 5b. 内层工具循环(chat + autonomous 共用)
         # 目标:让 LLM 在单次 tick 内连续调用工具直到本轮无需继续 act,节省 perception 重装 token。
@@ -1172,6 +1176,11 @@ class CognitionLoop:
                             else "fatal"
                         )
                         _result_text = f"ERROR[{_err_cat}]: {_cont_result.summary}"
+                        # file.edit 连续失败 → 注入策略切换感知信号
+                        if "oldtextnotfound" in _err_lower:
+                            _t_name = _cont.chosen_action_id or ""
+                            for _bi in self._behavior.on_edit_failure(_cont_result.error or ""):
+                                self._wm.add(_bi)
                     else:
                         _result_text = _cont_result.summary
                     _tool_history.append({
