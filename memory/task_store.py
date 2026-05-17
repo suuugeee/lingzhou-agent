@@ -1215,3 +1215,11 @@ class TaskStore:
         async with self._db_opt.execute(sql, params) as cur:
             rows = await cur.fetchall()
         return [{"id": r[0], "role": r[1], "content": r[2], "created_at": r[3]} for r in rows]
+
+    async def reset_in_progress_tasks(self) -> int:
+        """重启时将所有 in_progress 任务重置为 pending。返回重置数量。"""
+        result = await self._db_opt.execute(
+            "UPDATE tasks SET status='pending' WHERE status='in_progress'"
+        )
+        await self._db_opt.commit()
+        return result.rowcount if result else 0

@@ -1411,7 +1411,12 @@ class CognitionLoop:
         )
 
     async def _restore_state_from_db(self) -> None:
-        """从 DB 恢复上次持久化的情绪状态和路由偏好,实现跨重启连续性。"""
+        """从 DB 恢复上次持久化的状态，实现跨重启连续性。
+        
+        - 恢复情绪状态 (valence/arousal/dominance)  
+        - 恢复路由偏好
+        - 重置 in_progress 任务为 pending（避免僵尸任务）
+        """
         _em_json, _em_found = await self._task_store.get_fact("soul:emotion_state")
         if _em_found and _em_json:
             try:
@@ -1435,6 +1440,11 @@ class CognitionLoop:
                         _log.info("[routing] 从 DB 恢复 routing_overrides: %s", self._pending_routing_overrides)
             except Exception:
                 pass
+
+        # 清理僵尸任务：重置 in_progress 为 pending
+        zombie_count = await self._task_store.reset_in_progress_tasks()
+        if zombie_count > 0:
+            _log.info("[restart] 重置 %d 个 in_progress 任务为 pending", zombie_count)
 
 
     async def _restore_self_model(self) -> None:
