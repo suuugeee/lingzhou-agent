@@ -1450,6 +1450,7 @@ class CognitionLoop:
             idle_ticks=self._behavior.wait_streak,
             has_user_message=False,
             has_active_task=has_real_work,
+            tick=self._judgment.self_model.tick_count,
         )
         if not signal.should_explore:
             return

@@ -149,13 +149,14 @@ class SelfDriveEngine:
         self._save()
 
     def compute_signal(self, *, idle_ticks: int = 0, has_user_message: bool = False,
-                       has_active_task: bool = False) -> DriveSignal:
+                       has_active_task: bool = False, tick: int = 0) -> DriveSignal:
         """计算当前自驱力信号。
 
         参数:
-          idle_ticks: 连续无行动的 tick 数
+          idle_ticks: 连续非 act 的 tick 数
           has_user_message: 是否有用户消息
           has_active_task: 是否有活跃任务
+          tick: 当前 tick 计数
 
         返回:
           DriveSignal: 是否应该探索、建议领域、理由
@@ -169,9 +170,9 @@ class SelfDriveEngine:
         surprise = s.prediction_error_ema
         C = alpha * novelty + beta * progress + gamma * surprise
 
-        # 决策阈值
-        EXPLORE_THRESHOLD = 0.45
-        FORCE_EXPLORE_IDLE = 5  # 空闲 5 轮以上强制探索
+        # 自适应阈值：首次运行更敏感，后续逐步提高
+        EXPLORE_THRESHOLD = 0.35 if tick < 5 else 0.45
+        FORCE_EXPLORE_IDLE = 3  # 降低：空闲 3 轮就强制探索
 
         should_explore = False
         suggested_domain = None
@@ -220,7 +221,7 @@ class SelfDriveEngine:
         )
 
     def generate_exploration_task(self, domain: str) -> dict:
-        """为指定领域生成探索任务。"""
+        """为指定领域生成探索任务。包含进化触发建议。"""
         domain_tasks = {
             "code_structure": {
                 "title": "探索灵舟代码结构",
