@@ -222,11 +222,14 @@ def gateway_setup(
         console.print("\n  iLink Bot Token（微信开放平台 → bot 管理 → 复制 Token）")
         token = typer.prompt("  ILINK_TOKEN").strip()
         base_url = typer.prompt("  iLink API 地址", default="https://ilinkai.weixin.qq.com").strip()
+        console.print("  [dim]若使用 hermesclaw 等代理轮询 iLink，填代理地址（如 http://127.0.0.1:19997）。直连 iLink 请留空。[/dim]")
+        poll_base_url = typer.prompt("  轮询代理地址 poll_base_url", default="").strip()
         poll_sec = typer.prompt("  长轮询超时（秒）", default="35")
         gw_conf: dict[str, Any] = {
             "channel": "wechat",
             "token": token,
             "base_url": base_url,
+            "poll_base_url": poll_base_url,
             "poll_sec": int(poll_sec),
             "reply_poll_sec": 3,
         }
@@ -519,8 +522,9 @@ def _start_wechat_sidecar(gw_conf: dict[str, Any], cfg: Any) -> None:
     from channels.wechat import start_wechat_channel
 
     db_path = str(cfg.db_path)
+    poll_url = gw_conf.get("poll_base_url") or gw_conf.get("base_url", "https://ilinkai.weixin.qq.com")
+    send_url = gw_conf.get("base_url", "https://ilinkai.weixin.qq.com")
     console.print(
-        f"[dim]微信 iLink: {gw_conf.get('base_url', 'https://ilinkai.weixin.qq.com')}"
-        f"  poll={gw_conf.get('poll_sec', 35)}s[/dim]"
+        f"[dim]微信 iLink: poll={poll_url}  send={send_url}  interval={gw_conf.get('poll_sec', 35)}s[/dim]"
     )
     start_wechat_channel(gw_conf, db_path)
