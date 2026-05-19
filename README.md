@@ -59,15 +59,17 @@ Reflection ->  Evolution
 
 ## Documentation
 
+Each document page now includes a language switch at the top.
+
 Most in-depth design documents are currently written in Chinese.
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Self-Drive](docs/SELF_DRIVE.md)
-- [Tool Catalog](docs/TOOLS.md)
-- [Configuration Reference](docs/CONFIG.md)
-- [Probe Guide](docs/PROBE.md)
-- [Plugin Guide](docs/PLUGIN.md)
-- [Deviation Review](docs/DEVIATION_REVIEW.md)
+- [Architecture](docs/ARCHITECTURE.en.md)
+- [Self-Drive](docs/SELF_DRIVE.en.md)
+- [Tool Catalog](docs/TOOLS.en.md)
+- [Configuration Reference](docs/CONFIG.en.md)
+- [Probe Guide](docs/PROBE.en.md)
+- [Plugin Guide](docs/PLUGIN.en.md)
+- [Deviation Review](docs/DEVIATION_REVIEW.en.md)
 
 ## Built-In Tool Surface
 

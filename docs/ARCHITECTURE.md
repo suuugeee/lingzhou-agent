@@ -1,5 +1,7 @@
 # 架构设计
 
+[中文](ARCHITECTURE.md) | [English](ARCHITECTURE.en.md)
+
 ## 认知循环
 
 ```

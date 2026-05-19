@@ -1,5 +1,7 @@
 # 插件开发指南
 
+[中文](PLUGIN.md) | [English](PLUGIN.en.md)
+
 ## 快速开始
 
 ```bash

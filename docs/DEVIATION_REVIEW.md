@@ -1,5 +1,7 @@
 # 蓝图偏差审查 (2026-05-18)
 
+[中文](DEVIATION_REVIEW.md) | [English](DEVIATION_REVIEW.en.md)
+
 基于早期 roadmap 蓝图与当前实现（ARCHITECTURE.md + core/ 目录观察）的偏差对比。
 
 ## P0：必须先做

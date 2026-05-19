@@ -59,6 +59,8 @@ sudo systemctl enable --now lingzhou
 
 ## 文档目录
 
+每个文档页顶部都带有中英文切换入口。
+
 - [架构设计](docs/ARCHITECTURE.md)
 - [自驱力与自主探索](docs/SELF_DRIVE.md)
 - [工具目录](docs/TOOLS.md)

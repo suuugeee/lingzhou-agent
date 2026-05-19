@@ -1,5 +1,7 @@
 # 工具目录
 
+[中文](TOOLS.md) | [English](TOOLS.en.md)
+
 ## 概览
 
 当前仓库内置 56 个工具端点。所有工具通过 `@tool(ToolManifest(...))` 注册，由运行时自动发现并加载。

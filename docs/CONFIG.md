@@ -1,5 +1,7 @@
 # 配置参考
 
+[中文](CONFIG.md) | [English](CONFIG.en.md)
+
 所有配置在 `~/.lingzhou/lingzhou.json` 中。LLM 可通过 `config.get` / `config.set` 工具运行
 时读写，修改后自动热重载。
 
