@@ -880,20 +880,29 @@ class JudgmentLayer:
         """
         from provider.base import Message
 
-        context_text = await self._assemble_context(
-            percept, wm, task_store, episodic, semantic, emotion,
-            user_message=user_message,
-            ethos_state=ethos_state,
-            judgment_signals=judgment_signals,
-            hard_boundaries=hard_boundaries,
-            perception_replay=perception_replay,
-            cognitive_signals=cognitive_signals,
-            phase=phase,
-            current_action="",
-            tool_history=None,
-            effective_thinking=thinking_override or self._cfg.thinking,
-            routing_overrides=routing_overrides,
-        )
+        try:
+            context_text = await self._assemble_context(
+                percept, wm, task_store, episodic, semantic, emotion,
+                user_message=user_message,
+                ethos_state=ethos_state,
+                judgment_signals=judgment_signals,
+                hard_boundaries=hard_boundaries,
+                perception_replay=perception_replay,
+                cognitive_signals=cognitive_signals,
+                phase=phase,
+                current_action="",
+                tool_history=None,
+                effective_thinking=thinking_override or self._cfg.thinking,
+                routing_overrides=routing_overrides,
+            )
+        except Exception as _ctx_exc:
+            _log.exception("[judgment] _assemble_context() 异常，返回 wait 兜底: %s", _ctx_exc)
+            return self._simulate_safe_output(
+                failure_count=0,
+                signals=judgment_signals,
+                hard_boundaries=hard_boundaries or [],
+                reason=f"上下文组装异常: {_ctx_exc}",
+            )
         # 缓存给内层工具循环的续判请求用
         self._last_context_text = context_text
 
