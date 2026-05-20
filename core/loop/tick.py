@@ -330,6 +330,16 @@ async def _tick_impl(loop: Any, cycle: int, user_message: str = "", chat_id: str
         "care": ethos_state.values.care,
     }))
 
+    _log.debug(
+        "[tick] emotion=%s v=%.2f a=%.2f | ethos truth=%.2f caution=%.2f curiosity=%.2f",
+        loop._emotion.dominant,
+        loop._emotion.valence,
+        loop._emotion.arousal,
+        ethos_state.values.truth,
+        ethos_state.values.caution,
+        ethos_state.values.curiosity,
+    )
+
     signals = compute_judgment_signals(
         failure_count=len(failures_recent),
         high_error_streak=perception_replay.high_error_streak,
