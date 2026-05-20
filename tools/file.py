@@ -152,32 +152,7 @@ def _safety_guard(path: Path, operation: str) -> tuple[str, str | None]:
     return "\n".join(warnings) if warnings else "", None
 
 
-def _verify_python_syntax(path: Path, content: str) -> str | None:
-    """验证 Python 文件语法。返回 None 表示通过，否则返回错误信息。"""
-    if not path.suffix == '.py':
-        return None
-    try:
-        import ast
-        ast.parse(content)
-        return None
-    except SyntaxError as e:
-        return f"语法错误: {e}"
-    except Exception as e:
-        return f"验证异常: {e}"
 
-
-def _pycompile_check(path: Path) -> str | None:
-    """对磁盘上已写入的 .py 文件执行 py_compile.compile()，返回 None 表示通过，否则返回错误信息。"""
-    if path.suffix != ".py":
-        return None
-    try:
-        import py_compile
-        py_compile.compile(str(path), doraise=True)
-        return None
-    except py_compile.PyCompileError as e:
-        return f"py_compile 校验失败: {e}"
-    except Exception as e:
-        return f"py_compile 异常: {e}"
 
 
 def _repo_root() -> Path:
@@ -490,15 +465,6 @@ async def file_write(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             )
         
         path.parent.mkdir(parents=True, exist_ok=True)
-        # 写前语法验证（.py 文件）：语法错误直接阻断，不写入损坏文件
-        if path.suffix == ".py":
-            syntax_error = _verify_python_syntax(path, text)
-            if syntax_error:
-                return ToolResult(
-                    summary=f"拒绝写入: {path}\n{syntax_error}\n备份（若有）: {path.with_suffix('.py.lingzhou-backup')}",
-                    error="PythonSyntaxError",
-                    skipped=True,
-                )
         # 原子写入：先写临时文件，成功后再 rename
         tmp_path = path.with_suffix(path.suffix + ".lingzhou-tmp")
         tmp_path.write_text(text, encoding="utf-8")
@@ -658,15 +624,6 @@ async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         if content == original:
             return ToolResult(summary=f"编辑未产生变化: {path}", error="NoChange", skipped=True)
 
-        # 写前语法验证（.py 文件）：语法错误直接阻断，不写入损坏文件
-        if path.suffix == ".py":
-            syntax_error = _verify_python_syntax(path, content)
-            if syntax_error:
-                return ToolResult(
-                    summary=f"拒绝编辑: {path}\n{syntax_error}\n备份（若有）: {path.with_suffix('.py.lingzhou-backup')}",
-                    error="PythonSyntaxError",
-                    skipped=True,
-                )
         # 原子写入
         tmp_path = path.with_suffix(path.suffix + ".lingzhou-tmp")
         tmp_path.write_text(content, encoding="utf-8")

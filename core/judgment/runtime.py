@@ -1241,7 +1241,7 @@ class JudgmentLayer:
             _task_chat_id, _ = await task_store.get_fact(f"task:{task.id}:chat_id")
         if not _task_chat_id:
             _task_chat_id, _ = await task_store.get_fact("chat:last_chat_id")
-        recent_chat_msgs = await task_store.get_recent_chat_messages(6, chat_id=_task_chat_id)
+        recent_chat_msgs = await task_store.get_recent_chat_messages(3, chat_id=_task_chat_id)
         ctx["chat_history_section"] = _fmt_chat_history(recent_chat_msgs)
         _validate_context_schema(ctx)
         ctx = apply_context_budget(
