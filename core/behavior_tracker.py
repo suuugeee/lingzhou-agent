@@ -85,6 +85,25 @@ class BehaviorTracker:
 
     # ── 状态接口 ──────────────────────────────────────────────────────────────
 
+    def apply_execution_gate(self, action: "JudgmentOutput", signals: Any) -> "JudgmentOutput":
+        """感知重复信号并记录日志，不替 LLM 改 decision（纯观察门）。"""
+        repeat_action = getattr(signals, "repeat_action_count", 0)
+        repeat_read = getattr(signals, "repeat_read_count", 0)
+        if repeat_action >= self._streak_threshold:
+            _log.info(
+                "[behavior.gate] repeat action streak=%d tool=%s key=%s → delegated to llm",
+                repeat_action,
+                getattr(signals, "repeat_action_tool", ""),
+                getattr(signals, "repeat_action_key", ""),
+            )
+        elif repeat_read >= self._streak_threshold:
+            _log.info(
+                "[behavior.gate] repeat read streak=%d path=%s → delegated to llm",
+                repeat_read,
+                getattr(signals, "repeat_read_path", ""),
+            )
+        return action
+
     def apply_cognitive_probe(self, signals: Any) -> None:
         """将当前循环探针状态写入 cognitive_signals 对象（原地修改）。"""
         signals.repeat_action_count = self._action_streak_count

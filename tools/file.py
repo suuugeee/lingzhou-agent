@@ -44,12 +44,12 @@ _WRITE_ALLOW_ROOTS: frozenset[str] = frozenset({
 })
 
 
-def _path_guard(path: Path) -> tuple[bool, str]:
+def _path_guard(path: Path, workspace_dir: str = "") -> tuple[bool, str]:
     """路径安全守卫。
     
     返回 (is_safe, warning)。
     - 路径穿越检测（../etc/passwd 等）
-    - 可选 workspace 沙箱
+    - 可选 workspace 沙箱（_WRITE_ALLOW_ROOTS + 运行时 workspace_dir）
     """
     try:
         resolved = path.resolve()
@@ -57,8 +57,19 @@ def _path_guard(path: Path) -> tuple[bool, str]:
         return False, f"无法解析路径: {path}"
     
     # 路径穿越检测：确保解析后的路径仍在预期范围内
-    if _WRITE_ALLOW_ROOTS:
-        for root in _WRITE_ALLOW_ROOTS:
+    effective_roots: set[str] = set()
+    for r in _WRITE_ALLOW_ROOTS:
+        try:
+            effective_roots.add(str(Path(r).resolve()))
+        except Exception:
+            effective_roots.add(r)
+    if workspace_dir:
+        try:
+            effective_roots.add(str(Path(workspace_dir).resolve()))
+        except Exception:
+            effective_roots.add(workspace_dir)
+    if effective_roots:
+        for root in effective_roots:
             try:
                 resolved.relative_to(root)
                 break
@@ -67,7 +78,7 @@ def _path_guard(path: Path) -> tuple[bool, str]:
         else:
             return False, (
                 f"路径 {path} 不在允许的工作区内。"
-                f"只能写入 {', '.join(_WRITE_ALLOW_ROOTS)} 内的文件。"
+                f"只能写入 {', '.join(sorted(effective_roots))} 内的文件。"
             )
     
     return True, ""
@@ -441,7 +452,8 @@ async def file_write(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(summary="写入内容为空", error="EmptyContent", skipped=True)
 
     # 路径守卫：沙箱 + 穿越检测
-    ok, err = _path_guard(path)
+    _ws = _workspace_dir(ctx)
+    ok, err = _path_guard(path, workspace_dir=str(_ws) if _ws else "")
     if not ok:
         return ToolResult(summary=err, error="PathBlocked", skipped=True)
 
@@ -533,7 +545,8 @@ async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             )
 
         # 路径守卫
-        ok, err = _path_guard(path)
+        _ws = _workspace_dir(ctx)
+        ok, err = _path_guard(path, workspace_dir=str(_ws) if _ws else "")
         if not ok:
             return ToolResult(summary=err, error="PathBlocked", skipped=True)
         
@@ -673,7 +686,8 @@ async def file_delete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if path.is_dir():
         return ToolResult(summary=f"目标是目录而非文件: {path}（file.delete 仅删除文件）", error="IsDirectory", skipped=True)
 
-    ok, err = _path_guard(path)
+    _ws = _workspace_dir(ctx)
+    ok, err = _path_guard(path, workspace_dir=str(_ws) if _ws else "")
     if not ok:
         return ToolResult(summary=err, error="PathBlocked", skipped=True)
 

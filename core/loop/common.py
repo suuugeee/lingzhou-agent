@@ -74,10 +74,13 @@ def _should_continue_within_tick(
     user_message: str = "",
     has_active_task: bool = False,
 ) -> bool:
-    """task.complete/fail 后不续计；其余情况交由 LLM 在 continue 判断中自行决策。"""
+    """task.complete/fail 后不续计；mutation+用户消息+有任务时暂停让用户确认。"""
     if action.decision != "act":
         return False
     if (action.chosen_action_id or "") in {"task.complete", "task.fail"}:
+        return False
+    # mutation tool in a user-prompted tick with active task: don't auto-continue
+    if user_message and has_active_task and (action.chosen_action_id or "") not in READER_TOOLS:
         return False
     return True
 

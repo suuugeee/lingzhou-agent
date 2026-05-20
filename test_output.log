@@ -1,0 +1,27 @@
+..............................................................F
+=================================== FAILURES ===================================
+_____ test_execution_plan_gate_blocks_mutation_until_current_step_aligned ______
+tests/test_core.py:1426: in test_execution_plan_gate_blocks_mutation_until_current_step_aligned
+    asyncio.run(_execution_plan_gate_blocks_mutation_until_current_step_aligned())
+/Users/suge/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/runners.py:195: in run
+    return runner.run(main)
+           ^^^^^^^^^^^^^^^^
+/Users/suge/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/runners.py:118: in run
+    return self._loop.run_until_complete(task)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+/Users/suge/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/asyncio/base_events.py:691: in run_until_complete
+    return future.result()
+           ^^^^^^^^^^^^^^^
+tests/test_core.py:1461: in _execution_plan_gate_blocks_mutation_until_current_step_aligned
+    assert blocked.skipped is True
+E   AssertionError: assert False is True
+E    +  where False = ToolResult(summary='已设置事实: debug:test=1', evidence='key=debug:test', skipped=False, error=None, kind='execute_result',...etadata={'worker_path': 'tool-chain', 'worker_type': 'tool-chain-worker', 'tool_name': 'memory.set_fact', 'run_id': 1}).skipped
+=========================== short test summary info ============================
+FAILED tests/test_core.py::test_execution_plan_gate_blocks_mutation_until_current_step_aligned
+!!!!!!!!!!!!!!!!!!!!!!!!!! stopping after 1 failures !!!!!!!!!!!!!!!!!!!!!!!!!!!
+1 failed, 62 passed in 1.81s
+Exception ignored in: <module 'threading' from '/Users/suge/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/threading.py'>
+Traceback (most recent call last):
+  File "/Users/suge/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/python3.12/threading.py", line 1624, in _shutdown
+    lock.acquire()
+KeyboardInterrupt: 

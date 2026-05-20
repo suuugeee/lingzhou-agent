@@ -87,6 +87,91 @@ _TOOL_TIER_MAPPING = {
     "repair": [],
 }
 
+# ── 续判前置改写：证据预算门 ────────────────────────────────────────────────────
+
+_ASK_EVIDENCE_BUDGET = 2  # task.ask 前须有至少 2 次有效证据工具调用
+
+def _rewrite_task_ask_to_evidence(
+    action: "JudgmentOutput",
+    *,
+    user_message: str = "",
+    tool_history: "list[dict[str, Any]] | None" = None,
+    registry: "Any | None" = None,
+) -> "JudgmentOutput":
+    """若 task.ask 前证据不足，改写为先调用 task.list 收集证据。"""
+    # 计算历史中已有的证据工具命中数
+    hits = 0
+    for item in tool_history or []:
+        tool_id = str(item.get("tool") or "")
+        result = str(item.get("result") or "").strip()
+        if not result or result.startswith("ERROR["):
+            continue
+        if registry is not None and tool_has_capability(registry, tool_id, "ask_evidence"):
+            hits += 1
+    if hits >= _ASK_EVIDENCE_BUDGET:
+        return action
+    # 证据不足：改写为先做 task.list
+    from core.judgment import JudgmentOutput as _JO
+    return _JO(
+        decision="act",
+        chosen_action_id="task.list",
+        params={"status": "all", "limit": 10},
+        rationale=f"证据预算 {hits}/{_ASK_EVIDENCE_BUDGET}，先收集任务列表作为佐证再提问。",
+        reflection=action.reflection,
+        reply_to_user="",
+        next_step=action.next_step,
+        model_strategy={"next_phase_tier": "reasoner"},
+        applied_skills=list(action.applied_skills or []),
+    )
+
+
+# ── 续判前置改写：复杂 mutation → task.plan ─────────────────────────────────────
+
+def _rewrite_complex_act_to_task_plan(
+    action: "JudgmentOutput",
+    *,
+    user_message: str = "",
+    active_task: "Any | None" = None,
+    registry: "Any | None" = None,
+) -> "JudgmentOutput":
+    """若 LLM 对复杂请求直接输出 mutation 且有 next_step，先拆为 task.plan。
+
+    只对非读取类工具生效；file.read / memory.search 等读取工具直接透传。
+    """
+    tool_id = action.chosen_action_id or ""
+    if tool_id in _READER_TOOLS:
+        return action
+    if active_task is None:
+        return action
+    next_step = (action.next_step or "").strip()
+    if not next_step:
+        return action
+    # 构建两步计划：当前 action 为第一步（in_progress），next_step 为第二步（pending）
+    step1_desc = f"执行 {tool_id}"
+    params = action.params or {}
+    for key in ("command", "path", "title", "query"):
+        if key in params:
+            snippet = str(params[key])[:40]
+            step1_desc = f"执行 {tool_id}（{snippet}）"
+            break
+    plan = [
+        {"step": step1_desc, "status": "in_progress"},
+        {"step": next_step, "status": "pending"},
+    ]
+    from core.judgment import JudgmentOutput as _JO
+    return _JO(
+        decision="act",
+        chosen_action_id="task.plan",
+        params={"task_id": active_task.id, "plan": plan},
+        rationale=action.rationale,
+        reflection=action.reflection,
+        reply_to_user="",
+        next_step="",
+        model_strategy=dict(action.model_strategy or {}),
+        applied_skills=list(action.applied_skills or []),
+    )
+
+
 def _structured_tool_history_window(tool_history: list[dict[str, Any]]) -> tuple[str, str]:
     history_parts: list[str] = []
     structured_window: list[dict[str, Any]] = []
@@ -757,6 +842,16 @@ class JudgmentLayer:
                     "context_window": _m.get("context_window"),
                 })
         payload["catalog_models"] = catalog_entries
+        # 主 provider 信息
+        payload["primary_provider"] = {"model": self._cfg.model}
+        # 实体消解模块健康状态
+        if hasattr(self, "_ref_resolver") and self._ref_resolver is not None:
+            _rr = self._ref_resolver
+            payload["reference_resolution"] = {
+                "llm_available": _rr.llm_available,
+                "last_error": _rr.last_llm_error,
+                "last_error_code": _rr.last_llm_error_code,
+            }
         return json.dumps(payload, ensure_ascii=False, indent=2)
 
     async def decide(
@@ -1052,6 +1147,22 @@ class JudgmentLayer:
         _applied = ",".join(output.applied_skills) if output.applied_skills else "none"
         if output.applied_skills:
             self._last_applied_skill_names = list(output.applied_skills)
+        # 前置改写：task.ask 证据预算门
+        if not reply_only and output.decision == "act" and output.chosen_action_id == "task.ask":
+            output = _rewrite_task_ask_to_evidence(
+                output,
+                user_message=user_message,
+                tool_history=tool_history,
+                registry=self._registry,
+            )
+        # 前置改写：复杂 mutation → task.plan
+        if not reply_only and output.decision == "act" and output.chosen_action_id not in {"task.plan", "task.ask"}:
+            output = _rewrite_complex_act_to_task_plan(
+                output,
+                user_message=user_message,
+                active_task=active_task,
+                registry=self._registry,
+            )
         _log.info(
             "[judgment.continue] round=%d phase=%s tier=%s model=%s thinking=%s applied_skills=%s decision=%s action=%s",
             len(tool_history), selection.phase, selection.tier, selection.model_ref,

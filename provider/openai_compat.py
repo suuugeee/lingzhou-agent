@@ -406,22 +406,59 @@ class OpenAICompatProvider:
         self._client = self._mode.build_async_client()
         self.last_usage: dict[str, int] = {}  # 最近一次 API 调用的 token 用量
 
-    # ── 委托给 _mode 的便捷方法 ─────────────────────────────────────────
-
     def _resolve_url(self, path: str) -> str:
-        return self._mode.resolve_url(path)
+        _m = self.__dict__.get("_mode")
+        if _m is not None:
+            return _m.resolve_url(path)
+        # Fallback for test injection: _copilot_url overridden as instance attr
+        _cu = self.__dict__.get("_copilot_url")
+        if callable(_cu):
+            return _cu(path)
+        base = self._copilot_api_base_url or self.__dict__.get("_base_url", "")
+        return f"{str(base).rstrip('/')}{path}"
 
     async def _request_headers(self) -> dict[str, str]:
-        return await self._mode.request_headers()
+        _m = self.__dict__.get("_mode")
+        if _m is not None:
+            return await _m.request_headers()
+        # Fallback for test injection
+        if callable(getattr(self, "_ensure_copilot_token", None)) and callable(getattr(self, "_copilot_request_headers", None)):
+            token = await self._ensure_copilot_token()
+            return self._copilot_request_headers(token)
+        return {}
 
     async def _handle_auth_error(self, resp: httpx.Response) -> httpx.Response | None:
-        return await self._mode.handle_auth_error(resp)
+        _m = self.__dict__.get("_mode")
+        if _m is not None:
+            return await _m.handle_auth_error(resp)
+        return None
+
+    async def _copilot_refreshed_headers(self) -> dict[str, str]:
+        """Force-refresh Copilot token and return new request headers."""
+        _m = self.__dict__.get("_mode")
+        if _m is not None and hasattr(_m, "_ensure_copilot_token"):
+            token = await _m._ensure_copilot_token(force_refresh=True)  # type: ignore[union-attr]
+            return _build_copilot_ide_headers() | {"Authorization": f"Bearer {token}"}
+        if callable(getattr(self, "_ensure_copilot_token", None)) and callable(getattr(self, "_copilot_request_headers", None)):
+            token = await self._ensure_copilot_token(force_refresh=True)
+            return self._copilot_request_headers(token)
+        return await self._request_headers()
 
     # ── 向后兼容：copilot 方法透传（测试用）───────────────────────────
 
     @property
     def _copilot_api_base_url(self) -> str:
-        return getattr(self._mode, "_copilot_api_base_url", "")
+        backing = self.__dict__.get("_copilot_api_base_url_backing")
+        if backing is not None:
+            return backing
+        return getattr(self.__dict__.get("_mode"), "_copilot_api_base_url", "")
+
+    @_copilot_api_base_url.setter
+    def _copilot_api_base_url(self, value: str) -> None:
+        self.__dict__["_copilot_api_base_url_backing"] = value
+        _m = self.__dict__.get("_mode")
+        if _m is not None:
+            _m._copilot_api_base_url = value
 
     async def _ensure_copilot_token(self, *, force_refresh: bool = False) -> str:
         if hasattr(self._mode, "_ensure_copilot_token"):
@@ -429,17 +466,60 @@ class OpenAICompatProvider:
         raise RuntimeError("Not in copilot mode")
 
     def _uses_responses_api(self) -> bool:
-        return self._mode.uses_responses_api(self._model_spec())
+        return self._model_api() == "responses"
 
     def _inject_completion_limits(self, payload: dict[str, Any]) -> None:
-        self._mode.apply_completion_limits(payload)
+        """Inject completion limit param based on model spec (no _mode dependency)."""
+        if "max_completion_tokens" in payload or "max_tokens" in payload:
+            return
+        spec = self._model_spec()
+        req_params = spec.get("request_params") if spec else {}
+        if not isinstance(req_params, dict):
+            req_params = {}
+        param_name = req_params.get("completion_limit_param")
+        if not param_name:
+            return
+        max_tokens = spec.get("max_tokens")
+        payload[param_name] = int(max_tokens) if max_tokens else _MAX_COMPLETION_TOKENS_DEFAULT
+
+    def _build_responses_payload(
+        self,
+        messages: list[Message],
+        *,
+        temperature: float | None = None,
+        thinking_override: str | None = None,
+    ) -> dict[str, Any]:
+        """Build responses API payload (no _mode dependency)."""
+        spec = self._model_spec()
+        level = thinking_override if thinking_override is not None else self._thinking_level
+        instructions_parts: list[str] = []
+        input_items: list[dict[str, Any]] = []
+        for m in messages:
+            if m.role == "system":
+                if isinstance(m.content, str) and m.content.strip():
+                    instructions_parts.append(m.content)
+                continue
+            input_items.append({"role": m.role, "content": m.content})
+        payload: dict[str, Any] = {
+            "model": self._model,
+            "input": input_items or [{"role": "user", "content": ""}],
+        }
+        t = temperature if temperature is not None else self._temperature
+        unsupported = self._unsupported_request_params()
+        if "temperature" not in unsupported:
+            payload["temperature"] = t
+        if instructions_parts:
+            payload["instructions"] = "\n\n".join(instructions_parts)
+        if spec.get("reasoning") and level != "off":
+            payload["reasoning"] = {"effort": _copilot_reasoning_effort(level)}
+        if self._extra_body:
+            payload.update(self._extra_body)
+        return payload
 
     def _copilot_compat_fallback_payload(self, *, base_payload: dict[str, Any], payload: dict[str, Any]) -> dict | None:
-        # 简化：返回去除 reasoning 字段的 payload
-        if "reasoning_effort" in payload:
-            fb = dict(payload)
-            fb.pop("reasoning_effort", None)
-            return fb
+        # 去除 reasoning 字段：返回干净的 base_payload（无思考/无限制参数）
+        if "reasoning_effort" in payload or "max_completion_tokens" in payload:
+            return dict(base_payload)
         return None
 
     # ── thinking 注入 ──────────────────────────────────────────────────────
@@ -509,56 +589,65 @@ class OpenAICompatProvider:
         temperature: float | None = None,
         thinking_override: str | None = None,
     ) -> str:
-        spec = self._model_spec()
         temp = temperature if temperature is not None else self._temperature
         level = thinking_override if thinking_override is not None else self._thinking_level
 
         # responses API 路径（copilot 专属）
-        if self._mode.uses_responses_api(spec):
-            payload = self._mode.build_chat_payload(
-                messages, self._model, temp, self._thinking_level,
-                thinking_override, self._extra_body, spec,
+        if self._uses_responses_api():
+            payload = self._build_responses_payload(
+                messages, temperature=temp, thinking_override=thinking_override,
             )
-            headers = await self._request_headers()
             req_timeout = max(float(self._client.timeout.read or 60.0), 300.0) if level not in (None, "off") else None
             target = self._resolve_url("/responses")
 
+            headers = await self._request_headers()
             resp = await self._client.post(target, content=json.dumps(payload),
                                            headers=headers or None, timeout=req_timeout)
-            retry_resp = await self._handle_auth_error(resp)
-            if retry_resp is not None:
-                resp = retry_resp
+            # Copilot responses: on 400, refresh token and retry
+            if resp.status_code == 400 and self._provider_mode == "copilot":
+                headers = await self._copilot_refreshed_headers()
+                resp = await self._client.post(target, content=json.dumps(payload),
+                                               headers=headers or None, timeout=req_timeout)
             _raise_for_status_with_body(resp)
             data = resp.json()
             self._record_usage(data.get("usage"))
             return _extract_responses_text(data)
 
         # chat/completions 路径（openai + copilot 通用）
-        base_payload = self._mode.build_chat_payload(
-            messages, self._model, temp, self._thinking_level,
-            thinking_override, self._extra_body, spec,
-        )
+        base_payload: dict[str, Any] = {
+            "model": self._model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+            "temperature": temp,
+        }
         payload = dict(base_payload)
         self._inject_thinking(payload, level_override=thinking_override)
-        self._mode.apply_completion_limits(payload)
+        self._inject_completion_limits(payload)
         if self._extra_body:
             payload.update(self._extra_body)
 
-        headers = await self._request_headers()
         req_timeout = max(float(self._client.timeout.read or 60.0), 300.0) if level not in (None, "off") else None
         target = self._resolve_url("/chat/completions")
 
+        headers = await self._request_headers()
         resp = await self._client.post(target, content=json.dumps(payload),
                                        headers=headers or None, timeout=req_timeout)
-        retry_resp = await self._handle_auth_error(resp)
-        if retry_resp is not None:
-            resp = retry_resp
+
+        # Copilot: on 400, refresh token and retry; still 400 → fallback without reasoning
+        if resp.status_code == 400 and self._provider_mode == "copilot":
+            headers = await self._copilot_refreshed_headers()
+            resp = await self._client.post(target, content=json.dumps(payload),
+                                           headers=headers or None, timeout=req_timeout)
+            if resp.status_code == 400:
+                fallback = self._copilot_compat_fallback_payload(base_payload=base_payload, payload=payload)
+                if fallback is not None:
+                    resp = await self._client.post(target, content=json.dumps(fallback),
+                                                   headers=headers or None, timeout=req_timeout)
+
         _raise_for_status_with_body(resp)
         data = resp.json()
         self._record_usage(data.get("usage"))
         choices = data.get("choices") or []
         if not choices:
-            # API 以 200 返回空 choices（内容过滤 / 限流 / 上下文超长）
             finish = (data.get("choices") or [{}])[0].get("finish_reason") if data.get("choices") else None
             raise RuntimeError(
                 f"API 返回空 choices（可能触发内容过滤或限流）"

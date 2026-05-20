@@ -526,6 +526,48 @@ class ExecutionLayer:
 
         failure_key = _failure_fact_key(action)
 
+        # Pre-dispatch: 检查该动作是否处于 durable mute 期
+        if ctx.task_store is not None:
+            raw_mute, mute_found = await ctx.task_store.get_fact(failure_key)
+            if mute_found and raw_mute:
+                try:
+                    mute_data = json.loads(raw_mute)
+                    if float(mute_data.get("muted_until") or 0) > time.time():
+                        result = ToolResult(
+                            summary=(
+                                f"跳过已知稳定失败动作 {action.chosen_action_id!r}："
+                                f" {mute_data.get('last_summary', '')[:200]}"
+                            ),
+                            error="KnownStableFailure",
+                            skipped=True,
+                            kind="error",
+                        )
+                        await self._finalize_run(run_id, result, ctx)
+                        return result
+                except Exception:
+                    pass
+
+        # Pre-dispatch: plan gate — 有未对齐的 in_progress 步骤时阻止变更类操作
+        action_id = action.chosen_action_id or ""
+        _is_mutation = not action_id.startswith("task.") and action_id not in {
+            "memory.get_fact", "file.read", "file.list", "file.search",
+        }
+        if _is_mutation and active_task is not None and ctx.task_store is not None:
+            _plan = active_task.extras.get("plan") if active_task.extras else None
+            if _plan:
+                _in_progress_steps = [s.get("step", "") for s in _plan if s.get("status") == "in_progress"]
+                _cur_step = (active_task.current_step or "").strip()
+                if _in_progress_steps and not _cur_step:
+                    _step_name = _in_progress_steps[0]
+                    result = ToolResult(
+                        summary=f"当前步骤未对齐，请先完成「{_step_name}」再执行变更操作",
+                        error="PlanStepMismatch",
+                        skipped=True,
+                        kind="error",
+                    )
+                    await self._finalize_run(run_id, result, ctx)
+                    return result
+
         try:
             result = await self._workers.dispatch(worker_type, entry, action, ctx)
         except Exception as exc:

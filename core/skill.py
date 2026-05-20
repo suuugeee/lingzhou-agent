@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-_log = logging.getLogger("lingzhou.skill")
+_log = logging.getLogger("core.skill")
 
 
 @dataclass
@@ -304,14 +304,14 @@ class SkillRegistry:
         """
         all_skills = list(self._skills)
         if max_inject <= 0:
-            _log.info("[skill.match] injecting=%d: %s", len(all_skills), [s.name for s in all_skills])
+            _log.info("[skill.match] selected=%d: %s", len(all_skills), [s.name for s in all_skills])
             return all_skills
         applied_names = set(last_applied or [])
         priority: list[Skill] = [s for s in all_skills if s.name in applied_names]
         rest: list[Skill] = [s for s in all_skills if s.name not in applied_names]
         selected = (priority + rest)[:max_inject]
         _log.info(
-            "[skill.match] injecting=%d/%d (max=%d last_applied=%s): %s",
+            "[skill.match] selected=%d/%d (max=%d last_applied=%s): %s",
             len(selected), len(all_skills), max_inject,
             list(last_applied or []),
             [s.name for s in selected],
