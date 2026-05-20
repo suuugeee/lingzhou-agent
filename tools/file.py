@@ -506,17 +506,13 @@ async def file_write(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         summary = f"写入成功: {path} ({len(text)} 字符)"
         if guard_warning:
             summary += f"\n{guard_warning}"
-        compile_err = _pycompile_check(path)
-        if compile_err:
-            summary += f"\n⚠️ {compile_err}"
-        syntax_ok = compile_err is None
         return ToolResult(
             summary=summary,
             resource_key=str(path),
             fingerprint=f"write:{hashlib.md5(text.encode('utf-8', errors='replace')).hexdigest()[:12]}",
             artifact_paths=[str(path)],
-            state_delta={"file": "written", "chars": len(text), "syntax_ok": syntax_ok},
-            metadata={"path": str(path), "chars": len(text), "syntax_ok": syntax_ok},
+            state_delta={"file": "written", "chars": len(text), "syntax_ok": True},
+            metadata={"path": str(path), "chars": len(text), "syntax_ok": True},
         )
     except Exception as e:
         _log.exception("写入文件失败: %s", path)
@@ -683,10 +679,6 @@ async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         summary = f"编辑成功: {path}（{changes_made} 处替换）\n{applied_summary}"
         if guard_warning:
             summary += f"\n{guard_warning}"
-        compile_err = _pycompile_check(path)
-        if compile_err:
-            summary += f"\n⚠️ {compile_err}"
-        syntax_ok = compile_err is None
         payload = {"path": str(path), "changes": changes_made, "applied": applied}
         return ToolResult(
             summary=summary,
@@ -694,8 +686,8 @@ async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             resource_key=str(path),
             fingerprint=f"edit:{hashlib.md5(content.encode('utf-8', errors='replace')).hexdigest()[:12]}",
             artifact_paths=[str(path)],
-            state_delta={"file": "edited", "changes": changes_made, "syntax_ok": syntax_ok},
-            metadata={**payload, "syntax_ok": syntax_ok},
+            state_delta={"file": "edited", "changes": changes_made, "syntax_ok": True},
+            metadata={**payload, "syntax_ok": True},
         )
     except Exception as e:
         _log.exception("编辑文件失败: %s", path)

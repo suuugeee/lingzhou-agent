@@ -28,6 +28,7 @@ from tools.registry import tool_has_capability
 from .context import (
     _emotion_label,
     _fill_template,
+    _fmt_chat_history,
     _fmt_cognitive_signals,
     _fmt_context_facts,
     _fmt_current_time,
@@ -1234,6 +1235,14 @@ class JudgmentLayer:
             "current_time_section": _fmt_current_time(),
             "user_message": user_message or "",
         }
+        # 注入近期对话历史，让 LLM 可感知之前的回复，避免重复内容
+        _task_chat_id = ""
+        if task:
+            _task_chat_id, _ = await task_store.get_fact(f"task:{task.id}:chat_id")
+        if not _task_chat_id:
+            _task_chat_id, _ = await task_store.get_fact("chat:last_chat_id")
+        recent_chat_msgs = await task_store.get_recent_chat_messages(6, chat_id=_task_chat_id)
+        ctx["chat_history_section"] = _fmt_chat_history(recent_chat_msgs)
         _validate_context_schema(ctx)
         ctx = apply_context_budget(
             ctx,

@@ -233,6 +233,26 @@ def _fmt_current_time() -> str:
     return f"当前时间: {local_iso}\n参考 UTC: {utc_str}"
 
 
+def _fmt_chat_history(messages: list[dict[str, Any]], max_chars: int = 300) -> str:
+    """将最近 N 条对话消息格式化为 LLM 可读的历史轮次。
+
+    role=user 显示为 '用户:', role=assistant 显示为 '我:',
+    每条消息截断到 max_chars，防止 token 爆炸。
+    """
+    if not messages:
+        return "（暂无对话历史）"
+    lines = []
+    for msg in messages:
+        role = msg.get("role", "")
+        content = str(msg.get("content") or "").strip()
+        if not content:
+            continue
+        label = "用户" if role == "user" else "我"
+        snippet = content[:max_chars] + ("…" if len(content) > max_chars else "")
+        lines.append(f"{label}: {snippet}")
+    return "\n".join(lines) if lines else "（暂无对话历史）"
+
+
 def _fmt_wm(
     items: list[dict[str, Any]],
     wm_count: int = 0,

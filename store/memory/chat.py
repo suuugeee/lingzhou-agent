@@ -122,3 +122,28 @@ class ChatMessageStore:
         async with self._db.execute(sql, params) as cur:
             rows = await cur.fetchall()
         return [{"id": r[0], "role": r[1], "content": r[2], "created_at": r[3]} for r in rows]
+
+    async def get_recent_messages(
+        self,
+        limit: int = 6,
+        chat_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """返回最近 limit 条消息（按 id 升序），可选按 chat_id 过滤。"""
+        resolved_chat_id = str(chat_id or "")
+        if resolved_chat_id:
+            sql = (
+                "SELECT id, role, content, created_at FROM chat_messages "
+                "WHERE session_id = ? ORDER BY id DESC LIMIT ?"
+            )
+            params: tuple[Any, ...] = (resolved_chat_id, limit)
+        else:
+            sql = (
+                "SELECT id, role, content, created_at FROM chat_messages "
+                "ORDER BY id DESC LIMIT ?"
+            )
+            params = (limit,)
+        async with self._db.execute(sql, params) as cur:
+            rows = await cur.fetchall()
+        # 反转为时间升序
+        rows = list(reversed(rows))
+        return [{"id": r[0], "role": r[1], "content": r[2], "created_at": r[3]} for r in rows]

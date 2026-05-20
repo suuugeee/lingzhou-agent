@@ -879,6 +879,14 @@ class TaskStore:
             chat_id=chat_id,
         )
 
+    async def get_recent_chat_messages(
+        self,
+        limit: int = 6,
+        chat_id: str = "",
+    ) -> list[dict[str, Any]]:
+        """返回最近 limit 条消息（时间升序），可选按 chat_id 过滤。"""
+        return await self._chat.get_recent_messages(limit, chat_id=chat_id)
+
     async def reset_in_progress_tasks(self) -> int:
         """重启时将所有 in_progress 任务重置为 pending。返回重置数量。"""
         result = await self._db.execute(
