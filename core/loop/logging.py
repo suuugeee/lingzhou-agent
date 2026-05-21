@@ -20,6 +20,69 @@ def _strip_memory_context(text: str) -> str:
     return cleaned.strip() or text.strip()
 
 
+class MemoryContextScrubber:
+    """流式版 memory-context 剥离器，用于逐 chunk 消费 LLM 流式输出。
+
+    用法::
+
+        scrubber = MemoryContextScrubber()
+        for chunk in stream:
+            safe = scrubber.feed(chunk)
+            if safe:
+                print(safe, end="", flush=True)
+        print(scrubber.flush(), end="", flush=True)
+
+    设计要点：
+    - 标签可能跨多个 chunk（边界缓冲 16 字节），不依赖一次性正则；
+    - `flush()` 返回剩余缓冲中不含 memory-context 的内容并重置状态；
+    - 线程不安全，每个流实例单独创建。
+    """
+
+    _OPEN_TAG = "<memory-context>"
+    _CLOSE_TAG = "</memory-context>"
+    # 开始标签最长为 17 字节，保留略大于此长度的边界缓冲
+    _BOUNDARY = len(_OPEN_TAG) + 1
+
+    def __init__(self) -> None:
+        self._buf = ""
+        self._inside = False
+
+    def feed(self, chunk: str) -> str:
+        """消费一个 chunk，返回可立即输出的安全内容（可能为空字符串）。"""
+        self._buf += chunk
+        out_parts: list[str] = []
+        while True:
+            if self._inside:
+                end = self._buf.find(self._CLOSE_TAG)
+                if end == -1:
+                    break  # 尚未遇到结束标签，继续缓冲
+                self._buf = self._buf[end + len(self._CLOSE_TAG):]
+                self._inside = False
+            else:
+                start = self._buf.find(self._OPEN_TAG)
+                if start == -1:
+                    # 保留边界缓冲，防止 '<memory-context>' 跨 chunk 被截断
+                    safe_len = max(0, len(self._buf) - self._BOUNDARY)
+                    out_parts.append(self._buf[:safe_len])
+                    self._buf = self._buf[safe_len:]
+                    break
+                out_parts.append(self._buf[:start])
+                self._buf = self._buf[start + len(self._OPEN_TAG):]
+                self._inside = True
+        return "".join(out_parts)
+
+    def flush(self) -> str:
+        """流结束时调用：输出剩余缓冲中不含 memory-context 的内容，并重置状态。"""
+        if self._inside:
+            # 整段 <memory-context> 未闭合，全部丢弃
+            self._buf = ""
+            self._inside = False
+            return ""
+        out = self._buf
+        self._buf = ""
+        return out
+
+
 def _clip_reply_for_log(text: str, limit: int = DEFAULT_LOG_REPLY_CHARS) -> str:
     cleaned = _strip_memory_context(text).replace("\n", "\\n").strip()
     return cleaned

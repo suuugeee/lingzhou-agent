@@ -200,8 +200,11 @@ async def _main(
     chat_id: str,
 ) -> None:
     from memory.task_store import TaskStore
+    from core.paths import project_root as _project_root
+    from core.loop.startup import _startup_health_check
 
     cfg = load_cfg(config)
+    _startup_health_check(cfg, _project_root())
     store = TaskStore(cfg.db_path)
     await store.open()
 

@@ -153,19 +153,22 @@ def doctor(
         from core.loop.startup import (
             _THRESHOLDS_FIELD_PATCHES,
             _MEMORY_FIELD_PATCHES,
-            _patch_config_class,
+            _patch_config_classes,
         )
         _config_py = PROJECT_ROOT / "core" / "config.py"
-        for _cls_name, _patches, _label in [
-            ("ThresholdsConfig", _THRESHOLDS_FIELD_PATCHES, "ThresholdsConfig"),
-            ("MemoryConfig",     _MEMORY_FIELD_PATCHES,     "MemoryConfig"),
+        _all_patched = _patch_config_classes(_config_py, {
+            "ThresholdsConfig": _THRESHOLDS_FIELD_PATCHES,
+            "MemoryConfig":     _MEMORY_FIELD_PATCHES,
+        })
+        for _cls_name, _patches in [
+            ("ThresholdsConfig", _THRESHOLDS_FIELD_PATCHES),
+            ("MemoryConfig",     _MEMORY_FIELD_PATCHES),
         ]:
-            _patched = _patch_config_class(_config_py, _cls_name, _patches)
-            if _patched:
-                console.print(f"  {warn_mark} {_label} 缺少字段，已自动注入: {_patched}")
+            _injected = _all_patched.get(_cls_name)
+            if _injected:
+                console.print(f"  {warn_mark} {_cls_name} 缺少字段，已自动注入: {_injected}")
             else:
-                # 如果字段本就存在，_patch_config_class 返回空列表
-                # 若返回空但字段仍缺失（注入失败），_patch_config_class 内部已尝试且失败
+                # 注入未执行（字段已存在或注入失败），验证实际字段
                 try:
                     import importlib as _il
                     _mod = _il.import_module("core.config")
@@ -173,13 +176,13 @@ def doctor(
                     _inst = _cls()
                     _still_missing = [f for f in _patches if not hasattr(_inst, f)]
                     if _still_missing:
-                        console.print(f"  {fail_mark} {_label} 缺少字段: {_still_missing}  [dim](自动注入失败，请手动 git pull)[/dim]")
-                        issues.append(f"core/config.py 版本过旧，{_label} 缺少: {_still_missing}")
+                        console.print(f"  {fail_mark} {_cls_name} 缺少字段: {_still_missing}  [dim](自动注入失败，请手动 git pull)[/dim]")
+                        issues.append(f"core/config.py 版本过旧，{_cls_name} 缺少: {_still_missing}")
                     else:
-                        console.print(f"  {ok_mark} {_label} schema 兼容  [dim]({len(_patches)} 个关键字段均存在)[/dim]")
+                        console.print(f"  {ok_mark} {_cls_name} schema 兼容  [dim]({len(_patches)} 个关键字段均存在)[/dim]")
                 except Exception as _e:
-                    console.print(f"  {fail_mark} {_label} schema 检查失败: {_e}")
-                    issues.append(f"{_label} 无法导入: {_e}")
+                    console.print(f"  {fail_mark} {_cls_name} schema 检查失败: {_e}")
+                    issues.append(f"{_cls_name} 无法导入: {_e}")
     except Exception as e:
         console.print(f"  {fail_mark} Config schema 检查失败: {e}")
         issues.append(f"Config schema 检查异常: {e}")
@@ -261,6 +264,67 @@ def doctor(
     except Exception as e:
         console.print(f"  {fail_mark} 工具注册失败: {e}")
         issues.append(f"工具注册异常: {e}")
+
+    # ── 12. 模型连通性探针 ─────────────────────────────────────────────
+    if cfg is not None:
+        try:
+            import time as _time
+            import httpx as _httpx
+
+            _prov = cfg.active_provider
+            _mode = getattr(_prov, "mode", "openai")
+            _base = _prov.base_url.rstrip("/")
+            _model_id = cfg.active_model_id
+
+            # 解析 API key
+            _ping_key: str | None = None
+            if _mode == "copilot":
+                _tok = resolve_copilot_token(_prov.api_key_env)
+                _ping_key = _tok.token if _tok else None
+            else:
+                _ping_key = os.environ.get(_prov.api_key_env, "")
+                if not _ping_key:
+                    _cred_f = Path("~/.lingzhou/credentials.json").expanduser()
+                    if _cred_f.exists():
+                        try:
+                            _saved = _json.loads(_cred_f.read_text(encoding="utf-8"))
+                            _ping_key = _saved.get(_prov.api_key_env, "")
+                        except Exception:
+                            pass
+
+            if not _ping_key:
+                console.print(f"  {warn_mark} 模型探针: 跳过（无 API key）")
+            else:
+                _headers = {
+                    "Authorization": f"Bearer {_ping_key}",
+                    "Content-Type": "application/json",
+                }
+                _payload = {
+                    "model": _model_id,
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1,
+                }
+                _t0 = _time.monotonic()
+                try:
+                    with _httpx.Client(timeout=8.0) as _hc:
+                        _resp = _hc.post(f"{_base}/chat/completions", headers=_headers, json=_payload)
+                    _ms = int((_time.monotonic() - _t0) * 1000)
+                    if _resp.status_code in (200, 201):
+                        console.print(f"  {ok_mark} 模型探针: {_model_id} 响应 {_ms}ms  [dim](HTTP {_resp.status_code})[/dim]")
+                    elif _resp.status_code in (401, 403):
+                        console.print(f"  {fail_mark} 模型探针: {_model_id} 认证失败 (HTTP {_resp.status_code})")
+                        issues.append(f"API key 认证失败: HTTP {_resp.status_code}")
+                    else:
+                        console.print(f"  {warn_mark} 模型探针: {_model_id} HTTP {_resp.status_code} ({_ms}ms)")
+                except _httpx.TimeoutException:
+                    _ms = int((_time.monotonic() - _t0) * 1000)
+                    console.print(f"  {warn_mark} 模型探针: {_model_id} 超时 ({_ms}ms)  [dim]网络或服务可能不可达[/dim]")
+                except Exception as _pe:
+                    console.print(f"  {warn_mark} 模型探针: 请求失败: {_pe}")
+        except Exception as _e:
+            console.print(f"  {warn_mark} 模型探针: 跳过 ({_e})")
+    else:
+        console.print(f"  {warn_mark} 模型探针: 跳过（配置文件不可用）")
 
     # ── 汇总 ────────────────────────────────────────────────────────────
     console.print("")

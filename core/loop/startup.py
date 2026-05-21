@@ -58,71 +58,109 @@ _THRESHOLDS_FIELD_PATCHES: dict[str, str] = {
 }
 
 
-def _patch_config_class(config_py: Path, class_name: str, patches: dict[str, str]) -> list[str]:
-    """向 config_py 中的 class_name 末尾注入缺失字段，返回已注入字段名列表。"""
+def _patch_config_classes(
+    config_py: Path,
+    class_patches: dict[str, dict[str, str]],
+) -> dict[str, list[str]]:
+    """向 config_py 中的多个 class 末尾注入缺失字段，单次文件 I/O。
+
+    返回 {class_name: [注入的字段名]} 字典；无需注入的 class 不出现在结果中。
+    """
+    # 1. 确定各 class 的缺失字段
     try:
-        import importlib
-        mod = importlib.import_module("core.config")
-        cls = getattr(mod, class_name, None)
-        if cls is None:
-            return []
-        instance = cls()
-        missing = [f for f in patches if not hasattr(instance, f)]
+        import importlib as _il
+        mod = _il.import_module("core.config")
     except Exception:
-        return []
+        return {}
 
-    if not missing or not config_py.exists():
-        return []
+    to_inject: dict[str, list[str]] = {}
+    for class_name, patches in class_patches.items():
+        try:
+            cls = getattr(mod, class_name, None)
+            if cls is None:
+                continue
+            instance = cls()
+            missing = [f for f in patches if not hasattr(instance, f)]
+            if missing:
+                to_inject[class_name] = missing
+        except Exception:
+            continue
 
+    if not to_inject or not config_py.exists():
+        return {}
+
+    # 2. 单次读取文件
     lines = config_py.read_text(encoding="utf-8").splitlines(keepends=True)
-    in_class = False
-    insert_at = len(lines)
-    for i, line in enumerate(lines):
-        if line.startswith(f"class {class_name}"):
-            in_class = True
-        elif in_class and line.startswith("class "):
-            insert_at = i
-            break
-    if not in_class:
-        return []
 
-    while insert_at > 0 and not lines[insert_at - 1].strip():
-        insert_at -= 1
-    inject = ["\n"] + [patches[f] for f in missing]
-    lines[insert_at:insert_at] = inject
+    # 3. 收集各 class 的插入位置，倒序注入避免行号偏移
+    insertions: list[tuple[int, str]] = []
+    for class_name in to_inject:
+        in_class = False
+        insert_at = len(lines)
+        for i, line in enumerate(lines):
+            if line.startswith(f"class {class_name}"):
+                in_class = True
+            elif in_class and line.startswith("class "):
+                insert_at = i
+                break
+        if not in_class:
+            continue
+        while insert_at > 0 and not lines[insert_at - 1].strip():
+            insert_at -= 1
+        insertions.append((insert_at, class_name))
+
+    if not insertions:
+        return {}
+
+    insertions.sort(key=lambda x: x[0], reverse=True)
+    for insert_at, class_name in insertions:
+        missing = to_inject[class_name]
+        inject = ["\n"] + [class_patches[class_name][f] for f in missing]
+        lines[insert_at:insert_at] = inject
+
+    # 4. 单次写入 + 热重载
     config_py.write_text("".join(lines), encoding="utf-8")
-
-    # 热重载让当前进程立即获得新字段
     try:
-        import importlib
-        importlib.reload(importlib.import_module("core.config"))
+        import importlib as _il2
+        _il2.reload(_il2.import_module("core.config"))
     except Exception:
         pass
 
-    return missing
+    return to_inject
+
+
+def _patch_config_class(config_py: Path, class_name: str, patches: dict[str, str]) -> list[str]:
+    """单 class 兼容包装，内部复用 _patch_config_classes。"""
+    result = _patch_config_classes(config_py, {class_name: patches})
+    return result.get(class_name, [])
 
 
 def _startup_health_check(cfg: Config, project_root: Path) -> None:
     """运行时启动自检（非阻塞，仅 warn 级日志）：
 
-    1. 确保 memory_dir / workspace_dir 目录存在
-    2. Config schema 兼容性 patch（MemoryConfig + ThresholdsConfig）
+    1. 确保 memory_dir / workspace_dir / db_parent 目录存在
+    2. Config schema 兼容性 patch（MemoryConfig + ThresholdsConfig，单次 I/O）
     """
     # 1. 目录自动创建
-    for label, raw_path in [("memory_dir", cfg.memory_dir), ("workspace_dir", cfg.workspace_dir)]:
+    for label, raw_path in [
+        ("memory_dir",    cfg.memory_dir),
+        ("workspace_dir", cfg.workspace_dir),
+        ("db_parent",     Path(cfg.db_path).parent),
+    ]:
         p = Path(raw_path).expanduser()
         try:
             p.mkdir(parents=True, exist_ok=True)
         except Exception as exc:
-            _log.warning("[startup] %s 无法创建，可能导致记忆写入失败: %s  路径=%s", label, exc, p)
+            _log.warning("[startup] %s 无法创建，可能导致运行异常: %s  路径=%s", label, exc, p)
 
-    # 2. Config schema patch
+    # 2. Config schema patch（一次读写）
     config_py = project_root / "core" / "config.py"
-    for class_name, patches in [("MemoryConfig", _MEMORY_FIELD_PATCHES),
-                                  ("ThresholdsConfig", _THRESHOLDS_FIELD_PATCHES)]:
-        patched = _patch_config_class(config_py, class_name, patches)
-        if patched:
-            _log.warning("[startup] %s schema 版本过旧，已自动注入缺失字段: %s", class_name, patched)
+    patched = _patch_config_classes(config_py, {
+        "MemoryConfig":     _MEMORY_FIELD_PATCHES,
+        "ThresholdsConfig": _THRESHOLDS_FIELD_PATCHES,
+    })
+    for class_name, fields in patched.items():
+        _log.warning("[startup] %s schema 版本过旧，已自动注入缺失字段: %s", class_name, fields)
 
 
 def _build_routing_providers(cfg: Config) -> dict[str, Any]:
