@@ -120,10 +120,10 @@ async def _skill_list_and_search():
     ws = _proj_root() / "workspace"
     ctx = _tool_ctx(workspace_dir=str(ws))
 
-    r = await skill_list({}, ctx)
+    r = await skill_list({"scope": "seed"}, ctx)
     assert r.error is None
-    # 至少有 builtin skills
-    assert "runtime.bootstrap" in r.summary
+    # 至少有 seed skills
+    assert "runtime.bootstrap [seed]" in r.summary
 
     r2 = await skill_search({"query": "失败"}, ctx)
     assert r2.error is None
@@ -134,6 +134,37 @@ async def _skill_list_and_search():
     r3 = await skill_search({"query": "zxcvbnm_nonexistent_skill_query"}, ctx)
     assert r3.error is None
     assert "没有找到" in r3.summary
+
+
+def test_skill_activate_reads_skill_markdown_and_resources():
+    asyncio.run(_skill_activate_reads_skill_markdown_and_resources())
+
+
+async def _skill_activate_reads_skill_markdown_and_resources():
+    from tools.skill_ops import skill_activate
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        skill_dir = root / "skills" / "sample-skill"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "references" / "REFERENCE.md").write_text("reference body", encoding="utf-8")
+        (skill_dir / "SKILL.md").write_text(
+            """---
+name: sample-skill
+description: Use when testing activation.
+---
+先读取 references/REFERENCE.md，再执行下一步。
+""",
+            encoding="utf-8",
+        )
+
+        ctx = _tool_ctx(workspace_dir=d)
+        res = await skill_activate({"name": "sample-skill"}, ctx)
+
+        assert res.error is None
+        assert "<skill_content name=\"sample-skill\">" in res.summary
+        assert "references/REFERENCE.md" in res.summary
+        assert res.metadata["skill"] == "sample-skill"
 
 
 def test_browser_navigate_failure_uses_stdout_when_stderr_empty(monkeypatch):

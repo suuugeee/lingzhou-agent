@@ -25,16 +25,14 @@ from .output import (
     JudgmentOutput,
     ModelHealth,
     ModelSelection,
-    READER_TOOLS,
-    _READER_TOOLS,
-    _REASONER_TOOLS,
-    _TOOL_TIER_MAPPING,
     _ASK_EVIDENCE_BUDGET,
     _rewrite_task_ask_to_evidence,
     _rewrite_complex_act_to_task_plan,
     _structured_tool_history_window,
     _build_team_view_from_cfg,
+    is_reader_tool,
     tool_tier,
+    tool_tier_mapping,
 )
 from .context import (
     _emotion_label,
@@ -133,6 +131,13 @@ class JudgmentLayer:
         self._model_health: dict[str, ModelHealth] = {}
         # 运行时临时 provider 缓存：routing_overrides 指定的临时 model 按需创建并缓存
         self._override_providers: dict[str, "Provider"] = {}
+
+    def reload_skills(self) -> None:
+        from core.skill import SkillRegistry
+
+        skills_dir = self._cfg.workspace_dir / "skills"
+        self._skills = SkillRegistry(skills_dir=skills_dir)
+        _log.info("[judgment] 已从 %s 重新加载 skills", skills_dir)
 
     def _track_token_usage(self, provider: "Provider") -> None:
         """从 provider 读取 last_usage 并累积到 self_model。"""
@@ -314,9 +319,10 @@ class JudgmentLayer:
         if prefer_tier in {"reader", "reasoner", "repair"}:
             return prefer_tier
         if phase == "continue":
-            if current_action in _REASONER_TOOLS:
+            current_tier = tool_tier(current_action, self._registry) if current_action else ""
+            if current_tier == "reasoner" and current_action:
                 return "reasoner"
-            if current_action in _READER_TOOLS and not self._tool_history_has_error(tool_history):
+            if current_tier == "reader" and not self._tool_history_has_error(tool_history):
                 return "reader"
             if user_message or self._tool_history_has_error(tool_history):
                 return "reasoner"
@@ -453,7 +459,7 @@ class JudgmentLayer:
 
         posture = "respond" if user_message else ("converge" if task_explore_count >= 4 else "conserve")
         implicit_next_phase_default = None
-        if current_action in _READER_TOOLS:
+        if is_reader_tool(current_action, self._registry):
             implicit_next_phase_default = {
                 "tier": "reader",
                 "trigger": f"last_action={current_action}",
@@ -468,7 +474,7 @@ class JudgmentLayer:
                 current_action_caps = sorted(list(manifest.capabilities))
         payload = {
             "active_overrides": routing_overrides or {},
-            "tool_tier_mapping": _TOOL_TIER_MAPPING,
+            "tool_tier_mapping": tool_tier_mapping(self._registry),
             "tool_capability_mapping": {k: sorted(v) for k, v in capability_mapping.items()},
             "current_action_capabilities": current_action_caps,
             "implicit_next_phase_default": implicit_next_phase_default,
@@ -1020,41 +1026,9 @@ class JudgmentLayer:
 
         _wm_items = wm.get_top(15)
         all_skills = self._skills.all_skills()
-        skill_context_parts: list[str] = []
-        if user_message:
-            skill_context_parts.append(user_message)
-        inbox_messages = task.extras.get("inbox_messages") if task and isinstance(task.extras, dict) else []
-        if task:
-            skill_context_parts.extend([
-                task.title or "",
-                task.goal or "",
-                task.current_step or "",
-                task.next_step or "",
-            ])
-            if isinstance(inbox_messages, list):
-                skill_context_parts.extend(str(message or "") for message in inbox_messages[:3])
-        if current_action:
-            skill_context_parts.append(current_action)
-        for failure in failures[:3]:
-            skill_context_parts.append(f"{failure.kind} {failure.summary}")
-        has_pending_inbox = bool(isinstance(inbox_messages, list) and inbox_messages)
-        skills = self._skills.match_for_context(
-            last_applied=self._last_applied_skill_names,
-            max_inject=getattr(self._cfg.thresholds, "skill_max_inject", 3),
-            wm_pressure=wm.pressure,
-            has_active_task=bool(task),
-            has_next_step=bool(task and (task.next_step or "").strip() and not has_pending_inbox),
-            failure_count=len(failures),
-            high_error_streak=getattr(perception_replay, "high_error_streak", 0),
-            context_text="\n".join(part for part in skill_context_parts if part),
-            failure_threshold=getattr(self._cfg.thresholds, "skill_failure_threshold", 3),
-            wm_pressure_threshold=getattr(self._cfg.thresholds, "skill_wm_pressure_threshold", 0.4),
-        )
-        self._last_selected_skills = list(skills)
-        if skills:
-            _log.debug("[skill] 本轮注入 %d 个技能", len(skills))
-        else:
-            _log.info("[skill] 本轮无可用技能")
+        skills: list[Skill] = []
+        self._last_selected_skills = []
+        _log.debug("[skill] catalog-only mode: runtime 不预选候选 skill，由模型自行 activation")
 
         ctx = {
             "task_section": _fmt_task(task),

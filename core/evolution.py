@@ -19,6 +19,8 @@ from pathlib import Path
 import logging
 from typing import TYPE_CHECKING, Any
 
+from core.skill import ensure_workspace_skill_file, _split_frontmatter
+
 _log = logging.getLogger("lingzhou.evolution")
 
 if TYPE_CHECKING:
@@ -483,6 +485,68 @@ class EvolutionEngine:
             if self._cfg.evolution.backup and prompt_path.exists() and prompt_path.with_suffix(".md.bak").exists():
                 prompt_path.write_text(prompt_path.with_suffix(".md.bak").read_text(encoding="utf-8"), encoding="utf-8")
             return EvolutionResult(success=False, target=f"prompt:{prompt_key}", reason=str(exc))
+
+    async def evolve_skill(self, skill_name: str, feedback: str, ctx: ToolContext | None = None) -> EvolutionResult:
+        """根据反馈重写 workspace skill 文件。"""
+        from provider.base import Message
+
+        workspace_dir = self._cfg.workspace_dir
+        skill_path = ensure_workspace_skill_file(workspace_dir, skill_name)
+        current_src = skill_path.read_text(encoding="utf-8") if skill_path.exists() else ""
+
+        messages = [
+            Message(
+                role="system",
+                content=(
+                    "你是 lingzhou 的自进化模块，负责改进 skill 文件。"
+                    "只输出完整的 SKILL.md Markdown 内容，不要有任何额外文字。"
+                    "保留或补全 frontmatter，至少包含 name 和 description。"
+                ),
+            ),
+            Message(
+                role="user",
+                content=(
+                    f"目标 skill：{skill_name}\n"
+                    f"workspace skill path：{skill_path}\n\n"
+                    f"当前 SKILL.md：\n{current_src[:3000]}\n\n"
+                    f"反馈：\n{feedback[:1000]}\n\n"
+                    "请直接重写完整 skill 文件。若当前内容为空，也请输出完整可用的 SKILL.md。"
+                    "改动目标是 runtime workspace 副本，而不是仓库内的默认 seed 模板。"
+                ),
+            ),
+        ]
+
+        try:
+            new_src = await self._provider.chat(messages)
+            new_src = new_src.strip()
+            if not new_src:
+                return EvolutionResult(success=False, target=f"skill:{skill_name}", reason="LLM 返回空内容")
+
+            meta, _body = _split_frontmatter(new_src)
+            if not meta.get("name") or not meta.get("description"):
+                return EvolutionResult(success=False, target=f"skill:{skill_name}", reason="skill 校验失败：缺少 name 或 description")
+            if str(meta.get("name") or "").strip() != skill_name:
+                return EvolutionResult(success=False, target=f"skill:{skill_name}", reason="skill 校验失败：name 与目标不一致")
+
+            if self._cfg.evolution.backup and skill_path.exists():
+                skill_path.with_suffix(".md.bak").write_text(current_src, encoding="utf-8")
+
+            skill_path.parent.mkdir(parents=True, exist_ok=True)
+            skill_path.write_text(new_src, encoding="utf-8")
+
+            judgment = getattr(ctx, "judgment", None) if ctx is not None else None
+            reload_skills = getattr(judgment, "reload_skills", None)
+            if callable(reload_skills):
+                reload_skills()
+
+            _log.info("[evolution] skill %r 已写入 workspace: %s", skill_name, skill_path)
+            await self._update_dreams(f"调整 skill：{skill_name} 已根据反馈重写 workspace 副本。")
+            return EvolutionResult(success=True, target=f"skill:{skill_name}", new_code=new_src)
+        except Exception as exc:
+            backup_path = skill_path.with_suffix(".md.bak")
+            if self._cfg.evolution.backup and backup_path.exists():
+                skill_path.write_text(backup_path.read_text(encoding="utf-8"), encoding="utf-8")
+            return EvolutionResult(success=False, target=f"skill:{skill_name}", reason=str(exc))
 
     async def evolve_tool(self, tool_name: str, tool_path: Path, feedback: str, ctx: ToolContext | None = None) -> EvolutionResult:
         """根据反馈重写工具，热替换。"""

@@ -628,6 +628,68 @@ async def _evolution_regression_triggers_rollback():
         await store.close()
 
 
+def test_evolution_skill_targets_workspace_skill_file(tmp_path):
+    asyncio.run(_evolution_skill_targets_workspace_skill_file(tmp_path))
+
+
+async def _evolution_skill_targets_workspace_skill_file(tmp_path):
+    from types import SimpleNamespace
+    from typing import Any, cast
+
+    from core.config import Config
+    from core.evolution import EvolutionEngine
+    from core.skill import _seed_skills_dir, workspace_skill_file
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return """---
+name: runtime.bootstrap
+description: Workspace-evolved bootstrap skill.
+---
+只在 workspace 副本里演化这份 skill。
+"""
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+        "loop": {
+            "workspace_dir": str(tmp_path / "workspace"),
+        },
+        "evolution": {
+            "backup": True,
+        },
+    })
+
+    engine = EvolutionEngine(cfg, _DummyProvider(), ToolRegistry())
+    reload_calls: list[str] = []
+    ctx = cast(Any, SimpleNamespace(judgment=SimpleNamespace(reload_skills=lambda: reload_calls.append("reloaded"))))
+
+    seed_path = _seed_skills_dir() / "runtime.bootstrap" / "SKILL.md"
+    seed_before = seed_path.read_text(encoding="utf-8")
+
+    result = await engine.evolve_skill("runtime.bootstrap", "让 bootstrap 更贴近 runtime workspace。", ctx=ctx)
+
+    target_path = workspace_skill_file(cfg.workspace_dir, "runtime.bootstrap")
+    assert result.success is True
+    assert result.target == "skill:runtime.bootstrap"
+    assert target_path.exists()
+    assert "Workspace-evolved bootstrap skill." in target_path.read_text(encoding="utf-8")
+    assert seed_path.read_text(encoding="utf-8") == seed_before
+    assert reload_calls == ["reloaded"]
+
+
 async def test_refresh_running_runs_updates_finished_exec_runs():
     import os
     import time
@@ -1083,6 +1145,7 @@ def test_tool_registry():
     assert "process.write" in names
     assert "skill.list" in names
     assert "skill.search" in names
+    assert "skill.activate" in names
 
 
 def test_file_list_and_memory_search():
@@ -2152,6 +2215,8 @@ def test_skill_registry_loads_package_skill_and_matches_context(tmp_path):
 name: karpathy-coding-base
 description: |
   Andrej Karpathy-inspired coding guardrails. Triggers: 修复bug、重构、写脚本、代码审查
+match_rules: |
+    any: 修复bug | 重构 | 写脚本 | 代码审查 | bug | 脚本 => 1.0
 ---
 先思考，再编码。极简优先。手术式变更。目标驱动验证。
 """,
@@ -2165,6 +2230,8 @@ description: |
 name: interaction
 description: |
   统一人际交互入口。Triggers: 提问/确认/好奇追问/理解语境
+match_rules: |
+    any: 提问 | 确认 | 好奇 | 好奇追问 | 理解语境 => 1.0
 ---
 先判断意图，再决定是回答、提问还是确认。方向不清时问一个最小问题。
 """,
@@ -2178,6 +2245,8 @@ description: |
 name: proactive-work
 description: |
   主动工作方法论。Triggers: 完成任务后、等回复时、需自主决定下一步
+match_rules: |
+    any: 完成任务后 | 等回复时 | 自主决定下一步 | 自己判断 | 往前推进 => 1.0
 ---
 完成任务后不要等待，主动判断并推进下一步。
 """,
@@ -2191,6 +2260,8 @@ description: |
 name: self-monitoring
 description: |
   Self-monitoring. Triggers: 工具执行失败、编辑失败、文件异常、日志错误、执行偏离预期
+match_rules: |
+    any: 工具执行失败 | 编辑失败 | edit 失败 | 文件异常 | 日志错误 | 日志异常 | 执行偏离预期 | 哪里偏了 => 1.0
 ---
 发现漂移、日志错误、编辑失败后，先检查并修复。
 """,
@@ -2204,6 +2275,8 @@ description: |
 name: error-handling
 description: |
   Error handling. Triggers: tool call fails, exec denied, network timeout, permission error
+match_rules: |
+    any: tool call fails | exec denied | network timeout | permission error => 1.0
 ---
 失败后先分类错误，再决定重试、替代还是汇报。
 """,
@@ -2308,5 +2381,354 @@ state_bias: has_active_task=1.0, has_next_step=4.5
     )
 
     assert [skill.name for skill in skills] == ["continuity-driven"]
+
+
+def test_skill_registry_state_rules_support_thresholds_and_inhibition(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    pkg = skills_dir / "failure-gated"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text(
+        """---
+name: failure-gated
+description: Focus on gateway reconnect storms after enough failure evidence appears.
+state_rules: |
+  failure_signal_ratio >= 0.6 => 1.8
+  inhibit if has_next_step >= 1 and failure_signal_ratio < 0.6
+---
+先在失败证据充分时再接管。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+
+    blocked = reg.match_for_context(
+        wm_pressure=0.1,
+        has_active_task=True,
+        has_next_step=True,
+        failure_count=0,
+        high_error_streak=0,
+        context_text="gateway reconnect storm websocket flapping",
+        max_inject=1,
+    )
+    assert blocked == []
+
+    allowed = reg.match_for_context(
+        wm_pressure=0.1,
+        has_active_task=True,
+        has_next_step=True,
+        failure_count=3,
+        high_error_streak=2,
+        context_text="gateway reconnect storm websocket flapping",
+        max_inject=1,
+    )
+    assert [skill.name for skill in allowed] == ["failure-gated"]
+
+
+def test_skill_registry_state_rules_support_negative_weights(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    pkg = skills_dir / "idle-helper"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text(
+        """---
+name: idle-helper
+description: Only make sense when no active task is present.
+state_rules: |
+  has_active_task => -2.0
+---
+活跃任务存在时主动降权。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+    skills = reg.match_for_context(
+        wm_pressure=0.1,
+        has_active_task=True,
+        has_next_step=False,
+        failure_count=0,
+        high_error_streak=0,
+        context_text="",
+        max_inject=1,
+    )
+
+    assert skills == []
+
+
+def test_skill_registry_loads_seed_skill_from_file():
+    from core.skill import SkillRegistry
+
+    reg = SkillRegistry()
+    skill = next(skill for skill in reg.all_skills() if skill.name == "runtime.bootstrap")
+
+    assert skill.origin == "seed"
+    assert skill.source_path.endswith("runtime.bootstrap/SKILL.md")
+    assert skill.guidance == ""
+    assert "bootstrap_identity" in skill.load_guidance()
+
+
+def test_skill_registry_activate_loads_guidance_and_resources(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    pkg = skills_dir / "sample-skill"
+    (pkg / "references").mkdir(parents=True)
+    (pkg / "references" / "REFERENCE.md").write_text("skill reference", encoding="utf-8")
+    (pkg / "SKILL.md").write_text(
+        """---
+name: sample-skill
+description: Use when the task needs sample skill activation.
+compatibility: Requires Lingzhou with skill.activate support.
+allowed-tools: file.read skill.activate
+metadata:
+  author: example-org
+  version: "1.0"
+---
+先阅读 REFERENCE.md，再决定如何执行。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+    skill = reg.get("sample-skill")
+
+    assert skill is not None
+    assert skill.metadata == {"author": "example-org", "version": "1.0"}
+    assert skill.allowed_tools == ["file.read", "skill.activate"]
+
+    activated, text = reg.activate("sample-skill")
+    assert activated is not None
+    assert "<skill_content name=\"sample-skill\">" in text
+    assert "先阅读 REFERENCE.md" in text
+    assert "references/REFERENCE.md" in text
+
+
+def test_workspace_skill_can_override_builtin_definition(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "runtime.bootstrap.md").write_text(
+        """---
+name: runtime.bootstrap
+description: 覆盖版 bootstrap skill
+tags: custom
+triggers: 冷启动
+state_bias: idle_only=0.2
+---
+先审视工作记忆中的身份，再自行决定是否立刻创建任务。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+    skill = next(skill for skill in reg.all_skills() if skill.name == "runtime.bootstrap")
+
+    assert skill.origin == "workspace"
+    assert skill.description == "覆盖版 bootstrap skill"
+
+
+def test_skill_registry_does_not_backfill_seed_skills_when_workspace_present(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    pkg = skills_dir / "solo-skill"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text(
+        """---
+name: solo-skill
+description: 只有 workspace skill，不应自动回填 seed。
+triggers: 单独运行
+---
+只根据 workspace 当前 skill 集合工作。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+    names = [skill.name for skill in reg.all_skills()]
+
+    assert names == ["solo-skill"]
+
+
+def test_seed_workspace_skills_only_on_empty_workspace(tmp_path):
+    from core.skill import seed_workspace_skills
+
+    written = seed_workspace_skills(tmp_path)
+    skills_dir = tmp_path / "skills"
+    assert written >= 5
+    assert (skills_dir / "runtime.bootstrap" / "SKILL.md").exists()
+
+    custom_dir = skills_dir / "custom"
+    custom_dir.mkdir(parents=True)
+    (custom_dir / "SKILL.md").write_text(
+        """---
+name: custom
+description: keep workspace authoritative
+---
+workspace authoritative
+""",
+        encoding="utf-8",
+    )
+    written_again = seed_workspace_skills(tmp_path)
+    assert written_again == 0
+
+
+def test_skill_registry_prefers_contextual_skill_over_builtin_state_bias(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    pkg = skills_dir / "error-handling"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text(
+        """---
+name: error-handling
+description: |
+  Error handling. Triggers: exec denied, timeout, permission error
+---
+失败后先分类错误，再决定重试、替代还是汇报。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+    skills = reg.match_for_context(
+        wm_pressure=0.1,
+        has_active_task=True,
+        has_next_step=True,
+        failure_count=0,
+        high_error_streak=0,
+        context_text="exec 被拒绝了，还报了 timeout 和 permission error",
+        max_inject=1,
+    )
+
+    assert [skill.name for skill in skills] == ["error-handling"]
+
+
+def test_skill_registry_does_not_match_on_skill_name_alone(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    pkg = skills_dir / "error-handling"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text(
+        """---
+name: error-handling
+description: 完全中性的技能说明。
+---
+这里没有声明任何 triggers、tags 或 match_terms。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+    skills = reg.match_for_context(
+        wm_pressure=0.1,
+        has_active_task=True,
+        has_next_step=False,
+        failure_count=0,
+        high_error_streak=0,
+        context_text="error handling timeout permission error",
+        max_inject=1,
+    )
+
+    assert [skill.name for skill in skills] != ["error-handling"]
+
+
+def test_skill_registry_prefers_explicit_match_terms(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    pkg = skills_dir / "neutral-skill"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text(
+        """---
+name: neutral-skill
+description: 中性说明，不依赖 skill 名称词面命中。
+match_terms: timeout, permission error, exec denied
+---
+根据显式 match_terms 感知上下文。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+    skills = reg.match_for_context(
+        wm_pressure=0.1,
+        has_active_task=True,
+        has_next_step=False,
+        failure_count=0,
+        high_error_streak=0,
+        context_text="exec 被拒绝了，还报了 timeout 和 permission error",
+        max_inject=1,
+    )
+
+    assert [skill.name for skill in skills] == ["neutral-skill"]
+
+
+def test_skill_registry_uses_declarative_match_rules(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    pkg = skills_dir / "gateway-reconnect"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text(
+        """---
+name: gateway-reconnect
+description: Diagnose gateway reconnect storms in worker processes.
+match_rules: |
+    all: gateway | reconnect | websocket | flapping => 2.2
+---
+聚焦网关重连风暴，依赖显式 match_rules 而不是 description 自动拆词。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+    skills = reg.match_for_context(
+        wm_pressure=0.1,
+        has_active_task=True,
+        has_next_step=False,
+        failure_count=0,
+        high_error_streak=0,
+        context_text="gateway worker reconnect storm websocket flapping",
+        max_inject=1,
+    )
+
+    assert [skill.name for skill in skills] == ["gateway-reconnect"]
+
+
+def test_skill_registry_description_only_no_longer_matches_context(tmp_path):
+    from core.skill import SkillRegistry
+
+    skills_dir = tmp_path / "skills"
+    pkg = skills_dir / "gateway-reconnect"
+    pkg.mkdir(parents=True)
+    (pkg / "SKILL.md").write_text(
+        """---
+name: gateway-reconnect
+description: Diagnose gateway reconnect storms and websocket flapping in worker processes.
+---
+如果没有显式 match_rules / match_terms / triggers，就不应靠 description 自动命中。
+""",
+        encoding="utf-8",
+    )
+
+    reg = SkillRegistry(skills_dir=skills_dir)
+    skills = reg.match_for_context(
+        wm_pressure=0.1,
+        has_active_task=True,
+        has_next_step=False,
+        failure_count=0,
+        high_error_streak=0,
+        context_text="gateway worker reconnect storm websocket flapping",
+        max_inject=1,
+    )
+
+    assert [skill.name for skill in skills] != ["gateway-reconnect"]
 
 

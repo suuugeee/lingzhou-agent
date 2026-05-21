@@ -128,6 +128,10 @@ class SoulManager:
         workspace = self._cfg.workspace_dir
         workspace.mkdir(parents=True, exist_ok=True)
 
+        from core.skill import seed_workspace_skills
+
+        seed_workspace_skills(workspace)
+
         soul_name = await self._soul_name()
 
         soul_path = workspace / "SOUL.md"

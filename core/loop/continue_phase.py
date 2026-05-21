@@ -79,7 +79,11 @@ async def _run_continue_phase(
         if len(tool_history) >= _TOOL_HISTORY_COMPACT_THRESHOLD:
             _compact_tool_history(tool_history)
 
-        next_tier = _preferred_continue_tier(action, user_message=user_message) or ""
+        next_tier = _preferred_continue_tier(
+            action,
+            user_message=user_message,
+            registry=loop._registry,
+        ) or ""
         continue_thinking = _resolve_thinking_override(
             cfg,
             user_message=user_message,
@@ -168,7 +172,7 @@ async def _run_continue_phase(
 
         action = cont
         result = cont_result
-        if action.reply_to_user or not _should_continue_within_tick(action):
+        if action.reply_to_user or not _should_continue_within_tick(action, registry=loop._registry):
             break
         # PlanUnchanged：计划结构没变，继续循环只会死锁；WM 中已有"请直接执行"提示，
         # 直接跳出 continue 阶段，让下一 tick 感知 WM 后执行具体工具。

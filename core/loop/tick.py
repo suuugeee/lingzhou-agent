@@ -557,6 +557,7 @@ async def _tick_impl(loop: Any, cycle: int, user_message: str = "", chat_id: str
         action,
         user_message=user_message,
         has_active_task=active_task is not None,
+        registry=loop._registry,
     ):
         action, result = await _run_continue_phase(
             loop=loop,

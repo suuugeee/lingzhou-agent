@@ -814,6 +814,13 @@ def test_fallback_reply_for_user_does_not_echo_tool_summary_on_success():
     assert "/tmp/a.py" not in reply
 
 
+def test_infer_valence_from_text_uses_explicit_hint_only():
+    from core.loop.common import _infer_valence_from_text
+
+    assert _infer_valence_from_text("继续推进，暂无结构化情绪提示", 0.6) == 0.6
+    assert _infer_valence_from_text("root cause found; valence=0.2", 0.6) == pytest.approx(0.52)
+
+
 def test_should_continue_within_tick_for_autonomous_act():
     from core.judgment import JudgmentOutput
     from core.loop.common import _preferred_continue_tier, _should_continue_within_tick
@@ -1174,6 +1181,69 @@ def test_rewrite_complex_user_act_uses_structural_next_step_not_keyword_regex():
 
     assert rewritten.chosen_action_id == "task.plan"
     assert rewritten.params["plan"][1] == {"step": "汇总结果并修复失败项", "status": "pending"}
+
+
+def test_rewrite_complex_user_act_respects_plan_alignment_exempt_capability():
+    from core.judgment.runtime import _rewrite_complex_act_to_task_plan
+    from memory.task_store import Task
+    from tools.registry import ToolContext, ToolManifest, ToolRegistry, ToolResult, tool
+
+    @tool(ToolManifest(
+        name="debug.plan.exempt",
+        description="调试用对齐豁免工具",
+        capabilities=("plan_alignment_exempt",),
+    ))
+    async def _debug_plan_exempt(params: dict[str, object], ctx: ToolContext) -> ToolResult:
+        return ToolResult(summary="ok")
+
+    task = Task(
+        id=10,
+        title="处理回复",
+        status="active",
+        priority="high",
+        created_at="2026-05-15T00:00:00+00:00",
+        goal="处理 chat 回复",
+    )
+    action = _judgment_output(
+        decision="act",
+        chosen_action_id="debug.plan.exempt",
+        params={"query": "check"},
+        next_step="继续汇总",
+    )
+
+    rewritten = _rewrite_complex_act_to_task_plan(
+        action,
+        user_message="帮我继续处理",
+        active_task=task,
+        registry=ToolRegistry(),
+    )
+
+    assert rewritten.chosen_action_id == "debug.plan.exempt"
+
+
+def test_preferred_continue_tier_uses_manifest_reader_tier():
+    from core.loop.common import _preferred_continue_tier, _should_continue_within_tick
+    from tools.registry import ToolContext, ToolManifest, ToolRegistry, ToolResult, tool
+
+    @tool(ToolManifest(
+        name="debug.reader.inspect",
+        description="调试用 reader 工具",
+        prefer_tier="reader",
+        capabilities=("completion_info_only",),
+    ))
+    async def _debug_reader_inspect(params: dict[str, object], ctx: ToolContext) -> ToolResult:
+        return ToolResult(summary="ok")
+
+    reg = ToolRegistry()
+    action = _judgment_output(decision="act", chosen_action_id="debug.reader.inspect")
+
+    assert _preferred_continue_tier(action, user_message="继续分析", registry=reg) == "reader"
+    assert _should_continue_within_tick(
+        action,
+        user_message="继续分析",
+        has_active_task=True,
+        registry=reg,
+    ) is True
 
 
 async def test_sync_task_progress_state_promotes_previous_next_step():

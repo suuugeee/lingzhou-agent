@@ -94,6 +94,7 @@ class ToolContext:
     semantic: "SemanticMemory"
     emotion: "EmotionState"
     probe_manager: Any = None  # ProbeManager，由 CognitionLoop._make_ctx() 注入
+    judgment: Any = None
 
     @property
     def dry_run(self) -> bool:

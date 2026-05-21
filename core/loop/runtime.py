@@ -208,6 +208,7 @@ class CognitionLoop:
             semantic=self._semantic,
             emotion=self._emotion,
             probe_manager=self._probe_manager,
+            judgment=self._judgment,
         )
 
     async def open(self) -> None:

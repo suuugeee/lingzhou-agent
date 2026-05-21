@@ -95,6 +95,9 @@
 ### 可用 skills 摘要目录（active catalog）
 {{skills_catalog_section}}
 
+> skills 采用 progressive disclosure：这里看到的只是 catalog / 候选摘要，不是完整 instruction。
+> 当某个 skill 明显相关时，先调用 `skill.activate` 读取完整 SKILL.md，再决定是否采用其流程或约束。
+
 {{primary_skill_section}}
 
 ### 可用的认知框架（根据当前情境自行选用）

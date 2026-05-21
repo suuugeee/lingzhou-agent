@@ -20,7 +20,7 @@ from tools.registry import tool, ToolManifest, ToolResult, ToolParam, ToolContex
         "choices 可选：最多 4 个预定义选项，用户可从中选择或自由回答。"
     ),
     progress_category="info",
-    capabilities=("plan_bootstrap_exempt",),
+    capabilities=("plan_bootstrap_exempt", "plan_alignment_exempt"),
     params=[
         ToolParam("question", "string", "要问的问题", required=True),
         ToolParam("choices", "object", "可选项列表（JSON 数组，最多4个）", required=False),

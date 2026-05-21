@@ -94,17 +94,20 @@ def _fmt_task(task: "Task | None") -> str:
         if plan_lines:
             lines.append("当前计划:")
             lines.extend(plan_lines)
-            # 有 in_progress 步骤时注入命令式指令，避免 LLM 推断不出"应该执行"
+            # 有 in_progress 步骤时注入高优先级事实信号，避免计划态在判断层被忽略。
             in_progress_step = next(
                 (str(s.get("step") or "").strip() for s in raw_plan if isinstance(s, dict) and s.get("status") == "in_progress"),
                 None,
             )
             if in_progress_step:
-                lines.append(f"⚠️ 执行指令：步骤 [{in_progress_step}] 正在进行，你的下一个动作必须直接执行它，禁止调用 task.plan。")
-    # inbox_messages：由 task.steer 注入的转向指令，本轮必须优先处理
+                lines.append(
+                    f"⚠️ 计划信号：步骤 [{in_progress_step}] 当前处于 in_progress。"
+                    "若没有更强的新证据或 inbox 转向，优先直接推进这一步，而不是重新 plan。"
+                )
+    # inbox_messages：由 task.steer 注入的转向信号，应先评估它是否改变当前方向
     inbox: list = task.extras.get("inbox_messages") or [] if isinstance(task.extras, dict) else []
     if isinstance(inbox, list) and inbox:
-        lines.append(f"⚠️ 转向指令（inbox {len(inbox)} 条，本轮必须优先处理）:")
+        lines.append(f"⚠️ 转向信号（inbox {len(inbox)} 条，先评估这些新信号是否改变当前方向）:")
         for i, msg in enumerate(inbox[:5], 1):
             lines.append(f"  [{i}] {str(msg)[:120]}")
     if last_run_status:
@@ -686,7 +689,8 @@ def _fmt_skill_catalog(skills: "list[Skill]") -> str:
     if not skills:
         return "（暂无 skills）"
     lines = [
-        "**SKILL RESOLVER** — 根据当前情境查表选技能；命中后优先遵守对应 primary_skill_section：",
+        "**AGENT SKILLS CATALOG** — 这里只预加载 metadata，不直接注入完整 instructions。",
+        "当某个 skill 的 description 明显匹配当前任务时，用 skill.activate 加载对应 SKILL.md；不要仅凭 skill 名称猜测。",
         "",
         "| 技能 | 触发信号 | 何时使用 |",
         "|------|---------|---------|",
@@ -697,33 +701,35 @@ def _fmt_skill_catalog(skills: "list[Skill]") -> str:
         desc = _short_skill_desc(skill.description)
         lines.append(f"| `{skill.name}` | {trigger_str} | {desc} |")
     lines.append("")
-    lines.append("未命中时按一般判断规则执行；可调用 skill.search/skill.list 查询更多技能。")
+    lines.append("可调用 skill.list / skill.search 查 catalog；真正使用前优先 skill.activate，而不是把目录摘要当完整规则。")
     return "\n".join(lines)
 
 
 def _fmt_primary_skill(skill: "Skill | None") -> str:
     if skill is None:
-        return "（本轮未命中主技能；按一般 judgment 规则执行。如判断受阻，再参考下方 activated skills 或调用 skill.search）"
-    origin = "builtin" if not getattr(skill, "source_path", "") else skill.source_path
+        return "（本轮无明显 skill 候选；按一般 judgment 规则执行。若遇到专业流程或项目特有规则，再查 catalog 并按需 skill.activate。）"
+    origin = str(getattr(skill, "origin", "dynamic") or "dynamic")
+    if origin == "workspace" and getattr(skill, "source_path", ""):
+        origin = skill.source_path
     return (
         f"**{skill.name}** — {skill.description}\n"
-        f"> 本轮主技能，优先遵守。source: {origin}\n"
-        f"> {skill.guidance}"
+        f"> 候选 skill，不代表已激活。source: {origin}\n"
+        f"> 若你判断它与当前任务相关，先调用 skill.activate(name=\"{skill.name}\") 读取完整 SKILL.md，再决定是否遵循。"
     )
 
 
 def _fmt_skills(skills: "list[Skill]") -> str:
     if not skills:
-        return "（未加载任何技能指南）"
+        return "（当前没有候选 skill 被高亮；可按需查阅 catalog）"
     parts: list[str] = [
-        "以下是全部可用的认知框架（技能）。请根据当前情境自行判断适用哪些，多个技能可同时运用。",
+        "以下是当前上下文下较相关的候选 skills。它们目前仍只是 metadata 线索，不是已注入的完整 instructions。",
     ]
     for skill in skills:
-        origin = "builtin" if not getattr(skill, "source_path", "") else skill.source_path
-        guidance = getattr(skill, "guidance", "") or ""
+        origin = str(getattr(skill, "origin", "dynamic") or "dynamic")
+        if origin == "workspace" and getattr(skill, "source_path", ""):
+            origin = skill.source_path
         parts.append(f"**{skill.name}** [{origin}] — {skill.description}")
-        if guidance.strip():
-            parts.append(f"> {guidance.strip()}")
+        parts.append(f"> activation: skill.activate(name=\"{skill.name}\")")
     return "\n".join(parts)
 
 

@@ -134,7 +134,7 @@ def skills(
     cfg = load_cfg(config)
     skills_dir = Path(cfg.loop.workspace_dir).expanduser() / ("skills-disabled" if disabled else "skills")
     reg = SkillRegistry(skills_dir=skills_dir)
-    items = [s for s in reg.all_skills() if bool(s.source_path)]
+    items = [s for s in reg.all_skills() if getattr(s, "origin", "builtin") == "workspace"]
 
     if search:
         kw = search.lower()

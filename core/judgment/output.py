@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 # ── 工具分层常量 ─────────────────────────────────────────────────────────────
 
-# 低成本读取/枚举类工具 → reader tier（也被 loop.py 用于自动 tier 推断）
+# 低成本读取/枚举类工具 → reader tier（兼容 fallback；运行时优先读 manifest）
 _READER_TOOLS = frozenset({
     "file.list", "file.read",
     "memory.get_fact", "memory.search",
@@ -47,6 +47,43 @@ _TOOL_TIER_MAPPING = {
     "reasoner": sorted(_REASONER_TOOLS),
     "repair": [],
 }
+
+
+def _tool_manifest(tool_id: str, registry: "ToolRegistry | None" = None) -> Any | None:
+    if registry is None or not tool_id:
+        return None
+    entry = registry.get(tool_id)
+    return entry.manifest if entry else None
+
+
+def is_reader_tool(tool_id: str, registry: "ToolRegistry | None" = None) -> bool:
+    manifest = _tool_manifest(tool_id, registry)
+    if manifest is not None:
+        if manifest.prefer_tier == "reader":
+            return True
+        if manifest.prefer_tier == "reasoner":
+            return False
+        caps = set(manifest.capabilities or ())
+        if "completion_info_only" in caps and "completion_mutation" not in caps:
+            return True
+    return tool_id in _READER_TOOLS
+
+
+def is_plan_alignment_exempt(tool_id: str, registry: "ToolRegistry | None" = None) -> bool:
+    if tool_has_capability(registry, tool_id, "plan_alignment_exempt"):
+        return True
+    return tool_id in {"task.plan", "task.ask"}
+
+
+def tool_tier_mapping(registry: "ToolRegistry | None" = None) -> dict[str, list[str]]:
+    if registry is None:
+        return {tier: list(names) for tier, names in _TOOL_TIER_MAPPING.items()}
+    mapping: dict[str, list[str]] = {"reader": [], "reasoner": [], "repair": []}
+    for manifest in registry.list_manifests():
+        mapping.setdefault(tool_tier(manifest.name, registry), []).append(manifest.name)
+    for tier in mapping:
+        mapping[tier] = sorted(dict.fromkeys(mapping[tier]))
+    return mapping
 
 # ── 续判前置改写：证据预算门 ────────────────────────────────────────────────────
 
@@ -99,9 +136,9 @@ def _rewrite_complex_act_to_task_plan(
     任务管理类工具（task.complete/advance/update/fail/add）是状态转换动作，不改写。
     """
     tool_id = action.chosen_action_id or ""
-    if tool_id in _READER_TOOLS:
+    if is_reader_tool(tool_id, registry):
         return action
-    if tool_id.startswith("task."):
+    if is_plan_alignment_exempt(tool_id, registry):
         return action
     if active_task is None:
         return action
@@ -217,14 +254,13 @@ def _build_team_view_from_cfg(cfg: Any) -> str:
 def tool_tier(tool_id: str, registry: "ToolRegistry | None" = None) -> str:
     """判断工具应该用哪个 tier。
 
-    优先级：manifest.prefer_tier → 硬编码集合 → 默认 reasoner。
+    优先级：manifest.prefer_tier / capabilities → 硬编码 fallback → 默认 reasoner。
     数据驱动的工具可以声明 prefer_tier，无需改此处。
     """
-    if registry is not None and tool_id:
-        entry = registry.get(tool_id)
-        if entry and entry.manifest.prefer_tier:
-            return entry.manifest.prefer_tier
-    if tool_id in _READER_TOOLS:
+    manifest = _tool_manifest(tool_id, registry)
+    if manifest is not None and manifest.prefer_tier:
+        return manifest.prefer_tier
+    if is_reader_tool(tool_id, registry):
         return "reader"
     if tool_id in _REASONER_TOOLS:
         return "reasoner"

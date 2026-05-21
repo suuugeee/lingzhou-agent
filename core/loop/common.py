@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from core.config import Config
-from core.judgment import JudgmentOutput, READER_TOOLS
+from core.judgment import JudgmentOutput, tool_tier
 from core.perception import PerceptionReplaySummary
 from core.task_runtime import VALID_MODEL_TIERS
 from memory.task_store import Task
@@ -21,19 +22,32 @@ _EVENT_APPEND_CHARS = 8000
 _EVENT_BODY_MAX_CHARS = 40000
 _EVENT_NEW_BODY_CHARS = 16000
 
-_VALENCE_POS = frozenset(["完成", "成功", "理解", "学到", "进步", "有效", "清晰", "好", "正确", "解决", "突破"])
-_VALENCE_NEG = frozenset(["失败", "错误", "困惑", "卡住", "无法", "问题", "不对", "不清", "循环", "重复", "卡顿"])
+_VALENCE_HINT_RE = re.compile(r"(?:valence|情绪效价)\s*[:=：]\s*(0(?:\.\d+)?|1(?:\.0+)?)", re.IGNORECASE)
+
+
+def _explicit_valence_hint(text: str) -> float | None:
+    match = _VALENCE_HINT_RE.search(text or "")
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))
+    except Exception:
+        return None
+    if 0.0 <= value <= 1.0:
+        return value
+    return None
 
 
 def _infer_valence_from_text(text: str, current: float) -> float:
-    """从 reflection 文本推断情绪效价倾向。"""
-    pos = sum(1 for word in _VALENCE_POS if word in text)
-    neg = sum(1 for word in _VALENCE_NEG if word in text)
-    if pos + neg == 0:
+    """从 reflection 文本里的显式 valence hint 推断效价。
+
+    不再依赖 Python 侧正负关键词词表，避免用硬编码词义去塑形情绪轨迹。
+    若 reflection 没有给出结构化 hint，则保持当前值不变。
+    """
+    hinted = _explicit_valence_hint(text)
+    if hinted is None:
         return current
-    ratio = pos / (pos + neg)
-    target = 0.3 + ratio * 0.7
-    return current * 0.8 + target * 0.2
+    return current * 0.8 + hinted * 0.2
 
 
 def _next_thinking_override(model_strategy: dict[str, Any] | None) -> str | None:
@@ -75,6 +89,7 @@ def _should_continue_within_tick(
     *,
     user_message: str = "",
     has_active_task: bool = False,
+    registry: Any | None = None,
 ) -> bool:
     """task.complete/fail 后不续计；mutation+用户消息+有任务时暂停让用户确认。"""
     if action.decision != "act":
@@ -82,17 +97,22 @@ def _should_continue_within_tick(
     if (action.chosen_action_id or "") in {"task.complete", "task.fail"}:
         return False
     # mutation tool in a user-prompted tick with active task: don't auto-continue
-    if user_message and has_active_task and (action.chosen_action_id or "") not in READER_TOOLS:
+    if user_message and has_active_task and tool_tier(action.chosen_action_id or "", registry) != "reader":
         return False
     return True
 
 
-def _preferred_continue_tier(action: JudgmentOutput, *, user_message: str = "") -> str | None:
+def _preferred_continue_tier(
+    action: JudgmentOutput,
+    *,
+    user_message: str = "",
+    registry: Any | None = None,
+) -> str | None:
     next_tier = str((action.model_strategy or {}).get("next_phase_tier", "") or "")
     if next_tier in VALID_MODEL_TIERS:
         return next_tier
     # 只要刚执行的工具属于读取类，续判就保持 reader tier（无论是否有 user_message）
-    if (action.chosen_action_id or "") in READER_TOOLS:
+    if tool_tier(action.chosen_action_id or "", registry) == "reader":
         return "reader"
     return None
 
