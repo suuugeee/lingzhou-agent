@@ -332,6 +332,47 @@ async def _task_wait_rejects_unknown_wait_kind():
         await store.close()
 
 
+def test_task_steer_inbox_is_consumed_once():
+    asyncio.run(_task_steer_inbox_is_consumed_once())
+
+
+async def _task_steer_inbox_is_consumed_once():
+    from memory.task_store import TaskStore
+    from tools.task_ops import task_steer
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "steer.db")
+        await store.open()
+        task_id = await store.add_task("转向任务", goal="验证 steering inbox 只消费一次")
+
+        ctx = _tool_ctx(task_store=store)
+        steer_res = await task_steer(
+            {
+                "task_id": task_id,
+                "message": "改成先读取配置文件，再决定是否继续旧计划",
+            },
+            ctx,
+        )
+
+        assert steer_res.error is None
+
+        steered = await store.get_task_by_id(task_id)
+        assert steered is not None
+        assert steered.extras["inbox_messages"] == ["改成先读取配置文件，再决定是否继续旧计划"]
+
+        inbox = await store.pop_task_inbox(task_id)
+        assert inbox == ["改成先读取配置文件，再决定是否继续旧计划"]
+
+        consumed = await store.get_task_by_id(task_id)
+        assert consumed is not None
+        assert consumed.extras.get("inbox_messages") == []
+
+        inbox_again = await store.pop_task_inbox(task_id)
+        assert inbox_again == []
+
+        await store.close()
+
+
 async def _chat_messages_are_sanitized_on_write():
     from memory.task_store import TaskStore
 

@@ -15,7 +15,7 @@
 - 工作记忆、情节记忆、语义记忆、任务存储四层持久化
 - reader / reasoner / repair 多模型分层路由
 - 工具、提示词和运行时行为支持热更新与演进
-- 当前内置 56 个工具端点，覆盖文件、Shell、任务、记忆、网页、浏览器、探针和媒体
+- 当前内置工具端点，覆盖文件、Shell、任务、记忆、网页、浏览器、探针和媒体
 
 ## 快速开始
 
@@ -33,7 +33,7 @@ lingzhou gateway start -d
 lingzhou gateway start --channel local
 ```
 
-运行时数据统一写入 `~/.lingzhou/`，包括 `state/`、`memory/`、`workspace/`、日志与临时产物。源码仓只承载代码、样例配置和文档，不承载 runtime data。
+运行时数据默认写入 `~/.lingzhou/`，包括 `state/`、`memory/`、`workspace/`、日志与临时产物。生产环境建议保持这一布局；源码仓默认只承载代码、样例配置和文档，不承载 runtime data。
 
 ### 系统服务
 
@@ -71,7 +71,7 @@ sudo systemctl enable --now lingzhou
 
 ## 内置工具面
 
-当前内置 56 个工具端点，主要分为：
+当前内置工具端点，主要分为：
 
 - 文件与配置：`file.*`、`config.*`
 - Shell 与进程：`shell.run`、`shell.capabilities`、`exec`、`process.*`
@@ -92,7 +92,7 @@ sudo systemctl enable --now lingzhou
           "reader": "bailian/qwen-plus",
           "reasoner": "copilot/gpt-5.4"
      },
-     "loop": { "act": true, "max_idle_gap": 60 },
+      "loop": { "act": true, "max_idle_gap": 60000 },
      "gateway": { "default_channel": "wechat" }
 }
 ```

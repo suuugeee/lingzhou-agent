@@ -7,7 +7,7 @@ import os
 import re as _re_mod
 import time
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, cast
 
 import httpx
 
@@ -410,7 +410,7 @@ class OpenAICompatProvider:
         # Fallback for test injection: _copilot_url overridden as instance attr
         _cu = self.__dict__.get("_copilot_url")
         if callable(_cu):
-            return _cu(path)
+            return str(cast(Callable[[str], object], _cu)(path))
         base = self._copilot_api_base_url or self.__dict__.get("_base_url", "")
         return f"{str(base).rstrip('/')}{path}"
 
@@ -419,9 +419,11 @@ class OpenAICompatProvider:
         if _m is not None:
             return await _m.request_headers()
         # Fallback for test injection
-        if callable(getattr(self, "_ensure_copilot_token", None)) and callable(getattr(self, "_copilot_request_headers", None)):
-            token = await self._ensure_copilot_token()
-            return self._copilot_request_headers(token)
+        _ensure_token = self.__dict__.get("_ensure_copilot_token")
+        _request_headers = self.__dict__.get("_copilot_request_headers")
+        if callable(_ensure_token) and callable(_request_headers):
+            token = await cast(Callable[..., Awaitable[str]], _ensure_token)()
+            return cast(Callable[[str], dict[str, str]], _request_headers)(token)
         return {}
 
     async def _handle_auth_error(self, resp: httpx.Response) -> httpx.Response | None:
@@ -436,9 +438,11 @@ class OpenAICompatProvider:
         if _m is not None and hasattr(_m, "_ensure_copilot_token"):
             token = await _m._ensure_copilot_token(force_refresh=True)  # type: ignore[union-attr]
             return _build_copilot_ide_headers() | {"Authorization": f"Bearer {token}"}
-        if callable(getattr(self, "_ensure_copilot_token", None)) and callable(getattr(self, "_copilot_request_headers", None)):
-            token = await self._ensure_copilot_token(force_refresh=True)
-            return self._copilot_request_headers(token)
+        _ensure_token = self.__dict__.get("_ensure_copilot_token")
+        _request_headers = self.__dict__.get("_copilot_request_headers")
+        if callable(_ensure_token) and callable(_request_headers):
+            token = await cast(Callable[..., Awaitable[str]], _ensure_token)(force_refresh=True)
+            return cast(Callable[[str], dict[str, str]], _request_headers)(token)
         return await self._request_headers()
 
     # ── 向后兼容：copilot 方法透传（测试用）───────────────────────────

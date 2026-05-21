@@ -646,6 +646,9 @@ class TaskStore:
     async def update_task_data(self, task_id: int, extra_dict: dict[str, Any]) -> None:
         await self._tasks.update_task_data(task_id, extra_dict)
 
+    async def pop_task_inbox(self, task_id: int) -> list[str]:
+        return await self._tasks.pop_task_inbox(task_id)
+
     async def update_task_result(self, task_id: int, result_json: dict[str, Any]) -> None:
         await self._tasks.update_task_result(task_id, result_json)
 

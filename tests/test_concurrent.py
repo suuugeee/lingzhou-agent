@@ -31,6 +31,23 @@ from conftest import (
 
 # ── 1. _ScopedTaskStore 单元测试 ──────────────────────────────────────────────
 
+def test_compact_tool_history_keeps_same_list_reference():
+    """tool_history 压缩必须原地修改，不能切断外层列表引用。"""
+    from core.loop.continue_phase import _compact_tool_history
+
+    history = [
+        {"tool": f"tool-{idx}", "params": {}, "result": f"result-{idx}", "status": "ok", "error": ""}
+        for idx in range(6)
+    ]
+    original_id = id(history)
+
+    compacted = _compact_tool_history(history)
+
+    assert compacted is history
+    assert id(history) == original_id
+    assert len(history) == 4
+    assert history[0]["tool"] == "[compacted]"
+
 def test_scoped_task_store_get_active_returns_pinned():
     """_ScopedTaskStore.get_active() 必须始终返回构造时传入的 pinned task。"""
     asyncio.run(_scoped_task_store_get_active_returns_pinned())

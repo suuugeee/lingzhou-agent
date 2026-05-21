@@ -4,7 +4,7 @@
 
 ## Overview
 
-The repository currently exposes 56 built-in tool endpoints. All tools are registered with `@tool(ToolManifest(...))` and auto-discovered by the runtime.
+The repository exposes built-in tool endpoints that are registered with `@tool(ToolManifest(...))` and auto-discovered by the runtime. The total count evolves over time, so the live discover result is the source of truth.
 
 Two design rules matter:
 
@@ -44,6 +44,7 @@ Two design rules matter:
 - `task.fail`
 - `task.wait`
 - `task.resume`
+- `task.steer`
 - `task.ask`
 - `task.plan`
 - `schedule.add`
@@ -54,6 +55,7 @@ Two design rules matter:
 ### 4. Memory and Reflection
 
 - `memory.add_wm`
+- `memory.drop_wm`
 - `memory.add_semantic`
 - `memory.set_fact`
 - `memory.search`

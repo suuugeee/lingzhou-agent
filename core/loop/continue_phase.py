@@ -27,7 +27,7 @@ _TOOL_HISTORY_KEEP_LAST = 3          # 保留最近 N 条完整内容
 
 
 def _compact_tool_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """当 tool_history 条目超过阈值时，将早期条目压缩为单条摘要，避免上下文爆炸。"""
+    """原地压缩早期 tool_history，避免上下文爆炸且不丢失外层列表引用。"""
     if len(history) <= _TOOL_HISTORY_KEEP_LAST:
         return history
     older = history[:-_TOOL_HISTORY_KEEP_LAST]
@@ -45,7 +45,8 @@ def _compact_tool_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]
         "status": "compacted",
         "error": "",
     }
-    return [compact] + recent
+    history[:] = [compact] + recent
+    return history
 
 
 async def _run_continue_phase(
@@ -76,7 +77,7 @@ async def _run_continue_phase(
 
         # 工具历史超长时压缩早期条目，避免上下文窗口爆炸
         if len(tool_history) >= _TOOL_HISTORY_COMPACT_THRESHOLD:
-            tool_history = _compact_tool_history(tool_history)
+            _compact_tool_history(tool_history)
 
         next_tier = _preferred_continue_tier(action, user_message=user_message) or ""
         continue_thinking = _resolve_thinking_override(

@@ -116,7 +116,7 @@
 
   "loop": {
     "_comment": "事件驱动时序：认知唤醒由事件/预测误差驱动，而非固定时钟节拍（Active Inference）",
-    "_comment_runtime_root": "运行时目录硬规则：db_path / memory_dir / state_dir / workspace_dir 必须位于 ~/.lingzhou/ 下，源码仓目录不承载 runtime data",
+    "_comment_runtime_root": "默认推荐布局：db_path / memory_dir / state_dir / workspace_dir 放在 ~/.lingzhou/ 下；源码仓目录默认不承载 runtime data",
     "min_act_gap": 2000,
     "max_idle_gap": 60000,
     "wake_poll_interval": 500,

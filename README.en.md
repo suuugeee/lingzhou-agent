@@ -15,7 +15,7 @@ lingzhou is not a chat wrapper. It is an event-driven runtime with:
 - persistent memory across working, episodic, semantic, and task storage
 - multi-model routing for reader / reasoner / repair roles
 - hot-reload evolution for tools, prompts, and runtime behavior
-- 56 built-in tools for files, shell, tasks, memory, web, browser, probes, and media
+- built-in tools for files, shell, tasks, memory, web, browser, probes, and media
 
 ## Quick Start
 
@@ -33,7 +33,7 @@ lingzhou gateway start -d
 lingzhou gateway start --channel local
 ```
 
-Runtime data is always stored under `~/.lingzhou/`, including `state/`, `memory/`, `workspace/`, logs, and temporary artifacts. The repository itself only stores source code, sample config, and documentation.
+Runtime data is stored under `~/.lingzhou/` by default, including `state/`, `memory/`, `workspace/`, logs, and temporary artifacts. Production setups should keep this layout; the repository itself is intended to store source code, sample config, and documentation.
 
 ### System Service
 
@@ -71,7 +71,7 @@ Each document page now includes a language switch at the top.
 
 ## Built-In Tool Surface
 
-lingzhou currently ships 56 built-in tool endpoints across these groups:
+lingzhou currently ships built-in tool endpoints across these groups:
 
 - file and config: `file.*` + `config.*`
 - shell and process control: `shell.run`, `shell.capabilities`, `exec`, `process.*`
@@ -92,7 +92,7 @@ See [docs/TOOLS.en.md](docs/TOOLS.en.md) for the grouped catalog and capability 
     "reader": "bailian/qwen-plus",
     "reasoner": "copilot/gpt-5.4"
   },
-  "loop": { "act": true, "max_idle_gap": 60 },
+     "loop": { "act": true, "max_idle_gap": 60000 },
   "gateway": { "default_channel": "wechat" }
 }
 ```

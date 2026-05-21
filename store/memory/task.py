@@ -222,6 +222,34 @@ class TaskStateStore:
         )
         await self._db.commit()
 
+    async def pop_task_inbox(self, task_id: int) -> list[str]:
+        task = await self.get_task_by_id(task_id)
+        if not task:
+            return []
+
+        raw_messages = task.extras.get("inbox_messages")
+        if not isinstance(raw_messages, list):
+            return []
+
+        messages = [str(item).strip() for item in raw_messages if str(item).strip()]
+        if not messages:
+            if raw_messages != []:
+                task.extras["inbox_messages"] = []
+                await self._db.execute(
+                    "UPDATE tasks SET data=? WHERE id=?",
+                    (task.to_data_json(), task_id),
+                )
+                await self._db.commit()
+            return []
+
+        task.extras["inbox_messages"] = []
+        await self._db.execute(
+            "UPDATE tasks SET data=? WHERE id=?",
+            (task.to_data_json(), task_id),
+        )
+        await self._db.commit()
+        return messages
+
     async def update_task_result(self, task_id: int, result_json: dict[str, Any]) -> None:
         task = await self.get_task_by_id(task_id)
         if not task:

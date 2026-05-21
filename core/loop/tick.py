@@ -73,6 +73,23 @@ console = Console()
 _log = logging.getLogger("lingzhou.loop")
 
 
+async def _consume_active_task_inbox(task_store: Any, active_task: Any) -> Any:
+    """一次性提取当前活跃任务的 steering inbox，供本轮判断使用。"""
+    if active_task is None:
+        return None
+    extras = getattr(active_task, "extras", None)
+    if not isinstance(extras, dict):
+        return active_task
+    raw_messages = extras.get("inbox_messages")
+    if not isinstance(raw_messages, list) or not raw_messages:
+        return active_task
+    messages = await task_store.pop_task_inbox(active_task.id)
+    if messages:
+        active_task.extras = dict(extras)
+        active_task.extras["inbox_messages"] = messages
+    return active_task
+
+
 def _maybe_inject_bootstrap_signal(loop: Any, active_task: Any) -> None:
     """bootstrap_mode=full 时，向 WM 注入引导待完成感知信号（无论是否有活跃任务）。
 
@@ -126,6 +143,7 @@ async def _tick_impl(loop: Any, cycle: int, user_message: str = "", chat_id: str
     active_task = await loop._task_store.get_active()
     await _ingest_actionable_meta_reflections(loop._task_store, loop._wm)
     active_task = await _consume_task_runtime_hints(loop._task_store, active_task, loop._wm)
+    active_task = await _consume_active_task_inbox(loop._task_store, active_task)
     await _bind_chat_id(loop, active_task, chat_id)
 
     if not user_message:

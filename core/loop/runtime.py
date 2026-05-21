@@ -98,12 +98,15 @@ class CognitionLoop:
         if cfg.memory.local_embed_model:
             try:
                 import os as _os
+                import importlib
+
                 _os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
                 _os.environ.setdefault("HF_HUB_OFFLINE", "1")
-                from sentence_transformers import SentenceTransformer as _ST
                 _st_kwargs: dict = {}
                 if cfg.memory.local_embed_cache_dir:
                     _st_kwargs["cache_folder"] = cfg.memory.local_embed_cache_dir
+                _st_module = importlib.import_module("sentence_transformers")
+                _ST = getattr(_st_module, "SentenceTransformer")
                 _local_st = _ST(cfg.memory.local_embed_model, **_st_kwargs)
                 _embed_fn = lambda texts: _local_st.encode(texts, normalize_embeddings=True).tolist()
             except Exception as _e:

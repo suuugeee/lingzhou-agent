@@ -117,7 +117,7 @@ class JudgmentLayer:
         # 探针系统引用：由 CognitionLoop.__init__ 在创建 ProbeManager 后注入
         self._probe_manager: Any = None
         # 最近一次真实 LLM 调用元数据（供 loop 日志输出实际 model/tier/thinking）
-        self._last_call_meta: dict[str, str] = {
+        self._last_call_meta: dict[str, Any] = {
             "phase": "",
             "tier": "default",
             "model_ref": cfg.model,
@@ -164,7 +164,7 @@ class JudgmentLayer:
             _log.info("[judgment] 路由 providers 已设置: %s", tiers)
 
     @property
-    def last_call_meta(self) -> dict[str, str]:
+    def last_call_meta(self) -> dict[str, Any]:
         return dict(self._last_call_meta)
 
     @staticmethod

@@ -190,8 +190,8 @@ class LoopConfig(BaseModel):
             "复杂推理（evolution、ethos 反思）仍可单独配置为 high。"
         ),
     )
-    # 运行时目录硬规则：一切运行期状态都必须落在 ~/.lingzhou 下，
-    # 不能写回源码仓目录；源码树只承载代码与文档，不承载 runtime data。
+    # 运行时目录默认生产布局：推荐落在 ~/.lingzhou 下，
+    # 默认不写回源码仓目录；源码树通常只承载代码与文档，不承载 runtime data。
     db_path: str = "~/.lingzhou/state/runtime.db"
     memory_dir: str = "~/.lingzhou/memory"
     state_dir: str = "~/.lingzhou/state"

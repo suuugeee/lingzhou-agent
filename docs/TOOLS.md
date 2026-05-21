@@ -4,7 +4,7 @@
 
 ## 概览
 
-当前仓库内置 56 个工具端点。所有工具通过 `@tool(ToolManifest(...))` 注册，由运行时自动发现并加载。
+当前仓库内置工具端点。所有工具通过 `@tool(ToolManifest(...))` 注册，由运行时自动发现并加载；工具总数会随版本演进变化，以运行时 discover 结果为准。
 
 工具设计遵循两条规则：
 
@@ -44,6 +44,7 @@
 - `task.fail`
 - `task.wait`
 - `task.resume`
+- `task.steer`
 - `task.ask`
 - `task.plan`
 - `schedule.add`
@@ -54,6 +55,7 @@
 ### 4. 记忆与反思
 
 - `memory.add_wm`
+- `memory.drop_wm`
 - `memory.add_semantic`
 - `memory.set_fact`
 - `memory.search`

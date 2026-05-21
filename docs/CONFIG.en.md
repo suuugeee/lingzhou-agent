@@ -2,9 +2,9 @@
 
 [中文](CONFIG.md) | [English](CONFIG.en.md)
 
-All configuration lives in `~/.lingzhou/lingzhou.json`. The runtime can inspect and update config through `config.get` and `config.set`, and then reload it without restarting the whole process.
+By default, configuration lives in `~/.lingzhou/lingzhou.json`. The runtime can inspect and update config through `config.get` and `config.set`, and then reload it without restarting the whole process.
 
-Runtime directory placement is a hard rule: `db_path`, `memory_dir`, `state_dir`, `workspace_dir`, logs, and temporary artifacts must live under `~/.lingzhou/` rather than inside the source repository.
+The default runtime directory layout is under `~/.lingzhou/`: `db_path`, `memory_dir`, `state_dir`, `workspace_dir`, logs, and temporary artifacts should stay there in production instead of being written back into the source repository.
 
 ## Model Routing
 
@@ -25,9 +25,9 @@ Providers are defined in the `providers` section. API keys should come from envi
 
 | Key | Meaning |
 |-----|---------|
-| `loop.max_idle_gap` | max idle wait when there is no active work |
-| `loop.active_idle_gap` | wait interval while a task is active |
-| `loop.min_act_gap` | minimum interval between two `act` decisions |
+| `loop.max_idle_gap` | default idle wait ceiling in milliseconds when there is no active work |
+| `loop.active_idle_gap` | default wait interval in milliseconds while a task is active |
+| `loop.min_act_gap` | minimum interval in milliseconds between two `act` decisions |
 | `loop.chat_reply_timeout` | timeout for chat reply waiting |
 | `loop.max_tool_rounds` | max tool rounds inside a single tick |
 | `loop.max_consecutive_errors` | consecutive error threshold |
