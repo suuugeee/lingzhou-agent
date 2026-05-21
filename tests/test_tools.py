@@ -123,12 +123,12 @@ async def _skill_list_and_search():
     r = await skill_list({"scope": "seed"}, ctx)
     assert r.error is None
     # 至少有 seed skills
-    assert "runtime.bootstrap [seed]" in r.summary
+    assert "runtime-bootstrap [seed]" in r.summary
 
     r2 = await skill_search({"query": "失败"}, ctx)
     assert r2.error is None
-    # 搜索 "失败" 应匹配 failure.reflection
-    assert "failure.reflection" in r2.summary
+    # 搜索 "失败" 应匹配 failure-reflection
+    assert "failure-reflection" in r2.summary
 
     # 搜索不存在的词 → 返回"未找到"，不是 skipped
     r3 = await skill_search({"query": "zxcvbnm_nonexistent_skill_query"}, ctx)

@@ -6,9 +6,10 @@ tags: caution, verification
 triggers: 修改, 写入, 验证, 证据
 match_terms: file.edit, file.write, shell.run, verify
 match_rules: |
-	any: 修改 | 写入 | 验证 | 证据 => 0.7
-	any: file.edit | file.write | shell.run | verify => 1.0
-state_bias: wm_pressure_ratio=0.55
+  any: 修改 | 写入 | 验证 | 证据 => 0.7
+  any: file.edit | file.write | shell.run | verify => 1.0
+state_rules: |
+  wm_pressure_ratio >= 0.1 => 0.55
 ---
 任何写操作（写文件、执行命令）前，先读取当前状态确认前提成立。
 操作完成后再次读取或验证结果。

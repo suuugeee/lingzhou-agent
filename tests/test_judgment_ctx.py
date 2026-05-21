@@ -326,9 +326,9 @@ def test_judgment_skills_for_log_formats_selected_names():
 
     assert JudgmentLayer._skills_for_log([]) == "none"
     assert JudgmentLayer._skills_for_log([
-        Skill(name="runtime.bootstrap", description="", guidance=""),
-        Skill(name="task.continuity", description="", guidance=""),
-    ]) == "runtime.bootstrap,task.continuity"
+        Skill(name="runtime-bootstrap", description="", guidance=""),
+        Skill(name="task-continuity", description="", guidance=""),
+    ]) == "runtime-bootstrap,task-continuity"
 
 
 def test_behavior_list_result_aware():

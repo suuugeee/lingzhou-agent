@@ -1,11 +1,13 @@
-"""tools/skill_ops.py — skills catalog / activation 工具。
+"""tools/skill_ops.py — skills catalog / activation / evolution 工具。
 
-给 LLM 提供自我感知能力：
+给 LLM 提供自我感知与进化能力：
 - skill.list     列出当前可发现的 skills catalog
 - skill.search   按关键词搜索 skills
 - skill.activate 激活并读取完整 SKILL.md
+- skill.evolve   根据反馈重写指定 skill 的 workspace 副本
 
-目的：补足“只知道有 skill 存在，却不知道 catalog / location / activation 入口”的缺口。
+目的：补足"只知道有 skill 存在，却不知道 catalog / location / activation 入口"的缺口，
+同时让 skill 演化有明确的工具触发路径，而不只是隐式的内部方法调用。
 """
 from __future__ import annotations
 
@@ -160,5 +162,53 @@ async def skill_activate(params: dict[str, Any], ctx: ToolContext) -> ToolResult
             "skill_dir": str(skill.skill_dir),
             "resources": resources,
             "include_frontmatter": include_frontmatter,
+        },
+    )
+
+
+@tool(ToolManifest(
+    name="skill.evolve",
+    description=(
+        "根据反馈重写指定 skill 的 workspace 副本（不影响仓库内默认 seed）。"
+        "用于主动改进某个认知护栏，或在某个 skill 反复触发但方向错误时触发演化。"
+        "写入后下一轮 tick 自动热重载。"
+    ),
+    prefer_tier="reasoner",
+    params=[
+        ToolParam("name", "string", "要进化的 skill 名称（支持 hyphen 规范名与历史 dotted 名）", required=True),
+        ToolParam("feedback", "string", "进化反馈：描述该 skill 哪里需要调整，或期望的新行为方向", required=True),
+    ],
+))
+async def skill_evolve(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
+    name = str(params.get("name") or "").strip()
+    feedback = str(params.get("feedback") or "").strip()
+    if not name:
+        return ToolResult(summary="name 不能为空", error="EmptySkillName")
+    if not feedback:
+        return ToolResult(summary="feedback 不能为空", error="EmptyFeedback")
+
+    try:
+        from core.evolution import EvolutionEngine
+
+        engine = EvolutionEngine(ctx.config)
+        result = await engine.evolve_skill(name, feedback, ctx=ctx)
+    except Exception as exc:
+        return ToolResult(summary=f"skill.evolve 内部错误: {exc}", error="EvolutionError")
+
+    if not result.success:
+        return ToolResult(
+            summary=f"skill {name!r} 进化失败: {result.reason}",
+            error="EvolutionFailed",
+        )
+
+    return ToolResult(
+        summary=f"skill {name!r} 已重写，新 SKILL.md 已写入 workspace。",
+        evidence=(result.new_code or "")[:500],
+        kind="skill_evolution",
+        priority=0.9,
+        resource_key=name,
+        metadata={
+            "skill": name,
+            "target": result.target or "",
         },
     )

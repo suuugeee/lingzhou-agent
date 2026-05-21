@@ -50,6 +50,22 @@ class SkillMatchRule:
     inhibit: bool = False
 
 
+# ---------- alias / migration layer -----------------------------------------
+# 历史 dotted 名 → 规范 hyphen 名的映射表。
+# workspace 里如果还存在旧目录，尽量通过这层透明寻找。
+_SKILL_NAME_ALIASES: dict[str, str] = {
+    "runtime.bootstrap":    "runtime-bootstrap",
+    "failure.reflection":   "failure-reflection",
+    "task.continuity":      "task-continuity",
+    "provider.integration": "provider-integration",
+}
+
+
+def _canonical_skill_name(name: str) -> str:
+    """dotted 历史名 → hyphen 规范名；已是规范名直接返回。"""
+    return _SKILL_NAME_ALIASES.get(name, name)
+
+
 def _seed_skills_dir() -> Path:
     return Path(__file__).resolve().parents[1] / "prompts" / "skills"
 
@@ -59,17 +75,28 @@ def workspace_skill_file(workspace_dir: Path, skill_name: str) -> Path:
 
 
 def ensure_workspace_skill_file(workspace_dir: Path, skill_name: str) -> Path:
-    target = workspace_skill_file(workspace_dir, skill_name)
+    canonical = _canonical_skill_name(skill_name)
+    target = workspace_skill_file(workspace_dir, canonical)
     if target.exists():
         return target
 
-    legacy = workspace_dir / "skills" / f"{skill_name}.md"
-    if legacy.exists():
-        return legacy
+    # 兼容：如果 workspace 里还保留着旧 dotted 目录剪影
+    if canonical != skill_name:
+        dotted_target = workspace_skill_file(workspace_dir, skill_name)
+        if dotted_target.exists():
+            return dotted_target
+
+    # 兼容： legacy 单文件（尝试 canonical 和 dotted 两种）
+    for check_name in dict.fromkeys([canonical, skill_name]):
+        legacy = workspace_dir / "skills" / f"{check_name}.md"
+        if legacy.exists():
+            return legacy
 
     seed_dir = _seed_skills_dir()
     candidates = [
+        seed_dir / canonical / "SKILL.md",
         seed_dir / skill_name / "SKILL.md",
+        seed_dir / f"{canonical}.md",
         seed_dir / f"{skill_name}.md",
     ]
     source = next((path for path in candidates if path.exists()), None)
@@ -189,6 +216,7 @@ class Skill:
     match_rules: list[SkillMatchRule] = field(default_factory=list)
     state_bias: dict[str, float] = field(default_factory=dict)
     state_rules: list[SkillStateRule] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)  # 历史各字
     compatibility: str = ""
     license: str = ""
     allowed_tools: list[str] = field(default_factory=list)
@@ -671,6 +699,7 @@ class SkillRegistry:
                 raw_state_rules = meta.get("state_rules", "") or raw_state_bias
                 state_bias = _parse_state_bias(raw_state_bias)
                 state_rules = _parse_state_rules(raw_state_rules)
+                aliases = _parse_listish(meta.get("aliases", ""))
                 skill = Skill(
                     name=name,
                     description=description,
@@ -681,6 +710,7 @@ class SkillRegistry:
                     match_rules=match_rules,
                     state_bias=state_bias,
                     state_rules=state_rules,
+                    aliases=aliases,
                     compatibility=str(meta.get("compatibility") or "").strip(),
                     license=str(meta.get("license") or "").strip(),
                     allowed_tools=_parse_allowed_tools(meta.get("allowed-tools", "") or meta.get("allowed_tools", "")),
@@ -704,8 +734,14 @@ class SkillRegistry:
         return list(self._skills)
 
     def get(self, name: str) -> Skill | None:
+        # 1. 精确匹配
         for skill in self._skills:
             if skill.name == name:
+                return skill
+        # 2. alias 查找：dotted 历史名 → canonical，或匹配 skill.aliases 列表
+        canonical = _canonical_skill_name(name)
+        for skill in self._skills:
+            if skill.name == canonical or name in (skill.aliases or []):
                 return skill
         return None
 

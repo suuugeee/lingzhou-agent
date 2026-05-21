@@ -644,7 +644,7 @@ async def _evolution_skill_targets_workspace_skill_file(tmp_path):
     class _DummyProvider:
         async def chat(self, messages, *, temperature=None, thinking_override=None):
             return """---
-name: runtime.bootstrap
+name: runtime-bootstrap
 description: Workspace-evolved bootstrap skill.
 ---
 只在 workspace 副本里演化这份 skill。
@@ -676,14 +676,14 @@ description: Workspace-evolved bootstrap skill.
     reload_calls: list[str] = []
     ctx = cast(Any, SimpleNamespace(judgment=SimpleNamespace(reload_skills=lambda: reload_calls.append("reloaded"))))
 
-    seed_path = _seed_skills_dir() / "runtime.bootstrap" / "SKILL.md"
+    seed_path = _seed_skills_dir() / "runtime-bootstrap" / "SKILL.md"
     seed_before = seed_path.read_text(encoding="utf-8")
 
-    result = await engine.evolve_skill("runtime.bootstrap", "让 bootstrap 更贴近 runtime workspace。", ctx=ctx)
+    result = await engine.evolve_skill("runtime-bootstrap", "让 bootstrap 更贴近 runtime workspace。", ctx=ctx)
 
-    target_path = workspace_skill_file(cfg.workspace_dir, "runtime.bootstrap")
+    target_path = workspace_skill_file(cfg.workspace_dir, "runtime-bootstrap")
     assert result.success is True
-    assert result.target == "skill:runtime.bootstrap"
+    assert result.target == "skill:runtime-bootstrap"
     assert target_path.exists()
     assert "Workspace-evolved bootstrap skill." in target_path.read_text(encoding="utf-8")
     assert seed_path.read_text(encoding="utf-8") == seed_before
@@ -2177,11 +2177,11 @@ def test_skill_registry():
     # 冷启动场景
     skills = reg.match_for_context(wm_pressure=0.05, has_active_task=False,
                                     has_next_step=False, failure_count=0, high_error_streak=0)
-    assert any(s.name == "runtime.bootstrap" for s in skills)
+    assert any(s.name == "runtime-bootstrap" for s in skills)
     # 失败场景
     skills_fail = reg.match_for_context(wm_pressure=0.5, has_active_task=True,
                                          has_next_step=True, failure_count=3, high_error_streak=3)
-    assert any(s.name == "failure.reflection" for s in skills_fail)
+    assert any(s.name == "failure-reflection" for s in skills_fail)
 
 
 def test_skill_registry_does_not_stick_failure_reflection_without_failures():
@@ -2189,7 +2189,7 @@ def test_skill_registry_does_not_stick_failure_reflection_without_failures():
 
     reg = SkillRegistry()
     skills = reg.match_for_context(
-        last_applied=["failure.reflection"],
+        last_applied=["failure-reflection"],
         wm_pressure=0.1,
         has_active_task=True,
         has_next_step=True,
@@ -2199,8 +2199,8 @@ def test_skill_registry_does_not_stick_failure_reflection_without_failures():
         max_inject=2,
     )
     names = [skill.name for skill in skills]
-    assert "task.continuity" in names
-    assert "failure.reflection" not in names
+    assert "task-continuity" in names
+    assert "failure-reflection" not in names
 
 
 def test_skill_registry_loads_package_skill_and_matches_context(tmp_path):
@@ -2463,10 +2463,10 @@ def test_skill_registry_loads_seed_skill_from_file():
     from core.skill import SkillRegistry
 
     reg = SkillRegistry()
-    skill = next(skill for skill in reg.all_skills() if skill.name == "runtime.bootstrap")
+    skill = next(skill for skill in reg.all_skills() if skill.name == "runtime-bootstrap")
 
     assert skill.origin == "seed"
-    assert skill.source_path.endswith("runtime.bootstrap/SKILL.md")
+    assert skill.source_path.endswith("runtime-bootstrap/SKILL.md")
     assert skill.guidance == ""
     assert "bootstrap_identity" in skill.load_guidance()
 
@@ -2561,7 +2561,7 @@ def test_seed_workspace_skills_only_on_empty_workspace(tmp_path):
     written = seed_workspace_skills(tmp_path)
     skills_dir = tmp_path / "skills"
     assert written >= 5
-    assert (skills_dir / "runtime.bootstrap" / "SKILL.md").exists()
+    assert (skills_dir / "runtime-bootstrap" / "SKILL.md").exists()
 
     custom_dir = skills_dir / "custom"
     custom_dir.mkdir(parents=True)
