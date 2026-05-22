@@ -55,6 +55,15 @@ Bad example:
 purpose: Monitor Redis
 ```
 
+Blind-spot coverage no longer inspects free-form `purpose/spec` text. It now depends only on explicit `coverage_tags`.
+
+Recommended coverage tags:
+- `ops:channel_health`: external channel / proxy / API gateway health
+- `ops:api_quota`: API quota, rate limit, or credit usage
+- `workspace:git_state`: git changes and workspace state
+
+If `coverage_tags` is omitted, the probe still runs, but it does not count toward blind-spot coverage.
+
 ## 6. Available Probe Tools
 
 - `probe.install`
@@ -63,6 +72,8 @@ purpose: Monitor Redis
 - `probe.disable`
 - `probe.enable`
 - `probe.remove`
+
+`probe.install` also accepts optional `coverage_tags`, for example `['ops:channel_health']`.
 
 ## 7. Probe Panel in Judgment Context
 

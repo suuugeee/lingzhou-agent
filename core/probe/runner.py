@@ -15,6 +15,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import logging
+import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -30,6 +31,7 @@ _log = logging.getLogger("lingzhou.probe")
 _WM_PRIORITY = 0.72
 # 告警消息回传到 WM 的优先级
 _ALERT_WM_PRIORITY = 0.90
+_CONFIDENCE_WARN_PRIORITY = 0.86
 
 
 def _now_iso() -> str:
@@ -70,6 +72,69 @@ def _evaluate_alert(cfg: ProbeConfig, output: str) -> tuple[bool, str]:
     except Exception as exc:
         _log.debug("[probe] alert_expr 评估失败 probe=%s: %s", cfg.name, exc)
     return False, ""
+
+
+def _assess_confidence(cfg: ProbeConfig, output: str, error: str | None, duration_ms: int) -> tuple[float, str, bool]:
+    """评估本次探针读数可信度。返回 (score, reason, suspect_setup)。"""
+    reasons: list[str] = []
+    score = 0.85
+    suspect_setup = False
+
+    if error:
+        score = 0.2
+        reasons.append("执行报错，结果可信度低")
+        lowered = error.lower()
+        setup_markers = (
+            "command not found",
+            "no such file",
+            "connection refused",
+            "name or service not known",
+            "could not resolve",
+            "invalid url",
+            "timed out",
+            "timeout",
+        )
+        if any(marker in lowered for marker in setup_markers):
+            suspect_setup = True
+            reasons.append("疑似探针布放或目标地址配置问题")
+        return max(0.0, min(1.0, score)), "；".join(reasons), suspect_setup
+
+    text = (output or "").strip()
+    if not text:
+        score -= 0.35
+        reasons.append("无有效输出")
+
+    if duration_ms <= 5:
+        score -= 0.1
+        reasons.append("执行过快，需确认不是空跑")
+
+    if cfg.kind == "shell":
+        spec = (cfg.spec or "").lower()
+        if "curl" in spec and "%{http_code}" in spec:
+            # 健康检查常见形态：输出应是 3 位状态码（如 200）
+            code_match = re.search(r"\b(\d{3})\b", text)
+            if not code_match:
+                score -= 0.4
+                suspect_setup = True
+                reasons.append("未解析到 HTTP 状态码，探针命令可能布放不当")
+            else:
+                code = int(code_match.group(1))
+                if not (100 <= code <= 599):
+                    score -= 0.35
+                    suspect_setup = True
+                    reasons.append("状态码越界，探针输出不符合预期")
+                elif code >= 500:
+                    score -= 0.3
+                    reasons.append("返回 5xx，先复核探针目标/布放，再确认是否真实服务故障")
+
+    if cfg.kind == "http" and text and len(text) < 2:
+        score -= 0.1
+        reasons.append("HTTP 响应过短，建议复核采样目标")
+
+    score = max(0.0, min(1.0, score))
+    if not reasons:
+        reasons.append("读数形态与执行状态正常")
+    return score, "；".join(reasons), suspect_setup
 
 
 class ProbeRunner:
@@ -155,6 +220,7 @@ class ProbeRunner:
         now_iso = _now_iso()
 
         alerted, alert_detail = _evaluate_alert(cfg, output)
+        confidence, confidence_reason, suspect_setup = _assess_confidence(cfg, output, error, elapsed_ms)
 
         result = ProbeResult(
             probe_name=cfg.name,
@@ -164,6 +230,9 @@ class ProbeRunner:
             duration_ms=elapsed_ms,
             alerted=alerted,
             alert_detail=alert_detail if alerted else None,
+            confidence=confidence,
+            confidence_reason=confidence_reason,
+            deployment_suspect=suspect_setup,
         )
 
         # 持久化最近结果
@@ -172,11 +241,14 @@ class ProbeRunner:
             last_run_at=now_iso,
             last_result=output[:2000] if output else None,
             last_error=error[:500] if error else None,
+            last_confidence=confidence,
+            last_confidence_reason=confidence_reason[:300],
+            last_suspect=suspect_setup,
         )
 
         _log.info(
-            "[probe] ran probe=%s kind=%s elapsed=%dms error=%s alerted=%s",
-            cfg.name, cfg.kind, elapsed_ms, bool(error), alerted,
+            "[probe] ran probe=%s kind=%s elapsed=%dms error=%s alerted=%s confidence=%.2f suspect=%s",
+            cfg.name, cfg.kind, elapsed_ms, bool(error), alerted, confidence, suspect_setup,
         )
 
         await self._deliver(cfg, result)
@@ -186,6 +258,14 @@ class ProbeRunner:
         """按 data_back 策略回传探针结果。"""
         if result.alerted and result.alert_detail:
             await self._push_wm(f"[🔔 探针告警] {result.alert_detail}", priority=_ALERT_WM_PRIORITY)
+
+        if result.confidence < 0.6 or result.deployment_suspect:
+            hint = (
+                f"[🧪 探针可信度预警] {cfg.name} confidence={result.confidence:.2f}。"
+                f"{result.confidence_reason}。"
+                "在基于该读数决策前，先复核探针 spec/target/trigger 布放是否正确。"
+            )
+            await self._push_wm(hint, priority=_CONFIDENCE_WARN_PRIORITY)
 
         if cfg.data_back == "wm":
             summary = _format_summary(cfg, result)
@@ -209,6 +289,8 @@ class ProbeRunner:
 def _format_summary(cfg: ProbeConfig, result: ProbeResult) -> str:
     purpose_hint = f" [{cfg.purpose}]" if getattr(cfg, "purpose", "") else ""
     header = f"[探针 {cfg.name}]{purpose_hint} {result.triggered_at} ({result.duration_ms}ms)"
+    confidence = f"confidence={result.confidence:.2f}"
     if result.error:
-        return f"{header}\n❌ 错误: {result.error}"
-    return f"{header}\n{result.output[:1000]}" if result.output else f"{header}\n(无输出)"
+        return f"{header}\n❌ 错误: {result.error}\n{confidence} ({result.confidence_reason})"
+    body = result.output[:1000] if result.output else "(无输出)"
+    return f"{header}\n{body}\n{confidence} ({result.confidence_reason})"

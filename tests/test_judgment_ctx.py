@@ -1466,3 +1466,61 @@ async def _assemble_context_prefers_active_task_override_with_inbox():
             await store.close()
 
 
+def test_assemble_context_without_active_task_or_probe_manager_does_not_crash():
+    asyncio.run(_assemble_context_without_active_task_or_probe_manager_does_not_crash())
+
+
+async def _assemble_context_without_active_task_or_probe_manager_does_not_crash():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+    from core.perception import EmotionState
+    from memory.episodic import EpisodicMemory
+    from memory.semantic import SemanticMemory
+    from memory.task_store import TaskStore
+    from memory.working import WorkingMemory
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "mode": "copilot",
+                "base_url": "https://api.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            },
+        },
+        "model": "copilot/gpt-5.4",
+        "thinking": "low",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "ctx.db")
+        await store.open()
+        try:
+            layer = JudgmentLayer(_DummyProvider(), ToolRegistry(), cfg)
+            layer._probe_manager = None
+            text = await layer._assemble_context(
+                cast(Any, SimpleNamespace(prediction_error=0.0, workspace_dirty=False)),
+                WorkingMemory(capacity=20),
+                store,
+                EpisodicMemory(Path(d) / "memory"),
+                SemanticMemory(Path(d) / "memory", decay_lambda=0.0),
+                EmotionState.from_config(cfg),
+                active_task=None,
+                user_message="帮我检查当前状态",
+            )
+
+            assert "帮我检查当前状态" in text
+        finally:
+            await store.close()
+
+

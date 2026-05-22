@@ -11,9 +11,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from .types import ProbeConfig
+from .types import ProbeConfig, normalize_probe_coverage_tags
 
 _log = logging.getLogger("lingzhou.probe")
+
+
+def _as_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _to_dict(cfg: ProbeConfig) -> dict[str, Any]:
@@ -25,6 +34,7 @@ def _to_dict(cfg: ProbeConfig) -> dict[str, Any]:
         "trigger": cfg.trigger,
         "purpose": cfg.purpose,
         "data_back": cfg.data_back,
+        "coverage_tags": list(cfg.coverage_tags),
         "alert_expr": cfg.alert_expr,
         "alert_message": cfg.alert_message,
         "enabled": cfg.enabled,
@@ -32,6 +42,9 @@ def _to_dict(cfg: ProbeConfig) -> dict[str, Any]:
         "last_run_at": cfg.last_run_at,
         "last_result": cfg.last_result,
         "last_error": cfg.last_error,
+        "last_confidence": cfg.last_confidence,
+        "last_confidence_reason": cfg.last_confidence_reason,
+        "last_suspect": cfg.last_suspect,
     }
 
 
@@ -48,6 +61,7 @@ def _from_dict(d: dict[str, Any]) -> ProbeConfig:
         trigger=str(d.get("trigger", "manual")),
         purpose=str(d.get("purpose") or ""),
         data_back=data_back_raw,  # type: ignore[arg-type]
+        coverage_tags=normalize_probe_coverage_tags(d.get("coverage_tags") or []),
         alert_expr=d.get("alert_expr") or None,
         alert_message=d.get("alert_message") or None,
         enabled=bool(d.get("enabled", True)),
@@ -55,6 +69,9 @@ def _from_dict(d: dict[str, Any]) -> ProbeConfig:
         last_run_at=d.get("last_run_at") or None,
         last_result=d.get("last_result") or None,
         last_error=d.get("last_error") or None,
+        last_confidence=_as_optional_float(d.get("last_confidence")),
+        last_confidence_reason=d.get("last_confidence_reason") or None,
+        last_suspect=bool(d.get("last_suspect", False)),
     )
 
 
@@ -110,6 +127,7 @@ class ProbeStore:
             trigger=cfg.trigger,
             purpose=cfg.purpose,
             data_back=cfg.data_back,
+            coverage_tags=normalize_probe_coverage_tags(cfg.coverage_tags),
             alert_expr=cfg.alert_expr,
             alert_message=cfg.alert_message,
             enabled=cfg.enabled,
@@ -117,6 +135,9 @@ class ProbeStore:
             last_run_at=existing.last_run_at if existing else None,
             last_result=existing.last_result if existing else None,
             last_error=existing.last_error if existing else None,
+            last_confidence=existing.last_confidence if existing else None,
+            last_confidence_reason=existing.last_confidence_reason if existing else None,
+            last_suspect=existing.last_suspect if existing else False,
         )
         if not existing:
             self._next_id += 1
@@ -146,6 +167,9 @@ class ProbeStore:
         last_run_at: str,
         last_result: str | None,
         last_error: str | None,
+        last_confidence: float | None = None,
+        last_confidence_reason: str | None = None,
+        last_suspect: bool = False,
     ) -> None:
         cfg = self._probes.get(name)
         if cfg is None:
@@ -158,6 +182,7 @@ class ProbeStore:
             trigger=cfg.trigger,
             purpose=cfg.purpose,
             data_back=cfg.data_back,
+            coverage_tags=cfg.coverage_tags,
             alert_expr=cfg.alert_expr,
             alert_message=cfg.alert_message,
             enabled=cfg.enabled,
@@ -165,6 +190,9 @@ class ProbeStore:
             last_run_at=last_run_at,
             last_result=last_result,
             last_error=last_error,
+            last_confidence=last_confidence,
+            last_confidence_reason=last_confidence_reason,
+            last_suspect=last_suspect,
         )
         self._save()
 
@@ -180,6 +208,7 @@ class ProbeStore:
             trigger=cfg.trigger,
             purpose=cfg.purpose,
             data_back=cfg.data_back,
+            coverage_tags=cfg.coverage_tags,
             alert_expr=cfg.alert_expr,
             alert_message=cfg.alert_message,
             enabled=enabled,
@@ -187,6 +216,9 @@ class ProbeStore:
             last_run_at=cfg.last_run_at,
             last_result=cfg.last_result,
             last_error=cfg.last_error,
+            last_confidence=cfg.last_confidence,
+            last_confidence_reason=cfg.last_confidence_reason,
+            last_suspect=cfg.last_suspect,
         )
         self._save()
         return True

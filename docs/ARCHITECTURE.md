@@ -36,10 +36,26 @@
          └──────────────┘
 ```
 
+## Tick 调度与并发边界
+
+主循环的并发目标不是“任意 tick 全乱序执行”，而是“无关联 tick 并发、有关联 tick 保序”。
+
+- 同一条任务连续体上的 tick 必须保持 FIFO 顺序。这里的顺序依赖来自 `next_step`、`last_action_*`、`pending_tier`、`ticks_since_judge`、停滞计数等跨 tick 状态。
+- 不同任务或无共享连续状态的 tick 可以并发执行，以降低 autonomous LLM 调用阻塞 chat 响应的问题。
+- runtime 应通过有界 dispatcher 管理 tick：同 chain 串行、跨 chain 并发，并通过全局并发上限和等待队列上限限制资源占用。
+- 设计目标是改善响应性和吞吐，不改变相关工作项的因果顺序；任何带顺序依赖的 tick 都应继续排到对应 chain 的后面。
+
 ## 核心模块
 
 ### `core/loop/runtime.py` — 主循环 (CognitionLoop)
-编排感知→判断→执行→反思全流程。事件驱动等待（chat/task/超时）。包含热配置重载。`core/loop/__init__.py` 只保留稳定导出。
+编排感知→判断→执行→反思全流程。事件驱动等待（chat/task/超时）。包含热配置重载。
+
+在并发 tick 模式下，runtime 还负责：
+- 维护全局共享资源（provider / task_store / 记忆系统）
+- 通过 dispatcher 将 tick 分配到各自 chain
+- 保证同 chain 顺序执行、跨 chain 在上限内并发
+
+`core/loop/__init__.py` 只保留稳定导出。
 
 ### `core/judgment/runtime.py` — 判断层 (JudgmentLayer)
 LLM 决策引擎：接收 WM + 信号 → 决定 action + tool。支持多模型路由 (reader/reasoner/repair)。内层 continue 循环：多次工具调用不重装上下文。`core/judgment/__init__.py` 只保留稳定导出，context/format helper 已拆到 `core/judgment/context.py`。

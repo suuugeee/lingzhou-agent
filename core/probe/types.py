@@ -1,8 +1,9 @@
 """core/probe/types.py — 探针系统核心数据类型。"""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 
 # 探针执行方式
@@ -10,6 +11,43 @@ ProbeKind = Literal["shell", "http", "python"]
 
 # 数据回传路径（LLM 自行决定如何处置 probe.run 的返回值；interval 探针后台推送到 wm）
 ProbeDataBack = Literal["none", "wm"]
+
+
+PROBE_COVERAGE_HINTS: dict[str, str] = {
+    "ops:channel_health": "关键外部通道/代理/API 网关健康",
+    "ops:api_quota": "API 配额、额度或速率限制",
+    "workspace:git_state": "git 变更与工作区状态",
+}
+
+
+def normalize_probe_coverage_tags(raw: Any) -> list[str]:
+    if raw is None:
+        return []
+    items: list[Any]
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return []
+        if text.startswith("[") and text.endswith("]"):
+            try:
+                decoded = json.loads(text)
+            except Exception:
+                decoded = text
+            if decoded is not text:
+                return normalize_probe_coverage_tags(decoded)
+        items = text.split(",")
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        return []
+
+    normalized: list[str] = []
+    for item in items:
+        tag = str(item or "").strip().lower()
+        if not tag or tag in normalized:
+            continue
+        normalized.append(tag)
+    return normalized
 
 
 @dataclass
@@ -36,6 +74,8 @@ class ProbeConfig:
         - "manual"             — 仅手动触发（probe.run 工具）
     data_back:
         interval 探针周期结果的自动回传路径（manual 探针结果直接通过工具返回值获取）。
+    coverage_tags:
+        显式声明该探针覆盖的感知维度。blind spots 只读取此字段，不再从 purpose/spec 猜测。
     alert_expr:
         Python 布尔表达式，变量 ``output`` 为结果字符串。
         表达式为 True 时触发告警，如 ``float(output.strip()) > 35.0``
@@ -51,6 +91,7 @@ class ProbeConfig:
     trigger: str
     purpose: str = ""
     data_back: ProbeDataBack = "wm"
+    coverage_tags: list[str] = field(default_factory=list)
     alert_expr: str | None = None
     alert_message: str | None = None
     enabled: bool = True
@@ -61,6 +102,9 @@ class ProbeConfig:
     last_run_at: str | None = None
     last_result: str | None = None
     last_error: str | None = None
+    last_confidence: float | None = None
+    last_confidence_reason: str | None = None
+    last_suspect: bool = False
 
 
 @dataclass
@@ -74,3 +118,6 @@ class ProbeResult:
     duration_ms: int
     alerted: bool = False
     alert_detail: str | None = None
+    confidence: float = 0.5
+    confidence_reason: str = ""
+    deployment_suspect: bool = False

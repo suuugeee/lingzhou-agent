@@ -100,6 +100,21 @@ class ProviderDefinition(BaseModel):
 
 
 class LoopConfig(BaseModel):
+    max_concurrent_ticks: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "tick 并发上限。1=严格串行（默认）；>1 时启用分链并发："
+            "同一 chain 内按顺序执行，不同 chain 可并行。"
+        ),
+    )
+    max_tick_queue: int = Field(
+        default=8,
+        ge=1,
+        description=(
+            "等待中的 tick 全局队列上限。超过上限时新 tick 会被拒绝（chat 会返回繁忙提示）。"
+        ),
+    )
     # ── 事件驱动时序（替代固定 interval 概念）───────────────────────────────
     # 设计依据：
     #   Friston Active Inference (2010/2017)：认知循环由自由能（预测误差）阈值驱动，

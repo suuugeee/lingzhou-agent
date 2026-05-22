@@ -6,19 +6,44 @@ import asyncio
 import logging
 from typing import Any
 
+from .dispatcher import TickJob
+
 _log = logging.getLogger("lingzhou.loop")
 
 
 async def _run_cycle_impl(loop: Any, cycle: int) -> int:
     cycle, handled_chat = await loop._process_pending_chat_turn(cycle)
     if not handled_chat:
-        cycle += 1
-        await loop._tick(cycle)
+        if getattr(loop, "_tick_dispatcher", None) is not None and loop._tick_dispatcher.enabled:
+            active_task = await loop._task_store.get_active()
+            dispatch_cycle = await loop._next_dispatch_cycle()
+            chain_key = loop._resolve_tick_chain_key(active_task=active_task, source="auto")
+            accepted = await loop._tick_dispatcher.enqueue(
+                TickJob(cycle=dispatch_cycle, chain_key=chain_key, source="auto")
+            )
+            if accepted:
+                cycle = dispatch_cycle
+            else:
+                _log.debug("[tick-dispatch] queue full, skip auto tick")
+        else:
+            cycle += 1
+            await loop._tick(cycle)
     return cycle
 
 
 async def _wait_after_cycle_impl(loop: Any) -> None:
     cfg = loop._cfg
+    dispatcher = getattr(loop, "_tick_dispatcher", None)
+    if dispatcher is not None and dispatcher.enabled:
+        has_work = dispatcher.has_running() or dispatcher.has_pending()
+        if has_work:
+            gap = max(float(cfg.loop.min_act_gap) / 1000.0, 0.2)
+        else:
+            gap = cfg.loop.active_idle_gap / 1000.0
+        await _wait_for_event_impl(loop, gap, await loop._task_store.get_active())
+        await loop._maybe_hot_reload_provider()
+        return
+
     after_task = await loop._task_store.get_active()
     if loop._last_decision == "act" and after_task is not None:
         min_wait = cfg.loop.idle_with_task_bounds[0] / 1000.0 if cfg.loop.idle_with_task_bounds else cfg.loop.min_act_gap / 1000.0

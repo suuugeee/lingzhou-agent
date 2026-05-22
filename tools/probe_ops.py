@@ -19,7 +19,7 @@ import logging
 from typing import Any
 
 from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
-from core.probe.types import ProbeConfig
+from core.probe.types import ProbeConfig, normalize_probe_coverage_tags
 
 _log = logging.getLogger("lingzhou.probe")
 
@@ -44,6 +44,7 @@ _log = logging.getLogger("lingzhou.probe")
         ToolParam("spec", "string", "命令字符串 / URL / Python 代码（对应 kind）", required=True),
         ToolParam("trigger", "string", "调度触发器：interval:<秒> 或 manual", required=True),
         ToolParam("data_back", "string", "interval 探针结果回传：wm（写入工作记忆）| none（仅日志），默认 wm", required=False),
+        ToolParam("coverage_tags", "object", "显式覆盖标签列表，如 ['ops:channel_health']。盲点推断只读取这里，不从 purpose/spec 猜测", required=False),
         ToolParam("alert_expr", "string", "告警表达式（Python bool，变量 output 为结果字符串）", required=False),
         ToolParam("alert_message", "string", "告警消息文本，支持 {output} 占位符", required=False),
     ],
@@ -74,6 +75,7 @@ async def probe_install(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     data_back_raw = str(params.get("data_back") or "wm").strip().lower()
     if data_back_raw not in ("none", "wm"):
         data_back_raw = "wm"
+    coverage_tags = normalize_probe_coverage_tags(params.get("coverage_tags"))
 
     cfg = ProbeConfig(
         name=name,
@@ -82,6 +84,7 @@ async def probe_install(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         trigger=trigger,
         purpose=str(params.get("purpose") or "").strip(),
         data_back=data_back_raw,  # type: ignore[arg-type]
+        coverage_tags=coverage_tags,
         alert_expr=str(params.get("alert_expr") or "") or None,
         alert_message=str(params.get("alert_message") or "") or None,
         enabled=True,
@@ -103,6 +106,7 @@ async def probe_install(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             f"探针已安装: {saved.name}\n"
             f"  purpose={saved.purpose or '（未填写）'}\n"
             f"  kind={saved.kind}  trigger={saved.trigger}  data_back={saved.data_back}\n"
+            f"  coverage_tags={saved.coverage_tags or ['（未声明）']}\n"
             f"  spec={saved.spec[:80]}"
             + ("\n" + first_run_hint if first_run_hint else "")
         ),
@@ -167,6 +171,9 @@ async def probe_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         )
 
     lines = [f"[探针 {name}] {result.triggered_at} ({result.duration_ms}ms)"]
+    lines.append(f"可信度: {result.confidence:.2f} ({result.confidence_reason})")
+    if result.deployment_suspect:
+        lines.append("⚠️ 布放可疑: 建议先核对 spec/target/trigger，再依据该读数做决策")
     if result.output:
         lines.append(result.output[:2000])
     if result.alerted and result.alert_detail:
@@ -175,7 +182,12 @@ async def probe_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(
         summary="\n".join(lines),
         evidence=result.output,
-        state_delta={"probe_name": name, "alerted": result.alerted},
+        state_delta={
+            "probe_name": name,
+            "alerted": result.alerted,
+            "probe_confidence": round(result.confidence, 3),
+            "probe_suspect": result.deployment_suspect,
+        },
     )
 
 
@@ -202,6 +214,14 @@ async def probe_list(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         status = "⏸ 禁用" if not p.enabled else task_statuses.get(p.name, "✅ 运行中")
         last = p.last_run_at or "从未运行"
         result_preview = ""
+        confidence_preview = ""
+        coverage_preview = f"  coverage: {', '.join(p.coverage_tags)}" if getattr(p, "coverage_tags", None) else "  coverage: （未声明）"
+        if p.last_confidence is not None:
+            confidence_preview = f"  可信度: {p.last_confidence:.2f}"
+            if p.last_confidence_reason:
+                confidence_preview += f" ({p.last_confidence_reason[:80]})"
+            if p.last_suspect:
+                confidence_preview += " ⚠️布放可疑"
         if p.last_error:
             result_preview = f"  最近错误: {p.last_error[:80]}"
         elif p.last_result:
@@ -210,7 +230,9 @@ async def probe_list(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         lines.append(
             f"• {p.name} [{status}]{purpose_line}\n"
             f"  kind={p.kind}  trigger={p.trigger}  data_back={p.data_back}\n"
+            f"{coverage_preview}\n"
             f"  最近运行: {last}{result_preview}"
+            + (f"\n{confidence_preview}" if confidence_preview else "")
         )
 
     return ToolResult(summary="\n".join(lines))

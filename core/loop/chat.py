@@ -8,6 +8,7 @@ from typing import Any
 
 from memory.task_store import Task
 from memory.working import WMItem
+from .dispatcher import TickJob
 
 from .logging import _strip_memory_context
 
@@ -88,6 +89,27 @@ async def _process_pending_chat_turn(loop: Any, cycle: int) -> tuple[int, bool]:
                        len(follow_ups), [m["id"] for m in follow_ups])
 
     _log.info("[chat] user › %s", user_message)
+
+    if getattr(loop, "_tick_dispatcher", None) is not None and loop._tick_dispatcher.enabled:
+        active_task = await loop._task_store.get_active()
+        dispatch_cycle = await loop._next_dispatch_cycle()
+        chain_key = loop._resolve_tick_chain_key(active_task=active_task, chat_id=chat_id, source="chat")
+        job = TickJob(
+            cycle=dispatch_cycle,
+            chain_key=chain_key,
+            user_message=user_message,
+            chat_id=chat_id,
+            source="chat",
+        )
+        retry_sec = max(float(loop._cfg.loop.wake_poll_interval) / 1000.0, 0.05)
+        while True:
+            accepted = await loop._tick_dispatcher.enqueue(job)
+            if accepted:
+                break
+            _log.debug("[chat] tick queue full, waiting for slot chat_id=%s", chat_id)
+            await asyncio.sleep(retry_sec)
+        return dispatch_cycle, True
+
     reply = await loop._tick(
         cycle,
         user_message=user_message,

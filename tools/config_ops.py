@@ -15,12 +15,22 @@ from tools.registry import tool, ToolManifest, ToolResult, ToolParam, ToolContex
 CONFIG_PATH = Path("~/.lingzhou/lingzhou.json").expanduser()
 
 
-def _read_config() -> dict:
-    return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+def _resolve_config_path(ctx: ToolContext | None = None) -> Path:
+    cfg_obj = getattr(ctx, "config", None) if ctx is not None else None
+    base_dir = getattr(cfg_obj, "_base_dir", None)
+    if isinstance(base_dir, Path):
+        candidate = base_dir / "lingzhou.json"
+        if candidate.exists():
+            return candidate
+    return CONFIG_PATH
 
 
-def _write_config(cfg: dict) -> None:
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+def _read_config(config_path: Path) -> dict:
+    return json.loads(config_path.read_text(encoding="utf-8"))
+
+
+def _write_config(config_path: Path, cfg: dict) -> None:
+    config_path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def _nested_get(d: dict, path: str) -> Any:
@@ -97,7 +107,8 @@ async def config_get(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(summary="key 不能为空", error="EmptyKey", skipped=True)
 
     try:
-        cfg = _read_config()
+        config_path = _resolve_config_path(ctx)
+        cfg = _read_config(config_path)
         value = _nested_get(cfg, key)
         if value is None and "." not in key:
             return ToolResult(
@@ -105,7 +116,7 @@ async def config_get(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 skipped=True,
             )
         return ToolResult(
-            summary=f"{key} = {json.dumps(value, ensure_ascii=False)}",
+            summary=f"{key} = {json.dumps(value, ensure_ascii=False)}\n(source={config_path})",
             evidence=str(value),
             metadata={"key": key, "value": value},
         )
@@ -118,6 +129,8 @@ async def config_get(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     description=(
         "修改配置文件中的某个值。支持点号嵌套路径。修改后 loop 自动热重载。\n"
         "可调的常见参数:\n"
+        "  loop.max_concurrent_ticks — tick 并发上限（同 chain 仍串行）\n"
+        "  loop.max_tick_queue — tick 等待队列上限\n"
         "  loop.max_idle_gap — 空闲等待上限(毫秒)\n"
         "  loop.min_act_gap — 动作间隔(毫秒)\n"
         "  loop.chat_reply_timeout — 聊天回复超时(秒)\n"
@@ -144,7 +157,8 @@ async def config_set(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         value = value_raw  # 字符串值，如 "deepseek/deepseek-v4-pro"
 
     try:
-        cfg = _read_config()
+        config_path = _resolve_config_path(ctx)
+        cfg = _read_config(config_path)
         old = _nested_get(cfg, key)
         _nested_set(cfg, key, value)
         try:
@@ -160,9 +174,12 @@ async def config_set(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 ),
                 error="ValidationError",
             )
-        _write_config(cfg)
+        _write_config(config_path, cfg)
         return ToolResult(
-            summary=f"✅ {key}: {json.dumps(old, ensure_ascii=False)} → {json.dumps(value, ensure_ascii=False)}",
+            summary=(
+                f"✅ {key}: {json.dumps(old, ensure_ascii=False)} → {json.dumps(value, ensure_ascii=False)}"
+                f"\n(source={config_path})"
+            ),
             evidence=f"{key}={value}",
             metadata={"key": key, "old": old, "new": value},
             state_delta={"config_changed": key},

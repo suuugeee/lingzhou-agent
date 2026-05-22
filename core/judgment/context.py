@@ -13,11 +13,13 @@ import time
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
+from core.probe.types import PROBE_COVERAGE_HINTS, normalize_probe_coverage_tags
+
 _log = logging.getLogger("lingzhou.judgment")
 
 # --- 纯计算格式化函数缓存（per-tick 粒度）---
-# key = tick_id + 函数名 + hash(参数); value = 格式化结果字符串
-_context_fmt_cache: dict[str, str] = {}
+# key = tick_id + 函数名 + hash(参数); value = 格式化结果或预算后的上下文字典
+_context_fmt_cache: dict[str, Any] = {}
 
 
 def _clear_context_cache() -> None:
@@ -419,6 +421,8 @@ def _fmt_memory_system(
     memory_dir: str,
     workspace_dir: str,
     semantic: "SemanticMemory",
+    max_concurrent_ticks: int = 1,
+    max_tick_queue: int = 8,
 ) -> str:
     stats = semantic.stats()
     lines = [
@@ -431,8 +435,11 @@ def _fmt_memory_system(
         f"semantic_fts5_ok: {'yes' if stats.get('fts5_ok') else 'no'}",
         f"embedding_enabled: {'yes' if stats.get('embedding_enabled') else 'no'}",
         f"decay_lambda: {float(stats.get('decay_lambda') or 0.0):.3f}",
+        f"tick_dispatch.max_concurrent_ticks: {int(max_concurrent_ticks)}",
+        f"tick_dispatch.max_tick_queue: {int(max_tick_queue)}",
     ]
     lines.append("说明: runtime_db 是任务/事实/聊天/运行轨迹主存储；SOUL/IDENTITY/BOOTSTRAP 等 md 是身份与可读镜像层。")
+    lines.append("调参提示: 以上 dispatch 上限可通过 config.set 修改 loop.max_concurrent_ticks / loop.max_tick_queue。")
     return "\n".join(lines)
 
 
@@ -886,17 +893,18 @@ def _fmt_blind_spots(probes: list[Any], self_model_tokens: int = 0) -> str:
 
     不是命令，是让 LLM 自己决定是否需要关注这些潜在盲区。
     """
-    has_hermesclaw = any("hermesclaw" in (getattr(p, "purpose", "") or "").lower() or "19997" in (getattr(p, "spec", "") or "") for p in probes)
-    has_api_quota = any(
-        "quota" in pur or "api" in pur
+    coverage_tags = {
+        tag
         for p in probes
-        for pur in ((getattr(p, "purpose", "") or "").lower(),)
-    )
-    has_git = any("git" in (getattr(p, "purpose", "") or "").lower() for p in probes)
+        for tag in normalize_probe_coverage_tags(getattr(p, "coverage_tags", []))
+    }
+    has_channel_health = "ops:channel_health" in coverage_tags
+    has_api_quota = "ops:api_quota" in coverage_tags
+    has_git = "workspace:git_state" in coverage_tags
 
     gaps = []
-    if not has_hermesclaw:
-        gaps.append("- hermesclaw（微信代理 at 127.0.0.1:19997）未监控 → 代理挂了你也收不到微信，但你不会发现")
+    if not has_channel_health:
+        gaps.append("- 关键外部通道健康未监控 → 依赖链路中断时你可能无法及时感知（例如消息网关/API 代理不可用）")
     if not has_api_quota:
         gaps.append("- API 调用量/额度未追踪 → 你可能在悄悄耗尽配额而不自知")
     if not has_git:
@@ -905,7 +913,12 @@ def _fmt_blind_spots(probes: list[Any], self_model_tokens: int = 0) -> str:
     if not gaps:
         return "当前感知覆盖良好，暂无明显盲点。"
 
-    return "以下是你当前**没有在监控**的东西——不是要求你立即行动，只是提醒你可能忽略了：\n" + "\n".join(gaps)
+    coverage_legend = "；".join(f"{tag}={desc}" for tag, desc in PROBE_COVERAGE_HINTS.items())
+    return (
+        "以下是你当前**没有在监控**的东西——不是要求你立即行动，只是提醒你可能忽略了：\n"
+        + "\n".join(gaps)
+        + f"\n\n可用 coverage_tags: {coverage_legend}"
+    )
 
 def _fmt_probe_sensors(probes: list[Any]) -> str:
     """将当前已部署的探针传感器网络格式化为 LLM 可读的感知面板。
@@ -917,16 +930,24 @@ def _fmt_probe_sensors(probes: list[Any]) -> str:
         return (
             "⚠️ 你目前没有部署任何探针。探针是你的『感知触手』——采集外部信息，结果自动注入工作记忆。\n"
             "建议安装以下自我监控探针（用 probe.install）：\n"
-            "  1. 磁盘使用率 → kind=shell spec='df -h / | tail -1' trigger=interval:600 purpose='磁盘超85%需清理'\n"
-            "  2. 内存 → kind=shell spec='free -m | grep Mem' trigger=interval:300 purpose='内存压力预警'\n"
-            "  3. 自身进程 → kind=shell spec='ps aux | grep lingzhou | grep -v grep | wc -l' trigger=interval:120 purpose='确认自身存活'\n"
-            "  4. hermesclaw → kind=shell spec='curl -s -o /dev/null -w %{http_code} http://127.0.0.1:19997/' trigger=interval:300 purpose='微信代理健康，非200说明微信通道中断'\n"
+            "  1. 磁盘使用率 → kind=shell spec='df -h / | tail -1' trigger=interval:600 purpose='磁盘超85%需清理' coverage_tags=[]\n"
+            "  2. 内存 → kind=shell spec='free -m | grep Mem' trigger=interval:300 purpose='内存压力预警' coverage_tags=[]\n"
+            "  3. 自身进程 → kind=shell spec='ps aux | grep lingzhou | grep -v grep | wc -l' trigger=interval:120 purpose='确认自身存活' coverage_tags=[]\n"
+            "  4. 外部通道健康 → kind=shell spec='curl -s -o /dev/null -w %{http_code} http://127.0.0.1:8080/health' trigger=interval:300 purpose='关键通道健康，非200说明链路异常' coverage_tags=['ops:channel_health']\n"
         )
-    lines: list[str] = []
+    lines: list[str] = [
+        "探针结果不是绝对真相：confidence<0.60 或标记为布放可疑时，先校验探针布放（spec/target/trigger），再据此决策。",
+        "盲点推断只读取显式 coverage_tags，不再从 purpose/spec 猜测；未声明 coverage_tags 的探针不会计入覆盖。",
+    ]
     for p in probes:
         mark = "✓" if p.enabled else "⊘"
         trigger_desc = p.trigger or "manual"
         alert_mark = " 🔔" if p.alert_expr else ""
+        confidence = getattr(p, "last_confidence", None)
+        confidence_mark = ""
+        if isinstance(confidence, (int, float)):
+            confidence_mark = f" confidence={float(confidence):.2f}"
+        suspect_mark = " ⚠️布放可疑" if getattr(p, "last_suspect", False) else ""
         # 目的说明
         purpose_line = f"  └ 目的: {p.purpose}" if getattr(p, "purpose", "") else ""
         # 最近读数
@@ -942,10 +963,26 @@ def _fmt_probe_sensors(probes: list[Any]) -> str:
                 reading_line = f"  └ @{t} (无输出)"
         else:
             reading_line = "  └ 尚未执行"
-        header = f"  {mark} [{p.name}] {p.kind}/{trigger_desc} →{p.data_back}{alert_mark}"
+        conf_reason = str(getattr(p, "last_confidence_reason", "") or "").strip()
+        conf_line = ""
+        if conf_reason:
+            conf_line = f"  └ 可信度依据: {conf_reason[:120]}"
+        coverage_tags = normalize_probe_coverage_tags(getattr(p, "coverage_tags", []))
+        coverage_line = (
+            f"  └ coverage: {', '.join(coverage_tags)}"
+            if coverage_tags else
+            "  └ coverage: （未声明，不计入盲点覆盖）"
+        )
+        header = (
+            f"  {mark} [{p.name}] {p.kind}/{trigger_desc} →{p.data_back}{alert_mark}"
+            f"{confidence_mark}{suspect_mark}"
+        )
         entry = header
         if purpose_line:
             entry += "\n" + purpose_line
+        entry += "\n" + coverage_line
         entry += "\n" + reading_line
+        if conf_line:
+            entry += "\n" + conf_line
         lines.append(entry)
     return "\n".join(lines)

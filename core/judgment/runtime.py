@@ -982,28 +982,37 @@ class JudgmentLayer:
 
         task_id_str = str(task.id) if task else None
         _el = asyncio.get_running_loop()
-        # 提前准备 failures 协程，以便并行获取
-        _failures_task = task_store.list_failures_for_task(str(task.id), self._cfg.memory.failure_limit) if task else task_store.list_failures(self._cfg.memory.failure_limit)
-        
-        # episodic/semantic 使用同步 sqlite3，需经 executor 層驱动，避免阻塞事件循环
-        # 并行获取独立 IO 操作，降低 tick 延迟
-        (
-            episodic_text,
-            recent_runs,
-            waiting_tasks,
-            durable_failure_snapshot,
-            context_facts,
-            probes,
-            failures,
-        ) = await asyncio.gather(
-            _el.run_in_executor(None, episodic.load_for_context, task_id_str, self._cfg.memory.episodic_max_chars),
-            task_store.list_runs(task_id=task.id, limit=6) if task else [],
-            task_store.list_tasks(status="waiting", limit=5),
-            _load_durable_failure_snapshot(task_store),
-            _load_context_facts_snapshot(task_store, task),
-            self._probe_manager.list_probes() if self._probe_manager else [],
-            _failures_task,
+        # episodic/semantic 使用同步 sqlite3，需经 executor 层驱动，避免阻塞事件循环。
+        # 显式启动独立任务，既保留并行 IO，又避免把立即值混入 gather。
+        episodic_text_future = _el.run_in_executor(
+            None,
+            episodic.load_for_context,
+            task_id_str,
+            self._cfg.memory.episodic_max_chars,
         )
+        recent_runs_task = (
+            asyncio.create_task(task_store.list_runs(task_id=task.id, limit=6))
+            if task else None
+        )
+        waiting_tasks_task = asyncio.create_task(task_store.list_tasks(status="waiting", limit=5))
+        durable_failure_task = asyncio.create_task(_load_durable_failure_snapshot(task_store))
+        context_facts_task = asyncio.create_task(_load_context_facts_snapshot(task_store, task))
+        probes_task = (
+            asyncio.create_task(self._probe_manager.list_probes())
+            if self._probe_manager else None
+        )
+        failures_task = asyncio.create_task(
+            task_store.list_failures_for_task(str(task.id), self._cfg.memory.failure_limit)
+            if task else task_store.list_failures(self._cfg.memory.failure_limit)
+        )
+
+        episodic_text = await episodic_text_future
+        recent_runs = await recent_runs_task if recent_runs_task is not None else []
+        waiting_tasks = await waiting_tasks_task
+        durable_failure_snapshot = await durable_failure_task
+        context_facts = await context_facts_task
+        probes = await probes_task if probes_task is not None else []
+        failures = await failures_task
 
         search_query = user_message or (task.next_step or task.goal or task.title) if task else user_message
         episodic_search = (
@@ -1084,6 +1093,8 @@ class JudgmentLayer:
                 memory_dir=str(self._cfg.memory_dir),
                 workspace_dir=str(self._cfg.workspace_dir),
                 semantic=semantic,
+                max_concurrent_ticks=self._cfg.loop.max_concurrent_ticks,
+                max_tick_queue=self._cfg.loop.max_tick_queue,
             ),
             "soul_section": soul_section,
             "tools_section": _fmt_tools(self._registry.list_manifests()),

@@ -25,13 +25,22 @@ Providers are defined in the `providers` section. API keys should come from envi
 
 | Key | Meaning |
 |-----|---------|
+| `loop.max_concurrent_ticks` | upper bound for ticks that may run at the same time; `1` keeps the runtime fully serial |
+| `loop.max_tick_queue` | bounded dispatcher queue size for pending ticks; chat waits for a slot instead of returning busy |
 | `loop.max_idle_gap` | default idle wait ceiling in milliseconds when there is no active work |
 | `loop.active_idle_gap` | default wait interval in milliseconds while a task is active |
 | `loop.min_act_gap` | minimum interval in milliseconds between two `act` decisions |
 | `loop.chat_reply_timeout` | timeout for chat reply waiting |
 | `loop.max_tool_rounds` | max tool rounds inside a single tick |
+| `loop.judge_every` | when fully idle, only call the LLM every N ticks; ignored when there is active work or a user message |
 | `loop.max_consecutive_errors` | consecutive error threshold |
 | `loop.evolve_every` | evolution check frequency |
+
+### Concurrent Tick Constraints
+
+- `max_concurrent_ticks` only unlocks concurrency for ticks that do not share continuation state.
+- If a tick depends on the previous round's `next_step`, `last_action_*`, `pending_tier`, or stall counters, it must remain queued behind the same chain.
+- A safe rollout starts with `max_concurrent_ticks=2`; keeping `1` preserves the old fully serial behavior.
 
 ## Memory Parameters
 

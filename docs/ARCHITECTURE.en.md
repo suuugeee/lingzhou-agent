@@ -30,11 +30,26 @@
          └──────────────┘
 ```
 
+## Tick Dispatch and Ordering Boundaries
+
+The goal of concurrent ticks is not "run everything out of order". It is "run unrelated ticks concurrently while preserving order for related work".
+
+- Ticks that belong to the same task continuation chain must stay FIFO. Their ordering depends on cross-tick state such as `next_step`, `last_action_*`, `pending_tier`, `ticks_since_judge`, and stall counters.
+- Ticks from unrelated tasks, or ticks that do not share continuation state, may run concurrently to reduce chat starvation while an autonomous LLM call is still in flight.
+- The runtime should enforce this through a bounded dispatcher: serialize per chain, run chains concurrently under a global concurrency cap, and keep a bounded pending queue.
+- The design goal is better responsiveness and throughput without changing the causal order of related work.
+
 ## Core Modules
 
 ### `core/loop/runtime.py` — Main loop
 
 Coordinates the full perception → judgment → execution → reflection cycle. The runtime is event-driven and wakes on chat messages, task changes, or timeout boundaries.
+
+With concurrent ticks enabled, the runtime is also responsible for:
+
+- owning global shared resources such as the provider, task store, and memory layers
+- dispatching ticks into continuation chains
+- preserving FIFO inside one chain while allowing bounded cross-chain concurrency
 
 ### `core/judgment/runtime.py` — Judgment layer
 

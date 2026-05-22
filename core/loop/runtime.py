@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import logging
 from collections import deque
 from pathlib import Path
@@ -44,6 +45,7 @@ from tools.registry import ToolRegistry, ToolContext, ToolResult
 from core.behavior_tracker import BehaviorTracker
 from core.soul import SoulManager
 from core.probe import ProbeManager
+from .dispatcher import ConcurrentTickDispatcher, TickJob
 from .driver import _run_cycle_impl, _wait_after_cycle_impl, _wait_for_event_impl
 from .chat import _process_pending_chat_turn, _tick_interact_impl
 from .reload import _maybe_hot_reload_provider_impl
@@ -55,6 +57,34 @@ from .startup import (
 )
 
 console = Console()
+
+
+_CHAIN_STATE_FIELDS = (
+    "_last_next_step",
+    "_last_decision",
+    "_last_act_error",
+    "_last_act_progressful",
+    "_last_act_progress_reason",
+    "_last_action_tool",
+    "_last_action_key",
+    "_last_action_status",
+    "_last_action_summary",
+    "_last_action_error",
+    "_last_action_state_delta",
+    "_success_stall_task_id",
+    "_success_stall_streak",
+    "_recent_action_feedback",
+    "_last_action_sig",
+    "_last_result_fp",
+    "_idle_cycles",
+    "_last_curiosity_signal_idle_cycle",
+    "_ticks_since_judge",
+    "_pending_tier",
+    "_pending_idle_gap",
+    "_pending_routing_overrides",
+    "_pending_thinking_override",
+    "_conv_history",
+)
 
 
 
@@ -184,6 +214,17 @@ class CognitionLoop:
         self._auth_profiles_path: Path = _AUTH_PROFILES_PATH
         self._auth_profiles_mtime: float = _AUTH_PROFILES_PATH.stat().st_mtime if _AUTH_PROFILES_PATH.exists() else 0.0
 
+        # 并发 tick 调度：默认 max_concurrent_ticks=1（行为等价于串行）
+        self._tick_dispatcher = ConcurrentTickDispatcher(
+            self,
+            max_concurrent=cfg.loop.max_concurrent_ticks,
+            max_queue=cfg.loop.max_tick_queue,
+        )
+        self._dispatch_cycle: int = 0
+        self._dispatch_cycle_lock = asyncio.Lock()
+        self._dispatch_state_lock = asyncio.Lock()
+        self._chain_runtime_state: dict[str, dict[str, Any]] = {}
+
     @property
     def probe_manager(self) -> ProbeManager:
         return self._probe_manager
@@ -250,6 +291,8 @@ class CognitionLoop:
                     await asyncio.sleep(1.0)  # 防止异常紧循环消耗 CPU
                 cfg = self._cfg  # 可能已更新
         finally:
+            if self._tick_dispatcher.enabled:
+                await self._tick_dispatcher.shutdown()
             self._probe_manager.stop()
             await self._task_store.close()
             await self._provider.close()
@@ -275,6 +318,116 @@ class CognitionLoop:
 
     async def _process_pending_chat_turn(self, cycle: int) -> tuple[int, bool]:
         return await _process_pending_chat_turn(self, cycle)
+
+    async def _next_dispatch_cycle(self) -> int:
+        async with self._dispatch_cycle_lock:
+            self._dispatch_cycle += 1
+            return self._dispatch_cycle
+
+    def _resolve_tick_chain_key(
+        self,
+        *,
+        active_task: Task | None = None,
+        chat_id: str | None = None,
+        source: str = "auto",
+    ) -> str:
+        if active_task is not None:
+            chain_id = str(getattr(active_task, "chain_id", "") or "").strip()
+            if chain_id:
+                return f"task-chain:{chain_id}"
+            return f"task:{active_task.id}"
+        cid = str(chat_id or "").strip()
+        if cid:
+            return f"chat:{cid}"
+        return f"global:{source}"
+
+    def _new_chain_runtime_state(self) -> dict[str, Any]:
+        chain_judgment = JudgmentLayer(self._provider, self._registry, self._cfg)
+        chain_judgment.set_identity_prefix(getattr(self._judgment, "_identity_prefix", ""))
+        if self._routing_providers:
+            chain_judgment.set_routing_providers(dict(self._routing_providers))
+        chain_judgment._probe_manager = self._probe_manager
+        try:
+            chain_judgment.self_model = copy.deepcopy(self._judgment.self_model)
+        except Exception:
+            pass
+
+        state: dict[str, Any] = {
+            "_wm": WorkingMemory(
+                capacity=self._cfg.memory.working_capacity,
+                token_budget=self._cfg.effective_wm_token_budget(),
+                item_max_tokens=self._cfg.memory.wm_item_max_tokens,
+            ),
+            "_emotion": EmotionState.from_config(self._cfg),
+            "_perception": PerceptionLayer(self._cfg),
+            "_behavior": BehaviorTracker(
+                wait_streak_notify=list(self._cfg.loop.wait_streak_notify),
+                streak_threshold=self._cfg.loop.behavior_streak_threshold,
+                wm_priorities={
+                    "behavior_loop": self._cfg.thresholds.wm_pri_user_msg,
+                    "edit_caution": self._cfg.thresholds.wm_pri_self_aware,
+                    "belief_stale": self._cfg.thresholds.wm_pri_critical,
+                },
+            ),
+            "_judgment": chain_judgment,
+            "_conv_history": deque(maxlen=6),
+        }
+        for field in _CHAIN_STATE_FIELDS:
+            if field == "_conv_history":
+                continue
+            state[field] = copy.deepcopy(getattr(self, field))
+        return state
+
+    def _mount_chain_view(self, view: Any, state: dict[str, Any]) -> None:
+        view._wm = state["_wm"]
+        view._emotion = state["_emotion"]
+        view._perception = state["_perception"]
+        view._behavior = state["_behavior"]
+        view._judgment = state["_judgment"]
+        for field in _CHAIN_STATE_FIELDS:
+            setattr(view, field, state[field])
+
+    def _sync_chain_state_from_view(self, state: dict[str, Any], view: Any) -> None:
+        for field in _CHAIN_STATE_FIELDS:
+            state[field] = getattr(view, field)
+        # 运行镜像：供 wait_after_cycle/state_snapshot 读取最近完成 tick 的状态
+        self._last_decision = view._last_decision
+        self._pending_idle_gap = view._pending_idle_gap
+        self._pending_tier = view._pending_tier
+        self._pending_routing_overrides = view._pending_routing_overrides
+        self._pending_thinking_override = view._pending_thinking_override
+        self._ticks_since_judge = view._ticks_since_judge
+        self._last_next_step = view._last_next_step
+        self._last_act_progressful = view._last_act_progressful
+        self._last_act_progress_reason = view._last_act_progress_reason
+        self._last_action_tool = view._last_action_tool
+        self._last_action_key = view._last_action_key
+        self._last_action_status = view._last_action_status
+        self._last_action_summary = view._last_action_summary
+        self._last_action_error = view._last_action_error
+        self._last_action_state_delta = view._last_action_state_delta
+        self._last_action_sig = view._last_action_sig
+        self._last_result_fp = view._last_result_fp
+
+    async def _run_dispatched_tick(self, job: TickJob) -> None:
+        async with self._dispatch_state_lock:
+            state = self._chain_runtime_state.get(job.chain_key)
+            if state is None:
+                state = self._new_chain_runtime_state()
+                self._chain_runtime_state[job.chain_key] = state
+
+        view = copy.copy(self)
+        self._mount_chain_view(view, state)
+        # provider 热切换后，链内 judgment 始终跟随当前 provider
+        view._judgment._provider = self._provider
+        if self._routing_providers:
+            view._judgment.set_routing_providers(dict(self._routing_providers))
+        view._judgment._probe_manager = self._probe_manager
+
+        await view._tick(job.cycle, user_message=job.user_message, chat_id=job.chat_id)
+
+        async with self._dispatch_state_lock:
+            self._sync_chain_state_from_view(state, view)
 
     async def _tick(
         self,
