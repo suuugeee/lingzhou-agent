@@ -63,14 +63,15 @@ async def _resolve_reply_chat_id(
 
 
 async def _process_pending_chat_turn(loop: Any, cycle: int) -> tuple[int, bool]:
+    original_cycle = cycle
     chat_message = await loop._task_store.pop_pending_chat_message()
     if not chat_message:
         return cycle, False
 
-    cycle += 1
     user_message = str(chat_message.get("content") or "")
     chat_id = str(chat_message.get("chat_id") or "")
     msg_id: int = chat_message.get("id") or 0
+    reserved_message_ids: list[int] = [msg_id] if msg_id else []
 
     # drain 同一会话紧随而来的消息，合并为同一 LLM 上下文轮次
     if chat_id:
@@ -83,6 +84,7 @@ async def _process_pending_chat_turn(loop: Any, cycle: int) -> tuple[int, bool]:
                 await asyncio.sleep(delay)
         follow_ups = await loop._task_store.drain_pending_for_chat(chat_id, after_id=msg_id)
         if follow_ups:
+            reserved_message_ids.extend(int(m.get("id") or 0) for m in follow_ups if int(m.get("id") or 0) > 0)
             extra = "\n".join(m["content"] for m in follow_ups)
             user_message = f"{user_message}\n{extra}".strip()
             _log.debug("[chat] merged %d follow-up message(s) into turn (ids=%s)",
@@ -99,22 +101,28 @@ async def _process_pending_chat_turn(loop: Any, cycle: int) -> tuple[int, bool]:
             chain_key=chain_key,
             user_message=user_message,
             chat_id=chat_id,
+            chat_message_ids=tuple(reserved_message_ids),
             source="chat",
         )
-        retry_sec = max(float(loop._cfg.loop.wake_poll_interval) / 1000.0, 0.05)
-        while True:
-            accepted = await loop._tick_dispatcher.enqueue(job)
-            if accepted:
-                break
-            _log.debug("[chat] tick queue full, waiting for slot chat_id=%s", chat_id)
-            await asyncio.sleep(retry_sec)
+        accepted = await loop._tick_dispatcher.enqueue(job)
+        if not accepted:
+            await loop._task_store.release_chat_messages(reserved_message_ids)
+            _log.debug("[chat] tick queue full, defer chat retry chat_id=%s", chat_id)
+            return original_cycle, True
         return dispatch_cycle, True
 
-    reply = await loop._tick(
-        cycle,
-        user_message=user_message,
-        chat_id=chat_id,
-    )
+    cycle += 1
+    try:
+        reply = await loop._tick(
+            cycle,
+            user_message=user_message,
+            chat_id=chat_id,
+        )
+    except Exception:
+        await loop._task_store.release_chat_messages(reserved_message_ids)
+        raise
+
+    await loop._task_store.mark_chat_messages_processed(reserved_message_ids)
     if reply:
         reply = _strip_memory_context(reply)
     _log.info("[chat] assistant › %s", reply or "")

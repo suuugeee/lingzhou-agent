@@ -147,7 +147,7 @@ def _snapshot_looks_blank(snapshot: str) -> bool:
     generic_tokens = {"document", "webarea", "rootwebarea", "main", "generic", "application"}
     normalized = [re.sub(r"[^a-z]+", "", line.lower()) for line in meaningful_lines[:4]]
     normalized = [item for item in normalized if item]
-    return len(lines) <= 3 and normalized and all(item in generic_tokens for item in normalized)
+    return len(lines) <= 3 and bool(normalized) and all(item in generic_tokens for item in normalized)
 
 
 # ── browser.navigate ─────────────────────────────────────────────────────────

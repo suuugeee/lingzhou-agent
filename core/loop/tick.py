@@ -456,7 +456,11 @@ async def _tick_impl(loop: Any, cycle: int, user_message: str = "", chat_id: str
             cognitive_signals=cognitive_signals,
             thinking_override=thinking_override,
             phase="initial",
-            prefer_tier=_prefer_tier_for_task(loop._pending_tier, active_task),
+            prefer_tier=_prefer_tier_for_task(
+                loop._pending_tier,
+                active_task,
+                has_user_message=bool(user_message),
+            ),
             routing_overrides=loop._pending_routing_overrides,
         )
         loop._pending_tier = None

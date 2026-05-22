@@ -56,6 +56,37 @@ def test_semantic_ebbinghaus():
         assert results[0]["id"] == "new"  # 新节点排前
 
 
+def test_semantic_importance_slows_decay():
+    from memory.semantic import MemoryNode, effective_activation
+
+    old_ts = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+
+    ordinary = MemoryNode(
+        id="ordinary",
+        kind="fact",
+        title="ordinary",
+        body="importlib",
+        activation=0.8,
+        importance=0.0,
+        created_at=old_ts,
+    )
+    important = MemoryNode(
+        id="important",
+        kind="fact",
+        title="important",
+        body="importlib",
+        activation=0.8,
+        importance=0.9,
+        created_at=old_ts,
+    )
+
+    ordinary_eff = effective_activation(ordinary, 0.1)
+    important_eff = effective_activation(important, 0.1)
+
+    assert important_eff > ordinary_eff
+    assert important_eff >= 0.5
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # EpisodicMemory — events.jsonl 轮转
 # ══════════════════════════════════════════════════════════════════════════════

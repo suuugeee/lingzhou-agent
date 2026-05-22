@@ -265,6 +265,10 @@ def test_chat_messages_are_sanitized_on_write():
     asyncio.run(_chat_messages_are_sanitized_on_write())
 
 
+def test_chat_pending_messages_are_recoverable_until_processed():
+    asyncio.run(_chat_pending_messages_are_recoverable_until_processed())
+
+
 def test_task_wait_allows_external_wait_without_wait_key():
     asyncio.run(_task_wait_allows_external_wait_without_wait_key())
 
@@ -386,6 +390,38 @@ async def _chat_messages_are_sanitized_on_write():
         assert msgs[0]["content"] == "hithere"
         assert msgs[1]["content"] == "删掉中文后就会多出空格"
         await store.close()
+
+
+async def _chat_pending_messages_are_recoverable_until_processed():
+    from memory.task_store import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "chat-processing.db"
+        store = TaskStore(db_path)
+        await store.open()
+        await store.add_chat_message("user", "hello")
+
+        reserved = await store.pop_pending_chat_message()
+        assert reserved is not None
+        assert reserved["content"] == "hello"
+        assert await store.has_pending_chat_message() is False
+
+        await store.release_chat_messages([reserved["id"]])
+        retried = await store.pop_pending_chat_message()
+        assert retried is not None
+        assert retried["id"] == reserved["id"]
+
+        await store.close()
+
+        reopened = TaskStore(db_path)
+        await reopened.open()
+        recovered = await reopened.pop_pending_chat_message()
+        assert recovered is not None
+        assert recovered["id"] == reserved["id"]
+
+        await reopened.mark_chat_messages_processed([recovered["id"]])
+        assert await reopened.has_pending_chat_message() is False
+        await reopened.close()
 
 
 def test_task_store_migration():

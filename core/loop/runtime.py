@@ -424,7 +424,15 @@ class CognitionLoop:
             view._judgment.set_routing_providers(dict(self._routing_providers))
         view._judgment._probe_manager = self._probe_manager
 
-        await view._tick(job.cycle, user_message=job.user_message, chat_id=job.chat_id)
+        try:
+            await view._tick(job.cycle, user_message=job.user_message, chat_id=job.chat_id)
+        except Exception:
+            if job.chat_message_ids:
+                await self._task_store.release_chat_messages(job.chat_message_ids)
+            raise
+
+        if job.chat_message_ids:
+            await self._task_store.mark_chat_messages_processed(job.chat_message_ids)
 
         async with self._dispatch_state_lock:
             self._sync_chain_state_from_view(state, view)

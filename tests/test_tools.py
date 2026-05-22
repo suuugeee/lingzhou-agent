@@ -167,6 +167,74 @@ description: Use when testing activation.
         assert res.metadata["skill"] == "sample-skill"
 
 
+def test_skill_evolve_uses_judgment_provider_and_registry(monkeypatch):
+    asyncio.run(_skill_evolve_uses_judgment_provider_and_registry(monkeypatch))
+
+
+async def _skill_evolve_uses_judgment_provider_and_registry(monkeypatch):
+    import core.evolution as evolution_mod
+    from tools.registry import ToolContext, ToolRegistry
+    from tools.skill_ops import skill_evolve
+
+    provider = object()
+    registry = ToolRegistry()
+    observed: dict[str, Any] = {}
+
+    class _FakeEngine:
+        def __init__(self, cfg: Any, provider_arg: Any, registry_arg: Any) -> None:
+            observed["cfg"] = cfg
+            observed["provider"] = provider_arg
+            observed["registry"] = registry_arg
+
+        async def evolve_skill(self, name: str, feedback: str, ctx: Any = None) -> Any:
+            observed["name"] = name
+            observed["feedback"] = feedback
+            observed["ctx"] = ctx
+            return SimpleNamespace(success=True, target="sample-skill", new_code="# updated")
+
+    monkeypatch.setattr(evolution_mod, "EvolutionEngine", _FakeEngine)
+
+    ctx = ToolContext(
+        config=_test_config(),
+        wm=None,
+        task_store=None,
+        episodic=None,
+        semantic=None,
+        emotion=None,
+        judgment=SimpleNamespace(_provider=provider, _registry=registry),
+    )
+
+    res = await skill_evolve({"name": "sample-skill", "feedback": "tighten guardrails"}, ctx)
+
+    assert res.error is None
+    assert observed["provider"] is provider
+    assert observed["registry"] is registry
+    assert observed["name"] == "sample-skill"
+    assert observed["feedback"] == "tighten guardrails"
+
+
+def test_config_set_rejects_unknown_interval_key(monkeypatch):
+    asyncio.run(_config_set_rejects_unknown_interval_key(monkeypatch))
+
+
+async def _config_set_rejects_unknown_interval_key(monkeypatch):
+    from tools.config_ops import config_set
+    import tools.config_ops as config_mod
+
+    with tempfile.TemporaryDirectory() as d:
+        cfg_path = Path(d) / "lingzhou.json"
+        cfg_path.write_text((_proj_root() / "lingzhou.json").read_text(encoding="utf-8"), encoding="utf-8")
+        before = cfg_path.read_text(encoding="utf-8")
+
+        monkeypatch.setattr(config_mod, "_resolve_config_path", lambda ctx=None: cfg_path)
+
+        res = await config_set({"key": "loop.interval", "value": "100"}, _tool_ctx())
+
+        assert res.error == "UnknownConfigKey"
+        assert "固定 tick interval 已废弃" in res.summary
+        assert cfg_path.read_text(encoding="utf-8") == before
+
+
 def test_browser_navigate_failure_uses_stdout_when_stderr_empty(monkeypatch):
     asyncio.run(_browser_navigate_failure_uses_stdout_when_stderr_empty(monkeypatch))
 

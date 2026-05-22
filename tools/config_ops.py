@@ -56,6 +56,26 @@ def _nested_set(d: dict, path: str, value: Any) -> None:
     current[keys[-1]] = value
 
 
+def _nested_has(d: dict[str, Any], path: str) -> bool:
+    keys = path.split(".")
+    current: Any = d
+    for key in keys:
+        if not isinstance(current, dict) or key not in current:
+            return False
+        current = current[key]
+    return True
+
+
+def _deprecated_key_hint(key: str) -> str:
+    if key == "loop.interval":
+        return (
+            "固定 tick interval 已废弃；当前 runtime 是事件驱动。"
+            "若想把响应粒度调到约 100ms，优先考虑 loop.wake_poll_interval、"
+            "loop.min_act_gap 或 loop.active_idle_gap。"
+        )
+    return ""
+
+
 def _field_description(key: str) -> str:
     """从 Pydantic schema 提取字段说明（含单位/约束信息），帮助 LLM 感知字段语义。"""
     try:
@@ -131,8 +151,10 @@ async def config_get(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "可调的常见参数:\n"
         "  loop.max_concurrent_ticks — tick 并发上限（同 chain 仍串行）\n"
         "  loop.max_tick_queue — tick 等待队列上限\n"
+        "  loop.wake_poll_interval — 事件轮询粒度(毫秒)\n"
         "  loop.max_idle_gap — 空闲等待上限(毫秒)\n"
         "  loop.min_act_gap — 动作间隔(毫秒)\n"
+        "  loop.active_idle_gap — 有活跃任务但 wait/pause 时的等待上限(毫秒)\n"
         "  loop.chat_reply_timeout — 聊天回复超时(秒)\n"
         "  evolution.enabled — 是否启用自进化\n"
         "  evolution.trigger_min_failures — 触发进化所需失败数\n"
@@ -159,11 +181,12 @@ async def config_set(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     try:
         config_path = _resolve_config_path(ctx)
         cfg = _read_config(config_path)
+        original_text = config_path.read_text(encoding="utf-8")
         old = _nested_get(cfg, key)
         _nested_set(cfg, key, value)
         try:
             from core.config import Config as _Config
-            _Config.model_validate(cfg)
+            validated = _Config.model_validate(cfg)
         except Exception as ve:
             field_desc = _field_description(key)
             hint = f"\n  字段说明: {field_desc}" if field_desc else ""
@@ -173,6 +196,22 @@ async def config_set(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                     f"  原因: {ve}{hint}"
                 ),
                 error="ValidationError",
+            )
+        if not _nested_has(validated.model_dump(mode="json"), key):
+            hint_parts: list[str] = []
+            field_desc = _field_description(key)
+            if field_desc:
+                hint_parts.append(f"字段说明: {field_desc}")
+            deprecated_hint = _deprecated_key_hint(key)
+            if deprecated_hint:
+                hint_parts.append(deprecated_hint)
+            hint = f"\n  {' '.join(hint_parts)}" if hint_parts else ""
+            return ToolResult(
+                summary=(
+                    f"❌ {key}: 不是运行时可识别的配置键，未写入"
+                    f"\n  原因: Config 会忽略该字段，修改后不会生效{hint}"
+                ),
+                error="UnknownConfigKey",
             )
         _write_config(config_path, cfg)
         return ToolResult(

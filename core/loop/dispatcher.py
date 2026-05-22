@@ -22,6 +22,7 @@ class TickJob:
     chain_key: str
     user_message: str = ""
     chat_id: str | None = None
+    chat_message_ids: tuple[int, ...] = ()
     source: str = "auto"
 
 

@@ -187,10 +187,19 @@ async def skill_evolve(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if not feedback:
         return ToolResult(summary="feedback 不能为空", error="EmptyFeedback")
 
+    judgment = getattr(ctx, "judgment", None)
+    provider = getattr(judgment, "_provider", None)
+    registry = getattr(judgment, "_registry", None)
+    if provider is None or registry is None:
+        return ToolResult(
+            summary="skill.evolve 缺少 judgment provider/registry 上下文",
+            error="MissingEvolutionContext",
+        )
+
     try:
         from core.evolution import EvolutionEngine
 
-        engine = EvolutionEngine(ctx.config)
+        engine = EvolutionEngine(ctx.config, provider, registry)
         result = await engine.evolve_skill(name, feedback, ctx=ctx)
     except Exception as exc:
         return ToolResult(summary=f"skill.evolve 内部错误: {exc}", error="EvolutionError")

@@ -193,6 +193,8 @@ def test_prefer_tier_for_task_uses_pending_then_task_default():
     assert _prefer_tier_for_task(None, task) is None
     assert _prefer_tier_for_task("reader", task) == "reader"
     assert _prefer_tier_for_task("repair", task) == "repair"
+    assert _prefer_tier_for_task("reader", task, has_user_message=True) == "reasoner"
+    assert _prefer_tier_for_task(None, task, has_user_message=True) == "reasoner"
 
     task.model_tier = "reasoner"
     assert _prefer_tier_for_task(None, task) == "reasoner"

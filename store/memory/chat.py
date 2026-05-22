@@ -69,9 +69,14 @@ class ChatMessageStore:
         if row is None:
             return None
         mid, content, chat_id = row
-        await self._db.execute(
-            "UPDATE chat_messages SET status='processed' WHERE id=?", (mid,)
-        )
+        async with self._db.execute(
+            "UPDATE chat_messages SET status='processing' WHERE id=? AND status='pending'",
+            (mid,),
+        ) as cur:
+            updated = cur.rowcount or 0
+        if updated <= 0:
+            await self._db.rollback()
+            return None
         await self._db.commit()
         return {"id": mid, "content": content, "chat_id": chat_id}
 
@@ -94,12 +99,38 @@ class ChatMessageStore:
             return []
         ids = [r[0] for r in rows]
         placeholders = ",".join("?" * len(ids))
+        async with self._db.execute(
+            f"UPDATE chat_messages SET status='processing' WHERE status='pending' AND id IN ({placeholders})",
+            ids,
+        ) as cur:
+            updated = cur.rowcount or 0
+        if updated <= 0:
+            await self._db.rollback()
+            return []
+        await self._db.commit()
+        return [{"id": r[0], "content": r[1]} for r in rows]
+
+    async def mark_messages_processed(self, message_ids: list[int] | tuple[int, ...]) -> None:
+        ids = [int(mid) for mid in message_ids if int(mid) > 0]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
         await self._db.execute(
-            f"UPDATE chat_messages SET status='processed' WHERE id IN ({placeholders})",
+            f"UPDATE chat_messages SET status='processed' WHERE status='processing' AND id IN ({placeholders})",
             ids,
         )
         await self._db.commit()
-        return [{"id": r[0], "content": r[1]} for r in rows]
+
+    async def release_messages(self, message_ids: list[int] | tuple[int, ...]) -> None:
+        ids = [int(mid) for mid in message_ids if int(mid) > 0]
+        if not ids:
+            return
+        placeholders = ",".join("?" * len(ids))
+        await self._db.execute(
+            f"UPDATE chat_messages SET status='pending' WHERE status='processing' AND id IN ({placeholders})",
+            ids,
+        )
+        await self._db.commit()
 
     async def get_messages_since(
         self,

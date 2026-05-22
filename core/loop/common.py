@@ -129,7 +129,14 @@ def _next_initial_tier_hint(action: JudgmentOutput) -> str | None:
     return next_tier if next_tier in VALID_MODEL_TIERS else None
 
 
-def _prefer_tier_for_task(pending_tier: str | None, task: Task | None) -> str | None:
+def _prefer_tier_for_task(
+    pending_tier: str | None,
+    task: Task | None,
+    *,
+    has_user_message: bool = False,
+) -> str | None:
+    if has_user_message:
+        return "reasoner"
     if pending_tier in VALID_MODEL_TIERS:
         return pending_tier
     task_tier = _task_model_tier(task)

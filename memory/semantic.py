@@ -83,7 +83,7 @@ class MemoryNode:
     body: str
     activation: float = 0.5
     valence: float = 0.5
-    importance: float = 0.5
+    importance: float = 0.0
     tags: list[str] = field(default_factory=list[str])
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
@@ -102,7 +102,7 @@ def effective_activation(node: "MemoryNode", decay_lambda: float) -> float:
     effective_lambda = decay_lambda × (1 - importance)  — 重要性越高，衰减越慢
     保护机制: imp≥0.9 → 不低于 0.5; imp≥0.7 → 不低于 0.3
     """
-    importance = getattr(node, 'importance', 0.5)
+    importance = max(0.0, min(1.0, float(getattr(node, 'importance', 0.0) or 0.0)))
     if decay_lambda <= 0:
         return node.activation
     try:

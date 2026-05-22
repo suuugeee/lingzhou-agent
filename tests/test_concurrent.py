@@ -48,6 +48,63 @@ def test_compact_tool_history_keeps_same_list_reference():
     assert len(history) == 4
     assert history[0]["tool"] == "[compacted]"
 
+
+def test_process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch):
+    asyncio.run(_process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch))
+
+
+async def _process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch):
+    from core.loop.chat import _process_pending_chat_turn
+
+    released_ids: list[tuple[int, ...]] = []
+
+    async def _unexpected_sleep(_delay: float):
+        raise AssertionError("queue full 时不应在 chat 主循环里 sleep 阻塞")
+
+    monkeypatch.setattr("core.loop.chat.asyncio.sleep", _unexpected_sleep)
+
+    class _FakeStore:
+        def __init__(self) -> None:
+            self._popped = False
+
+        async def pop_pending_chat_message(self):
+            if self._popped:
+                return None
+            self._popped = True
+            return {"id": 11, "content": "hello", "chat_id": "chat:test"}
+
+        async def drain_pending_for_chat(self, chat_id: str, after_id: int):
+            return []
+
+        async def release_chat_messages(self, message_ids):
+            released_ids.append(tuple(int(mid) for mid in message_ids))
+
+        async def get_active(self):
+            return None
+
+    class _FakeDispatcher:
+        enabled = True
+
+        async def enqueue(self, job):
+            return False
+
+    async def _next_dispatch_cycle() -> int:
+        return 8
+
+    loop = SimpleNamespace(
+        _task_store=_FakeStore(),
+        _tick_dispatcher=_FakeDispatcher(),
+        _cfg=SimpleNamespace(loop=SimpleNamespace(wechat_coalesce_delay=0, wake_poll_interval=200)),
+        _next_dispatch_cycle=_next_dispatch_cycle,
+        _resolve_tick_chain_key=lambda **kwargs: "chat:test",
+    )
+
+    cycle, handled = await _process_pending_chat_turn(loop, 7)
+
+    assert handled is True
+    assert cycle == 7
+    assert released_ids == [(11,)]
+
 def test_scoped_task_store_get_active_returns_pinned():
     """_ScopedTaskStore.get_active() 必须始终返回构造时传入的 pinned task。"""
     asyncio.run(_scoped_task_store_get_active_returns_pinned())

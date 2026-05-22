@@ -96,7 +96,7 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     role       TEXT    NOT NULL,            -- 'user' | 'assistant'
     content    TEXT    NOT NULL,
     session_id TEXT    NOT NULL DEFAULT '',
-    status     TEXT    NOT NULL DEFAULT 'pending',  -- pending | processed
+    status     TEXT    NOT NULL DEFAULT 'pending',  -- pending | processing | processed
     created_at TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_chat_pending
@@ -440,6 +440,9 @@ class TaskStore:
         # 建表（幂等）+ 补充性能索引（IF NOT EXISTS，对存量 DB 同样生效）
         await self._db.executescript(
             _CREATE_TASKS + _CREATE_FAILURES + _CREATE_FACTS + _CREATE_SIGNALS + _CREATE_CHAT + _CREATE_RUNS + _CREATE_META_REFLECTIONS + _CREATE_INDEXES
+        )
+        await self._db.execute(
+            "UPDATE chat_messages SET status='pending' WHERE role='user' AND status='processing'"
         )
         await self._db.commit()
 
@@ -868,16 +871,22 @@ class TaskStore:
         return await self._chat.has_pending_message()
 
     async def pop_pending_chat_message(self) -> Optional[dict[str, Any]]:
-        """原子获取并标记最早一条待处理 user 消息（无则返回 None）。"""
+        """预留最早一条待处理 user 消息（无则返回 None）。"""
         return await self._chat.pop_pending_message()
 
     async def drain_pending_for_chat(
         self, chat_id: str, after_id: int
     ) -> list[dict[str, Any]]:
-        """原子获取并标记同 chat_id 中 id > after_id 的所有 pending 用户消息。
+        """预留同 chat_id 中 id > after_id 的所有 pending 用户消息。
         用于合并图片等紧随文本消息之后到达的附件消息。
         """
         return await self._chat.drain_pending_for_chat(chat_id, after_id)
+
+    async def mark_chat_messages_processed(self, message_ids: list[int] | tuple[int, ...]) -> None:
+        await self._chat.mark_messages_processed(message_ids)
+
+    async def release_chat_messages(self, message_ids: list[int] | tuple[int, ...]) -> None:
+        await self._chat.release_messages(message_ids)
 
     async def get_chat_messages_since(
         self,
