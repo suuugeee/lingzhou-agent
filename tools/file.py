@@ -588,8 +588,8 @@ async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         applied = []
 
         for i, edit in enumerate(edits):
-            old_text = edit.get("oldText", "") if isinstance(edit, dict) else ""
-            new_text = edit.get("newText", "") if isinstance(edit, dict) else ""
+            old_text = (edit.get("oldText") or edit.get("old_text") or "") if isinstance(edit, dict) else ""
+            new_text = (edit.get("newText") or edit.get("new_text") or "") if isinstance(edit, dict) else ""
 
             if not old_text:
                 return ToolResult(summary=f"edits[{i}]: oldText 不能为空", error="EmptyOldText", skipped=True)
