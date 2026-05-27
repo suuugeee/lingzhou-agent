@@ -122,6 +122,8 @@ class JudgmentExecutor:
     def _classify_error_code(self, err_text: str) -> str:
         text = (err_text or "").lower()
         if " 429 " in f" {text} " or "too many requests" in text:
+            if "quota" in text:
+                return "quota"  # 配额耗尽（如 Copilot quota exceeded），需长时间冷却
             return "429"
         if " 402 " in f" {text} " or "payment required" in text or "insufficient balance" in text:
             return "402"
@@ -137,6 +139,8 @@ class JudgmentExecutor:
 
     def _cooldown_seconds(self, code: str, failure_streak: int) -> float:
         streak = max(1, failure_streak)
+        if code == "quota":
+            return 3600.0  # 配额耗尽，冷却 1 小时
         if code == "429":
             return min(180.0, 30.0 * streak)
         if code == "402":
