@@ -107,6 +107,22 @@ class JudgmentLayer:
         self._executor.self_model = v
 
     @property
+    def _model_health(self) -> Any:
+        return self._executor._model_health
+
+    @_model_health.setter
+    def _model_health(self, v: Any) -> None:
+        self._executor._model_health = v
+
+    @property
+    def _provider_errors(self) -> Any:
+        return self._executor._provider_errors
+
+    @_provider_errors.setter
+    def _provider_errors(self, v: Any) -> None:
+        self._executor._provider_errors = v
+
+    @property
     def last_call_meta(self) -> dict[str, Any]:
         return self._executor.last_call_meta
 
