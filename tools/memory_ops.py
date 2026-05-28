@@ -69,7 +69,7 @@ def _disambiguate_semantic_title(ctx: ToolContext, raw_title: str, kind: str, no
 
 @tool(ToolManifest(
     name="memory.add_wm",
-    description="向工作记忆添加一条提炼后的观察或结论。只写从素材中蒸馏出的要点（1-3句），禁止写原始文件内容、命令输出或大段文本——那些素材已在 tool_history 中保留，重复写入会撑满上下文。",
+    description="向工作记忆添加一条提炼后的观察或结论。只写从素材中蒸馏出的要点，字数不限，但必须是自己的提炼；禁止写原始文件内容、命令输出或大段文本——那些素材已在 tool_history 中保留，重复写入会撑满上下文。",
     progress_category="mutation",
     params=[
         ToolParam("content", "string", "提炼后的观察/结论/警告；字数不限，但必须是自己的提炼，不得直接粘贴原始文件内容或命令输出", required=True),
@@ -286,7 +286,7 @@ async def failure_dismiss(params: dict[str, Any], ctx: ToolContext) -> ToolResul
     prefer_tier="reasoner",
     progress_category="mutation",
     params=[
-        ToolParam("insight", "string", "洞察摘要（1-3句）", required=True),
+        ToolParam("insight", "string", "洞察摘要，字数不限，但必须是提炼后的洞察", required=True),
         ToolParam("title", "string", "洞察标题（简短）", required=False),
     ],
 ))
