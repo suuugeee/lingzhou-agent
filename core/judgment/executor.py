@@ -352,15 +352,37 @@ class JudgmentExecutor:
             return ""
         if self._estimate_text_tokens(text) <= keep_tokens:
             return text
-        # 以字符比例做一次保守压缩，确保超限重试时内容实质变短。
+
+        instruction = (
+            "[PROMPT_COMPRESSION_REQUIRED]\n"
+            "输入过长。请先压缩提炼关键信息，再继续完成任务。\n"
+            "保留：目标、约束、错误信息、关键实体、关键数字。\n"
+            "删除：重复和冗余描述；不确定信息标记为 unknown。\n\n"
+            "[SOURCE_HEAD_TAIL]\n"
+        )
+
         estimated = max(1, self._estimate_text_tokens(text))
-        ratio = max(0.01, min(1.0, keep_tokens / float(estimated)))
+        instruction_tokens = self._estimate_text_tokens(instruction)
+        if keep_tokens <= instruction_tokens + 16:
+            # 极小预算时退化为最短提示，确保重试请求可发送。
+            return instruction[: max(1, min(len(instruction), keep_tokens))]
+
+        source_budget_tokens = max(32, int((keep_tokens - instruction_tokens) * 0.9))
+        ratio = max(0.01, min(1.0, source_budget_tokens / float(estimated)))
         keep_chars = max(1, int(len(text) * ratio * 0.9))
-        trimmed = text[:keep_chars]
-        # 兜底：极端估算误差下至少砍半，避免返回原文导致重试无效。
-        if len(trimmed) >= len(text):
-            trimmed = text[: max(1, len(text) // 2)]
-        return trimmed
+
+        marker = "\n\n...[prompt 已压缩]...\n\n"
+        if keep_chars <= len(marker) + 2:
+            return instruction + text[: max(1, keep_chars)]
+
+        head_chars = max(1, int((keep_chars - len(marker)) * 0.6))
+        tail_chars = max(1, keep_chars - len(marker) - head_chars)
+        if head_chars + tail_chars >= len(text):
+            compact_source = text[: max(1, len(text) // 2)]
+        else:
+            compact_source = f"{text[:head_chars]}{marker}{text[-tail_chars:]}"
+
+        return instruction + compact_source
 
     def _trim_messages_for_prompt_limit(
         self,
