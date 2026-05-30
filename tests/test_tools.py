@@ -2010,24 +2010,26 @@ async def _process_kill():
 
     _MANAGER.clear()
     ctx = _tool_ctx()
+    try:
+        res = await exec_run({"command": "sleep 60", "background": True, "timeout": 60}, ctx)
+        sid = json.loads(res.evidence)["process_id"]
 
-    res = await exec_run({"command": "sleep 60", "background": True, "timeout": 60}, ctx)
-    sid = json.loads(res.evidence)["process_id"]
+        # 确认进程存在
+        poll1 = await process_poll({"session_id": sid}, ctx)
+        status = json.loads(poll1.summary)
+        assert status["status"] == "running"
 
-    # 确认进程存在
-    poll1 = await process_poll({"session_id": sid}, ctx)
-    status = json.loads(poll1.summary)
-    assert status["status"] == "running"
+        # kill
+        kill_res = await process_kill({"session_id": sid}, ctx)
+        assert kill_res.error is None
+        assert "已终止" in kill_res.summary
 
-    # kill
-    kill_res = await process_kill({"session_id": sid}, ctx)
-    assert kill_res.error is None
-    assert "已终止" in kill_res.summary
-
-    # 确认已终止
-    poll2 = await process_poll({"session_id": sid}, ctx)
-    status2 = json.loads(poll2.summary)
-    assert status2["status"] == "finished"
+        # 确认已终止
+        poll2 = await process_poll({"session_id": sid}, ctx)
+        status2 = json.loads(poll2.summary)
+        assert status2["status"] == "finished"
+    finally:
+        _MANAGER.clear()
 
 
 def test_process_list():
@@ -2041,17 +2043,19 @@ async def _process_list():
 
     _MANAGER.clear()
     ctx = _tool_ctx()
+    try:
+        # 空列表
+        r = await process_list({"state": "all"}, ctx)
+        assert "无进程" in r.summary
 
-    # 空列表
-    r = await process_list({"state": "all"}, ctx)
-    assert "无进程" in r.summary
+        # 启动一个后台进程
+        res = await exec_run({"command": "sleep 5", "background": True, "timeout": 10}, ctx)
+        sid = json.loads(res.evidence)["process_id"]
 
-    # 启动一个后台进程
-    res = await exec_run({"command": "sleep 5", "background": True, "timeout": 10}, ctx)
-    sid = json.loads(res.evidence)["process_id"]
-
-    r2 = await process_list({"state": "running"}, ctx)
-    assert sid in r2.summary
+        r2 = await process_list({"state": "running"}, ctx)
+        assert sid in r2.summary
+    finally:
+        _MANAGER.clear()
 
 
 def test_process_write_to_finished():
@@ -2059,20 +2063,23 @@ def test_process_write_to_finished():
     asyncio.run(_process_write_to_finished())
 
 async def _process_write_to_finished():
-    import json
+    import time
 
-    from tools.exec import _MANAGER, exec_run, process_write
+    from tools.exec import _MANAGER, ProcessInfo, process_write
 
     _MANAGER.clear()
     ctx = _tool_ctx()
 
-    res = await exec_run({"command": "echo done"}, ctx)  # 前台，立即结束
-    assert res.error is None
-
-    # 前台进程不在 _MANAGER 中，所以写一个短命令后台
-    res2 = await exec_run({"command": "echo hi", "background": True, "timeout": 2}, ctx)
-    sid = json.loads(res2.evidence)["process_id"]
-    await asyncio.sleep(0.5)  # 等待完成
+    sid = "finished-1"
+    _MANAGER.register(ProcessInfo(
+        session_id=sid,
+        command="echo hi",
+        started_at=time.time() - 1,
+        finished=True,
+        finished_at=time.time(),
+        return_code=0,
+        background=True,
+    ))
 
     # 写入已结束进程
     w = await process_write({"session_id": sid, "data": "hello"}, ctx)

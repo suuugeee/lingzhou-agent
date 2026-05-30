@@ -217,7 +217,7 @@ async def test_reference_resolver_resolve_current_speaker_prefers_memory_and_int
     from store.semantic import MemoryNode, SemanticMemory
 
     with tempfile.TemporaryDirectory() as d:
-        semantic = SemanticMemory(Path(d), decay_lambda=0.0)
+        semantic = cast("Any", SemanticMemory(Path(d), decay_lambda=0.0))
         semantic.upsert(MemoryNode(
             id="interlocutor-bat",
             kind="interlocutor",
@@ -266,7 +266,7 @@ async def test_reference_resolver_remember_speaker_persists_person_scoped_profil
             self.calls.append((key, value, scope))
 
     with tempfile.TemporaryDirectory() as d:
-        semantic = SemanticMemory(Path(d), decay_lambda=0.0)
+        semantic = cast("Any", SemanticMemory(Path(d), decay_lambda=0.0))
         facts = FactStoreStub()
         resolver = ReferenceResolver()
 
@@ -314,7 +314,7 @@ async def test_reference_resolver_remember_speaker_captures_interlocutor_source_
             self.calls.append((key, value, scope))
 
     with tempfile.TemporaryDirectory() as d:
-        semantic = SemanticMemory(Path(d), decay_lambda=0.0)
+        semantic = cast("Any", SemanticMemory(Path(d), decay_lambda=0.0))
         facts = FactStoreStub()
         resolver = ReferenceResolver()
 
@@ -1080,7 +1080,7 @@ def test_configure_lingzhou_logging_resets_console_log_each_time():
 
 
 def test_judgment_context_budget_trims_low_priority_sections():
-    from core.judgment import apply_context_budget
+    from core.judgment.context_formatters_runtime import apply_context_budget
 
     ctx = {
         "task_section": "T" * 2000,
@@ -1235,6 +1235,156 @@ async def _judgment_executor_retries_with_trimmed_prompt_on_limit_error():
     assert provider.calls == 2
     assert provider.lengths[1] < provider.lengths[0]
     assert resolve_context_window("adaptive-mini", None) == 128000
+
+
+def test_chat_with_retry_trims_largest_message_even_when_system_is_overlong():
+    asyncio.run(_chat_with_retry_trims_largest_message_even_when_system_is_overlong())
+
+
+async def _chat_with_retry_trims_largest_message_even_when_system_is_overlong():
+    from core.config import Config
+    from core.judgment.executor import JudgmentExecutor
+    from core.judgment.output import ModelSelection
+    from provider.base import Message
+
+    class _Provider:
+        model_ref = "copilot/adaptive-mini"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.total_lengths: list[int] = []
+
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            self.calls += 1
+            self.total_lengths.append(sum(len(str(message.content)) for message in messages))
+            if self.calls == 1:
+                raise RuntimeError(
+                    "Client error '400 Bad Request' for url 'https://api.individual.githubcopilot.com/responses' "
+                    "body={\"error\":{\"message\":\"prompt token count of 153330 exceeds the limit of 128000\","
+                    "\"code\":\"model_max_prompt_tokens_exceeded\"}}"
+                )
+            return '{"decision":"wait","rationale":"ok"}'
+
+        async def close(self):
+            return None
+
+        async def ping(self, timeout: float = 8.0):
+            return True, 1, None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "base_url": "https://api.individual.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            }
+        },
+        "model": "copilot/adaptive-mini",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+    provider = _Provider()
+    executor = JudgmentExecutor(provider, cfg)
+
+    huge_system = "s" * 520000
+    messages = [
+        Message(role="system", content=huge_system),
+        Message(role="user", content="hi"),
+    ]
+    selection = ModelSelection(phase="initial", tier="reasoner", model_ref="copilot/adaptive-mini", thinking="high")
+
+    raw, final_selection, last_error = await executor._chat_with_retry(
+        selected_provider=provider,
+        selection=selection,
+        messages=messages,
+        phase="initial",
+        user_message="hi",
+        thinking_override="high",
+        routing_overrides=None,
+        log_prefix="[test]",
+    )
+
+    assert last_error is None
+    assert final_selection.model_ref == "copilot/adaptive-mini"
+    assert raw == '{"decision":"wait","rationale":"ok"}'
+    assert provider.calls == 2
+    assert provider.total_lengths[1] < provider.total_lengths[0]
+
+
+def test_judgment_executor_logs_llm_usage(caplog):
+    asyncio.run(_judgment_executor_logs_llm_usage(caplog))
+
+
+async def _judgment_executor_logs_llm_usage(caplog):
+    from core.config import Config
+    from core.judgment.executor import JudgmentExecutor
+    from core.judgment.output import ModelSelection
+    from provider.base import Message
+
+    class _Provider:
+        model_ref = "copilot/adaptive-mini"
+
+        def __init__(self) -> None:
+            self.last_usage = {
+                "prompt_tokens": 321,
+                "completion_tokens": 45,
+                "total_tokens": 366,
+            }
+
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait","rationale":"ok"}'
+
+        async def close(self):
+            return None
+
+        async def ping(self, timeout: float = 8.0):
+            return True, 1, None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "base_url": "https://api.individual.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            }
+        },
+        "model": "copilot/adaptive-mini",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+    provider = _Provider()
+    executor = JudgmentExecutor(provider, cfg)
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="hello world"),
+    ]
+    selection = ModelSelection(phase="initial", tier="reasoner", model_ref="copilot/adaptive-mini", thinking="high")
+
+    caplog.clear()
+    caplog.set_level(logging.INFO, logger="lingzhou.judgment")
+    raw, final_selection, last_error = await executor._chat_with_retry(
+        selected_provider=provider,
+        selection=selection,
+        messages=messages,
+        phase="initial",
+        user_message="hi",
+        thinking_override="high",
+        routing_overrides=None,
+        log_prefix="[test]",
+        skills="memory.search,file.read",
+    )
+
+    assert raw == '{"decision":"wait","rationale":"ok"}'
+    assert final_selection.model_ref == "copilot/adaptive-mini"
+    assert last_error is None
+    logs = [record.getMessage() for record in caplog.records if record.name == "lingzhou.judgment"]
+    llm_logs = [msg for msg in logs if "[llm] ok" in msg]
+    assert llm_logs
+    assert "model=copilot/adaptive-mini" in llm_logs[-1]
+    assert "usage_prompt=321" in llm_logs[-1]
+    assert "usage_completion=45" in llm_logs[-1]
+    assert "usage_total=366" in llm_logs[-1]
+    assert "skills=memory.search,file.read" in llm_logs[-1]
 
 
 def test_evolution_verification_outcome():
@@ -2221,7 +2371,7 @@ async def test_refresh_running_runs_updates_fact_monitored_non_exec_runs():
         root = Path(d)
         store = TaskStore(root / "runtime.db")
         episodic = EpisodicMemory(root)
-        semantic = SemanticMemory(root)
+        semantic = cast("Any", SemanticMemory(root))
         await store.open()
         task_id = await store.add_task("推理任务", goal="等待外部状态")
         await store.set_fact(
@@ -2297,7 +2447,7 @@ async def test_refresh_running_runs_failed_fact_monitored_run_records_learning()
         root = Path(d)
         store = TaskStore(root / "runtime.db")
         episodic = EpisodicMemory(root)
-        semantic = SemanticMemory(root)
+        semantic = cast("Any", SemanticMemory(root))
         await store.open()
         task_id = await store.add_task("推理失败任务", goal="等待外部状态失败")
         await store.set_fact(
@@ -2361,7 +2511,7 @@ async def test_refresh_running_runs_failed_exec_run_records_learning():
         root = Path(d)
         store = TaskStore(root / "runtime.db")
         episodic = EpisodicMemory(root)
-        semantic = SemanticMemory(root)
+        semantic = cast("Any", SemanticMemory(root))
         await store.open()
         task_id = await store.add_task("exec 失败任务", goal="等待后台失败")
         run_id = await store.add_run(
@@ -2605,7 +2755,7 @@ async def _file_list_and_memory_search():
         root = Path(d)
         (root / 'a.txt').write_text('hello', encoding='utf-8')
         (root / 'sub').mkdir()
-        semantic = SemanticMemory(root)
+        semantic = cast("Any", SemanticMemory(root))
         ctx = _tool_ctx(workspace_dir=str(root), semantic=semantic)
         listed = await file_list({'path': str(root)}, ctx)
         assert 'a.txt' in listed.summary
@@ -2651,7 +2801,7 @@ async def _memory_add_semantic_disambiguates_duplicate_titles():
 
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
-        semantic = SemanticMemory(root)
+        semantic = cast("Any", SemanticMemory(root))
         ctx = _tool_ctx(workspace_dir=str(root), semantic=semantic)
 
         first = await memory_add_semantic(
@@ -2692,7 +2842,7 @@ async def _reflect_structural_disambiguates_duplicate_titles():
         await store.open()
         try:
             await store.add_task('结构反思任务', goal='reflect')
-            semantic = SemanticMemory(root / 'semantic')
+            semantic = cast("Any", SemanticMemory(root / 'semantic'))
             episodic = EpisodicMemory(root / 'episodic')
             wm = WorkingMemory(capacity=8)
             wm.add(WMItem(kind='observation', content='重复结构洞察来源', priority=0.8))
@@ -2725,24 +2875,26 @@ async def _exec_process_write_pipe_roundtrip():
 
     _MANAGER.clear()
     ctx = _tool_ctx()
+    try:
+        res = await exec_run({
+            "command": "python3 -c \"import sys; print(sys.stdin.readline().strip())\"",
+            "background": True,
+            "timeout": 2,
+        }, ctx)
+        sid = json.loads(res.evidence)["process_id"]
+        await process_write({"process_id": sid, "data": "hello\\n", "eof": True}, ctx)
 
-    res = await exec_run({
-        "command": "python3 -c \"import sys; print(sys.stdin.readline().strip())\"",
-        "background": True,
-        "timeout": 2,
-    }, ctx)
-    sid = json.loads(res.evidence)["process_id"]
-    await process_write({"process_id": sid, "data": "hello\\n", "eof": True}, ctx)
+        for _ in range(40):
+            poll = await process_poll({"process_id": sid}, ctx)
+            status = json.loads(poll.summary)
+            if status["status"] == "finished":
+                break
+            await asyncio.sleep(0.05)
 
-    for _ in range(40):
-        poll = await process_poll({"process_id": sid}, ctx)
-        status = json.loads(poll.summary)
-        if status["status"] == "finished":
-            break
-        await asyncio.sleep(0.05)
-
-    log = await process_log({"process_id": sid, "offset": 0, "limit": 200}, ctx)
-    assert "hello" in log.summary
+        log = await process_log({"process_id": sid, "offset": 0, "limit": 200}, ctx)
+        assert "hello" in log.summary
+    finally:
+        _MANAGER.clear()
 
 
 def test_exec_process_timeout_background():
@@ -2756,24 +2908,26 @@ async def _exec_process_timeout_background():
 
     _MANAGER.clear()
     ctx = _tool_ctx()
+    try:
+        res = await exec_run({
+            "command": "python3 -c \"import time; time.sleep(5)\"",
+            "background": True,
+            "timeout": 0.2,
+        }, ctx)
+        sid = json.loads(res.evidence)["process_id"]
 
-    res = await exec_run({
-        "command": "python3 -c \"import time; time.sleep(5)\"",
-        "background": True,
-        "timeout": 0.2,
-    }, ctx)
-    sid = json.loads(res.evidence)["process_id"]
+        timed_out = False
+        for _ in range(60):
+            poll = await process_poll({"process_id": sid}, ctx)
+            status = json.loads(poll.summary)
+            if status["status"] == "finished":
+                timed_out = bool(status["timed_out"])
+                break
+            await asyncio.sleep(0.05)
 
-    timed_out = False
-    for _ in range(60):
-        poll = await process_poll({"process_id": sid}, ctx)
-        status = json.loads(poll.summary)
-        if status["status"] == "finished":
-            timed_out = bool(status["timed_out"])
-            break
-        await asyncio.sleep(0.05)
-
-    assert timed_out is True
+        assert timed_out is True
+    finally:
+        _MANAGER.clear()
 
 
 def test_exec_and_shell_explicit_no_output():
@@ -2877,6 +3031,104 @@ async def _execution_durable_failure_sensing_for_file_tool():
         await store.close()
 
 
+def test_classify_durable_failure_tolerates_non_string_tool_result_fields():
+    from core.execution_helpers import _classify_durable_failure
+    from tools.registry import ToolResult
+
+    result = ToolResult(
+        summary=cast("Any", {"command": "bash /definitely/missing.sh"}),
+        evidence=cast("Any", {"stderr": "No such file or directory"}),
+        error="CommandFailed",
+    )
+
+    assert _classify_durable_failure(result) == "missing_path"
+
+
+def test_execution_dispatch_normalizes_non_string_tool_result_fields():
+    asyncio.run(_execution_dispatch_normalizes_non_string_tool_result_fields())
+
+
+async def _execution_dispatch_normalizes_non_string_tool_result_fields():
+    from tools.registry import ToolManifest, ToolParam, ToolRegistry, ToolResult, tool
+
+    tool_name = "probe.non_string_result"
+
+    @tool(ToolManifest(
+        name=tool_name,
+        description="return malformed tool result",
+        params=[ToolParam("value", "string", "dummy", required=False)],
+    ))
+    async def _malformed_result(params, ctx):
+        return ToolResult(
+            summary=cast("Any", {"command": "bash /definitely/missing.sh"}),
+            evidence=cast("Any", {"stderr": "No such file or directory"}),
+            error="CommandFailed",
+        )
+
+    reg = ToolRegistry()
+    layer = _execution_layer(reg)
+    ctx = _tool_ctx(debug=False, task_store=None)
+    action = _judgment_output(decision="act", chosen_action_id=tool_name, params={})
+
+    result = await layer.dispatch(action, ctx)
+
+    assert isinstance(result.summary, str)
+    assert isinstance(result.evidence, str)
+    assert "definitely/missing.sh" in result.summary
+    assert "No such file or directory" in result.evidence
+
+
+def test_execution_dispatch_accepts_dict_result_on_llm_worker():
+    asyncio.run(_execution_dispatch_accepts_dict_result_on_llm_worker())
+
+
+async def _execution_dispatch_accepts_dict_result_on_llm_worker():
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+
+    from store.task import TaskStore
+    from tools.registry import ToolManifest, ToolParam, ToolRegistry, tool
+
+    tool_name = "probe.llm_dict_result"
+
+    @tool(ToolManifest(
+        name=tool_name,
+        description="return dict result on llm worker",
+        params=[
+            ToolParam("monitor_fact_key", "string", "monitor key", required=False),
+            ToolParam("value", "string", "dummy", required=False),
+        ],
+    ))
+    async def _llm_dict_result(params, ctx):
+        return cast("Any", {
+            "summary": "llm worker dict ok",
+            "evidence": {"status": "running"},
+            "metadata": {"from": "dict"},
+        })
+
+    with TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "runtime.db")
+        await store.open()
+        try:
+            reg = ToolRegistry()
+            layer = _execution_layer(reg)
+            ctx = _tool_ctx(debug=False, task_store=store)
+            action = _judgment_output(
+                decision="act",
+                chosen_action_id=tool_name,
+                params={"monitor_fact_key": "monitor:test"},
+            )
+
+            result = await layer.dispatch(action, ctx)
+
+            assert result.summary == "llm worker dict ok"
+            assert result.metadata["worker_path"] == "llm"
+            assert result.metadata["reasoning_mode"] == "tool-mediated-llm"
+            assert result.metadata["from"] == "dict"
+        finally:
+            await store.close()
+
+
 def test_execution_dispatch_records_run():
     asyncio.run(_execution_dispatch_records_run())
 
@@ -2896,7 +3148,7 @@ async def _execution_dispatch_records_run():
         target.write_text("hello", encoding="utf-8")
         store = TaskStore(root / "runtime.db")
         episodic = EpisodicMemory(root)
-        semantic = SemanticMemory(root)
+        semantic = cast("Any", SemanticMemory(root))
         await store.open()
         await store.add_task("读取文件", goal="读 demo", model_tier="reader")
         reg = ToolRegistry()
@@ -3265,7 +3517,7 @@ async def _execution_failure_creates_meta_reflection():
         root = Path(d)
         store = TaskStore(root / "runtime.db")
         episodic = EpisodicMemory(root)
-        semantic = SemanticMemory(root)
+        semantic = cast("Any", SemanticMemory(root))
         await store.open()
         await store.add_task("读空路径", goal="制造失败")
         reg = ToolRegistry()
@@ -3332,7 +3584,7 @@ async def _execution_generic_failure_meta_reflection_defers():
         root = Path(d)
         store = TaskStore(root / "runtime.db")
         episodic = EpisodicMemory(root)
-        semantic = SemanticMemory(root)
+        semantic = cast("Any", SemanticMemory(root))
         await store.open()
         await store.add_task("读缺失文件", goal="制造单环失败")
         reg = ToolRegistry()
@@ -3770,7 +4022,7 @@ async def _execution_background_run_does_not_record_completion_early():
         ProcessManager.clear()
         store = TaskStore(root / "runtime.db")
         episodic = EpisodicMemory(root)
-        semantic = SemanticMemory(root)
+        semantic = cast("Any", SemanticMemory(root))
         await store.open()
         await store.add_task("后台执行", goal="启动后保持 running")
         reg = ToolRegistry()
@@ -4650,7 +4902,7 @@ Strong body.
 
 def test_skill_catalog_pinned_mark_appears_for_last_applied():
     """catalog 格式中，last_applied 的 skill 应带 [↑] 标记。"""
-    from core.judgment.context import _fmt_skill_catalog
+    from core.judgment.context_formatters_skills import _fmt_skill_catalog
     from core.skill import SkillRegistry
 
     # 构建两个最小 skill
@@ -4715,7 +4967,7 @@ body.
 
 def test_primary_skill_uses_last_applied_memory(tmp_path):
     """primary_skill_section 应基于 LLM 上轮记忆（last_applied），而不是 keyword 预选。"""
-    from core.judgment.context import _fmt_primary_skill
+    from core.judgment.context_formatters_skills import _fmt_primary_skill
     from core.skill import SkillRegistry
 
     skills_dir = tmp_path / "skills"
@@ -4757,7 +5009,7 @@ body.
 
 def test_primary_skill_none_when_no_last_applied():
     """无 last_applied 历史时，primary_skill 降级为空文本提示，不崩溃。"""
-    from core.judgment.context import _fmt_primary_skill
+    from core.judgment.context_formatters_skills import _fmt_primary_skill
 
     result = _fmt_primary_skill(None)
     assert result  # 有内容
@@ -4865,7 +5117,7 @@ def test_builtin_skill_catalog_coverage():
 
 def test_skill_catalog_section_contains_activation_hint():
     """catalog 格式字符串应包含 skill.activate 提示，告知 LLM 主动激活。"""
-    from core.judgment.context import _fmt_skill_catalog
+    from core.judgment.context_formatters_skills import _fmt_skill_catalog
     from core.skill import SkillRegistry
 
     reg = SkillRegistry()

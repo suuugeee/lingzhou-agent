@@ -1,5 +1,6 @@
 """TaskStore 持久化测试"""
 import asyncio
+import sqlite3
 import tempfile
 from pathlib import Path
 
@@ -659,6 +660,38 @@ def test_task_store_migration():
 
 def test_ingress_store_unifies_external_chat_and_task_writes():
     asyncio.run(_ingress_store_unifies_external_chat_and_task_writes())
+
+
+def test_ingress_store_retries_when_database_is_locked():
+    from store.task.ingress import IngressStore
+
+    class _Cursor:
+        def __init__(self, rowid: int) -> None:
+            self.lastrowid = rowid
+
+    class _FlakyConn:
+        attempts = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def execute(self, sql, params):
+            type(self).attempts += 1
+            if type(self).attempts == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return _Cursor(77)
+
+    with tempfile.TemporaryDirectory() as d:
+        ingress = IngressStore(Path(d) / "locked.db")
+        ingress._connect = lambda: _FlakyConn()  # type: ignore[method-assign]
+
+        msg_id = ingress.add_task("locked inbound", goal="retry on lock", source="gateway:webhook")
+
+    assert msg_id == 77
+    assert _FlakyConn.attempts == 2
 
 async def _task_store_migration():
     """旧列式 schema → JSON-first 自动迁移。"""

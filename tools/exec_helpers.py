@@ -211,9 +211,14 @@ class ProcessManager:
     @classmethod
     def clear(cls) -> None:
         for info in list(cls._processes.values()):
+            if info.watch_task is not None:
+                with contextlib.suppress(Exception):
+                    info.watch_task.cancel()
             if info.proc is not None:
                 with contextlib.suppress(Exception):
                     _terminate_info(info, force=True)
+                with contextlib.suppress(Exception):
+                    _close_process_handles(info)
             elif info.pid and cls._pid_alive(info.pid):
                 with contextlib.suppress(Exception):
                     os.kill(info.pid, signal.SIGKILL)
@@ -260,6 +265,35 @@ def _terminate_info(info: ProcessInfo, *, force: bool = False) -> None:
         pass
     except Exception as e:
         info.error = str(e)
+
+
+def _close_process_handles(info: ProcessInfo) -> None:
+    proc = info.proc
+    if proc is None:
+        return
+    try:
+        if isinstance(proc, asyncio.subprocess.Process):
+            stdin = getattr(proc, "stdin", None)
+            if stdin is not None and not stdin.is_closing():
+                stdin.close()
+            transport = getattr(proc, "_transport", None)
+            if transport is not None:
+                transport.close()
+        elif isinstance(proc, subprocess.Popen):
+            stdin = getattr(proc, "stdin", None)
+            if stdin is not None:
+                stdin.close()
+            stdout = getattr(proc, "stdout", None)
+            if stdout is not None:
+                stdout.close()
+            stderr = getattr(proc, "stderr", None)
+            if stderr is not None:
+                stderr.close()
+    except ProcessLookupError:
+        pass
+    except Exception:
+        pass
+    info.proc = None
 
 
 def _build_capabilities(workdir: str) -> dict[str, Any]:
@@ -343,14 +377,7 @@ async def _watch_pipe_process(info: ProcessInfo) -> None:
             await asyncio.wait_for(reader_task, timeout=1.0)
         except Exception:
             reader_task.cancel()
-        try:
-            if proc.stdin and not proc.stdin.is_closing():
-                proc.stdin.close()
-            if proc.stdout:
-                await proc.stdout.read()
-        except Exception:
-            pass
-        info.proc = None
+        _close_process_handles(info)
 
 
 def _run_pty_until_exit(info: ProcessInfo) -> tuple[int, bool, str | None]:

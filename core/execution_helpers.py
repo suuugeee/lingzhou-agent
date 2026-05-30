@@ -72,8 +72,29 @@ def _failure_fact_key(action: JudgmentOutput) -> str:
     return f"durable_failure:{digest}"
 
 
+def _coerce_result_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        except Exception:
+            return str(value)
+    return str(value)
+
+
 def _classify_durable_failure(result: ToolResult) -> str | None:
-    text = "\n".join(x for x in [result.summary, result.error or "", result.evidence] if x).lower()
+    text = "\n".join(
+        segment
+        for segment in (
+            _coerce_result_text(result.summary),
+            _coerce_result_text(result.error or ""),
+            _coerce_result_text(result.evidence),
+        )
+        if segment
+    ).lower()
     patterns = {
         "missing_path": [
             "no such file or directory", "路径不存在", "文件不存在", "未找到", "找不到脚本",
@@ -87,6 +108,14 @@ def _classify_durable_failure(result: ToolResult) -> str | None:
         if any(n in text for n in needles):
             return code
     return None
+
+
+def _normalize_tool_result_text_fields(result: ToolResult) -> ToolResult:
+    result.summary = _coerce_result_text(result.summary)
+    result.evidence = _coerce_result_text(result.evidence)
+    if result.error is not None:
+        result.error = _coerce_result_text(result.error)
+    return result
 
 
 def _clip_log_text(value: Any) -> str:

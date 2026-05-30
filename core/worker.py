@@ -34,6 +34,8 @@ async def _call_handler(entry: ToolEntry, params: dict[str, Any], ctx: ToolConte
         raw = await raw
     if isinstance(raw, dict):
         raw = ToolResult(**raw)
+    if not isinstance(raw, ToolResult):
+        raw = ToolResult(summary=str(raw))
     return raw  # type: ignore[return-value]
 
 
@@ -167,7 +169,7 @@ class WorkerLayer:
         action: JudgmentOutput,
         ctx: ToolContext,
     ) -> ToolResult:
-        result = await entry.handler(action.params, ctx)
+        result = await _call_handler(entry, action.params, ctx)
         result.metadata.setdefault("worker_path", "llm")
         result.metadata.setdefault("reasoning_mode", "tool-mediated-llm")
         monitor_key = str(

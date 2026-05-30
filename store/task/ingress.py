@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +14,36 @@ from .state import build_task_data, build_task_insert
 class _IngressBase:
     """sqlite3 连接基础设施（内部共享）。"""
 
+    _LOCKS: dict[str, threading.RLock] = {}
+    _LOCKS_GUARD = threading.Lock()
+
     def __init__(self, db_path: str | Path) -> None:
         self._path = Path(db_path).expanduser()
+
+    def _db_lock(self) -> threading.RLock:
+        key = str(self._path.resolve())
+        with self._LOCKS_GUARD:
+            lock = self._LOCKS.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                self._LOCKS[key] = lock
+            return lock
+
+    def _write_with_retry(self, fn: Any, /, *args: Any, **kwargs: Any) -> Any:
+        last_exc: Exception | None = None
+        for attempt in range(6):
+            try:
+                with self._db_lock():
+                    return fn(*args, **kwargs)
+            except sqlite3.OperationalError as exc:
+                last_exc = exc
+                if "database is locked" in str(exc).lower() and attempt < 5:
+                    time.sleep(0.15 * (2 ** attempt))
+                    continue
+                raise
+        if last_exc is not None:
+            raise last_exc
+        return None
 
     def _connect(self) -> sqlite3.Connection:
         # timeout=60: C 层等待 60s（对跨连接 SQLITE_BUSY 有效）
@@ -49,23 +79,29 @@ class IngressWriter(_IngressBase):
         chat_id: str = "",
         status: str = "pending",
     ) -> int:
-        insert_args = build_chat_message_insert(
-            role,
-            content,
-            chat_id=chat_id,
-            status=status,
-        )
-        with self._connect() as conn:
-            cur = conn.execute(
-                "INSERT INTO chat_messages(role, content, session_id, status) VALUES (?,?,?,?)",
-                insert_args,
+        def _do() -> int:
+            insert_args = build_chat_message_insert(
+                role,
+                content,
+                chat_id=chat_id,
+                status=status,
             )
-            return int(cur.lastrowid or 0)
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "INSERT INTO chat_messages(role, content, session_id, status) VALUES (?,?,?,?)",
+                    insert_args,
+                )
+                return int(cur.lastrowid or 0)
+
+        return self._write_with_retry(_do)
 
     def set_fact(self, key: str, value: str, *, scope: str = "general") -> None:
-        sql, params = build_fact_upsert(key, value, scope=scope)
-        with self._connect() as conn:
-            conn.execute(sql, params)
+        def _do() -> None:
+            sql, params = build_fact_upsert(key, value, scope=scope)
+            with self._connect() as conn:
+                conn.execute(sql, params)
+
+        self._write_with_retry(_do)
 
     def ingest_user_message(
         self,
@@ -74,33 +110,39 @@ class IngressWriter(_IngressBase):
         chat_id: str,
         facts: dict[str, str | tuple[str, str]] | None = None,
     ) -> int:
-        insert_args = build_chat_message_insert(
-            "user",
-            content,
-            chat_id=chat_id,
-            status="pending",
-        )
-        with self._connect() as conn:
-            cur = conn.execute(
-                "INSERT INTO chat_messages(role, content, session_id, status) VALUES (?,?,?,?)",
-                insert_args,
+        def _do() -> int:
+            insert_args = build_chat_message_insert(
+                "user",
+                content,
+                chat_id=chat_id,
+                status="pending",
             )
-            message_id = int(cur.lastrowid or 0)
-            for key, raw_value in (facts or {}).items():
-                if isinstance(raw_value, tuple):
-                    value, scope = raw_value
-                else:
-                    value, scope = str(raw_value), "general"
-                sql, params = build_fact_upsert(key, value, scope=scope)
-                conn.execute(sql, params)
-            return message_id
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "INSERT INTO chat_messages(role, content, session_id, status) VALUES (?,?,?,?)",
+                    insert_args,
+                )
+                message_id = int(cur.lastrowid or 0)
+                for key, raw_value in (facts or {}).items():
+                    if isinstance(raw_value, tuple):
+                        value, scope = raw_value
+                    else:
+                        value, scope = str(raw_value), "general"
+                    sql, params = build_fact_upsert(key, value, scope=scope)
+                    conn.execute(sql, params)
+                return message_id
+
+        return self._write_with_retry(_do)
 
     def mark_chat_message_delivered(self, message_id: int) -> None:
-        with self._connect() as conn:
-            conn.execute(
-                "UPDATE chat_messages SET status='delivered' WHERE id=?",
-                (int(message_id),),
-            )
+        def _do() -> None:
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE chat_messages SET status='delivered' WHERE id=?",
+                    (int(message_id),),
+                )
+
+        self._write_with_retry(_do)
 
     def add_task(
         self,
@@ -125,12 +167,15 @@ class IngressWriter(_IngressBase):
             priority=priority,
             data=data,
         )
-        with self._connect() as conn:
-            cur = conn.execute(
-                "INSERT INTO tasks (title, status, priority, data) VALUES (?,?,?,?)",
-                insert_args,
-            )
-            return int(cur.lastrowid or 0)
+        def _do() -> int:
+            with self._connect() as conn:
+                cur = conn.execute(
+                    "INSERT INTO tasks (title, status, priority, data) VALUES (?,?,?,?)",
+                    insert_args,
+                )
+                return int(cur.lastrowid or 0)
+
+        return self._write_with_retry(_do)
 
 
 class IngressStore(IngressWriter):

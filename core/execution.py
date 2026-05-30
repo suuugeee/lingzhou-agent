@@ -19,6 +19,7 @@ from core.execution_helpers import (
     _failure_fact_key,
     _infer_run_profile,
     _load_durable_failure_policy,
+    _normalize_tool_result_text_fields,
     _planned_run_task_id,
     _record_run_started,
     _resolve_execution_active_task,
@@ -309,6 +310,7 @@ class ExecutionLayer:
                 kind="execute_result",
             )
         result = _stamp_result_metadata(result)
+        result = _normalize_tool_result_text_fields(result)
         result.metadata.setdefault("dispatch_ms", int((time.monotonic() - dispatch_started) * 1000))
 
         summary_log, error_log, state_log = _tool_result_log_fields(result)

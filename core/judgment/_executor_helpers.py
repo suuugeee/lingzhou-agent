@@ -15,6 +15,18 @@ if TYPE_CHECKING:
 _log = logging.getLogger("lingzhou.judgment")
 
 
+def _message_log_stats(executor: JudgmentExecutor, messages: list[Any]) -> tuple[int, int, int]:
+    message_count = len(messages)
+    char_count = 0
+    est_tokens = 0
+    for msg in messages:
+        content = getattr(msg, "content", None)
+        if isinstance(content, str):
+            char_count += len(content)
+            est_tokens += executor._estimate_text_tokens(content)
+    return message_count, char_count, est_tokens
+
+
 def _select_provider_impl(
     executor: JudgmentExecutor,
     *,
@@ -87,45 +99,69 @@ def _trim_messages_for_prompt_limit_impl(
     if prompt_limit <= 0:
         return messages
 
-    user_idx = -1
-    user_text = ""
+    content_slots: list[tuple[int, str, int, str]] = []
     approx_total = 0
     for idx, msg in enumerate(messages):
         role = getattr(msg, "role", None)
         content = getattr(msg, "content", None)
         if isinstance(content, str):
-            approx_total += executor._estimate_text_tokens(content)
-            if role == "user":
-                user_idx = idx
-                user_text = content
+            content_tokens = executor._estimate_text_tokens(content)
+            approx_total += content_tokens
+            content_slots.append((idx, str(role or ""), content_tokens, content))
 
-    if user_idx < 0 or not user_text:
+    if not content_slots:
         return messages
 
     target_prompt_budget = max(1024, int(prompt_limit * 0.82))
+    current_total = prompt_count if prompt_count and prompt_count > 0 else approx_total
+    if current_total <= target_prompt_budget and approx_total <= target_prompt_budget:
+        return messages
 
+    new_messages = list(messages)
+    changed = False
     keep_ratio: float | None = None
     if prompt_count and prompt_count > target_prompt_budget:
         keep_ratio = max(0.12, min(0.95, target_prompt_budget / float(prompt_count)))
 
-    if keep_ratio is None and approx_total <= target_prompt_budget:
-        return messages
+    compressed_indices: set[int] = set()
+    while True:
+        current_total = 0
+        for msg in new_messages:
+            content = getattr(msg, "content", None)
+            if isinstance(content, str):
+                current_total += executor._estimate_text_tokens(content)
+        if current_total <= target_prompt_budget:
+            break
 
-    other_tokens = max(0, approx_total - executor._estimate_text_tokens(user_text))
-    user_budget = max(768, target_prompt_budget - other_tokens)
-    if keep_ratio is not None:
-        user_budget = max(512, int(user_budget * keep_ratio))
-    trimmed_user = executor._compress_text_to_budget(user_text, user_budget)
-    if trimmed_user == user_text:
-        return messages
+        candidates: list[tuple[int, int, int, str]] = []
+        for idx, role, tokens, content in content_slots:
+            if idx in compressed_indices or not content:
+                continue
+            role_priority = 0 if role != "system" else 1
+            candidates.append((tokens, role_priority, idx, content))
+        if not candidates:
+            break
 
-    new_messages = list(messages)
-    role = getattr(new_messages[user_idx], "role", "user")
-    if Message is not None:
-        new_messages[user_idx] = Message(role=role, content=trimmed_user)
-    else:
-        new_messages[user_idx] = type(new_messages[user_idx])(role=role, content=trimmed_user)
-    return new_messages
+        candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        _, _, idx, content = candidates[0]
+        other_tokens = max(0, current_total - executor._estimate_text_tokens(content))
+        message_budget = max(256, target_prompt_budget - other_tokens)
+        if keep_ratio is not None:
+            message_budget = max(256, int(message_budget * keep_ratio))
+        trimmed_content = executor._compress_text_to_budget(content, message_budget)
+        if trimmed_content == content:
+            compressed_indices.add(idx)
+            continue
+
+        role = getattr(new_messages[idx], "role", "user")
+        if Message is not None:
+            new_messages[idx] = Message(role=role, content=trimmed_content)
+        else:
+            new_messages[idx] = type(new_messages[idx])(role=role, content=trimmed_content)
+        compressed_indices.add(idx)
+        changed = True
+
+    return new_messages if changed else messages
 
 
 async def _chat_with_retry_impl(
@@ -156,10 +192,31 @@ async def _chat_with_retry_impl(
             primary_skill_name=primary_skill_name,
             primary_skill_guidance=primary_skill_guidance,
         )
+        message_count, char_count, est_tokens = _message_log_stats(executor, messages)
         try:
             raw = await selected_provider.chat(messages, thinking_override=thinking_override)
             executor._mark_model_success(selection.model_ref)
             executor._track_token_usage(selected_provider)
+            usage = getattr(selected_provider, "last_usage", None)
+            prompt_tokens = int(usage.get("prompt_tokens") or 0) if isinstance(usage, dict) else 0
+            completion_tokens = int(usage.get("completion_tokens") or 0) if isinstance(usage, dict) else 0
+            total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens)) if isinstance(usage, dict) else 0
+            _log.info(
+                "%s [llm] ok model=%s tier=%s phase=%s thinking=%s attempt=%s messages=%s chars=%s est_tokens=%s usage_prompt=%s usage_completion=%s usage_total=%s skills=%s",
+                log_prefix,
+                selection.model_ref,
+                selection.tier,
+                selection.phase,
+                thinking_override if thinking_override is not None else selection.thinking,
+                _attempt + 1,
+                message_count,
+                char_count,
+                est_tokens,
+                prompt_tokens,
+                completion_tokens,
+                total_tokens,
+                skills,
+            )
             return raw, selection, None
         except Exception as exc:
             last_error = exc
@@ -179,12 +236,14 @@ async def _chat_with_retry_impl(
                 )
                 if trimmed_messages is not messages:
                     _log.warning(
-                        "%s LLM 提示词超限，自适应压缩后同模型重试: model=%s prompt=%s limit=%s attempt=%s",
+                        "%s LLM 提示词超限，自适应压缩后同模型重试: model=%s prompt=%s limit=%s attempt=%s messages=%s est_tokens=%s",
                         log_prefix,
                         selection.model_ref,
                         prompt_count,
                         prompt_limit,
                         _attempt + 1,
+                        message_count,
+                        est_tokens,
                     )
                     messages = trimmed_messages
                     continue
