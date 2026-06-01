@@ -235,7 +235,10 @@ def record(
 def load_markdown_context(path: Path, max_chars: int = 4000) -> str:
     if not path.exists():
         return ""
-    return path.read_text(encoding="utf-8")
+    text = path.read_text(encoding="utf-8")
+    if max_chars and max_chars > 0 and len(text) > max_chars:
+        text = text[-max_chars:]
+    return text
 
 
 def load_for_context(memory, task_id: str | None, max_chars: int = 4000) -> str:
