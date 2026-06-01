@@ -34,6 +34,8 @@ semantic = [
 test = [
     "pytest>=8.0",
     "pytest-asyncio>=0.21",
+    "pytest-cov>=6.0",
+    "ruff>=0.9",
 ]
 
 [project.urls]
@@ -44,6 +46,7 @@ Changelog   = "https://github.com/suuugeee/lingzhou-agent/blob/main/CHANGELOG.md
 
 [project.scripts]
 lingzhou = "cli.main:main"
+lingzhou-check-imports = "core.import_boundary_check:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["channels", "cli", "core", "memory", "provider", "store", "tools"]
@@ -63,6 +66,10 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["core", "store", "memory", "provider", "tools", "channels", "cli"]
+
+[tool.ruff.lint.per-file-ignores]
+# tick.py 为 tests/旧路径保留的兼容 re-export，符号在包内由子模块实现
+"core/loop/tick/__init__.py" = ["F401", "I001"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

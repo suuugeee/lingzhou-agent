@@ -3,38 +3,43 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from core.self_model import fmt_self_model
+from core.persona.self_model import fmt_self_model
 
-from ..context import (
-    _fill_template,
-    _fmt_blind_spots,
+from ..context.budget import apply_context_budget
+from ..context.sections import (
     _fmt_chat_continuity,
     _fmt_chat_history,
     _fmt_chat_memories,
-    _fmt_cognitive_signals,
-    _fmt_context_facts,
     _fmt_cross_task_episodic,
     _fmt_current_time,
-    _fmt_durable_failures,
     _fmt_ethos,
-    _fmt_failures,
-    _fmt_hard_boundaries,
-    _fmt_judgment_signals,
     _fmt_memories,
     _fmt_percept,
+    _fmt_shell_capabilities,
+    _fmt_tools,
+    _fmt_wm,
+)
+from ..context.signals import (
+    _fmt_hard_boundaries,
+    _fmt_judgment_signals,
     _fmt_perception_replay,
+)
+from ..context.skills import (
+    _fmt_blind_spots,
+    _fmt_cognitive_signals,
     _fmt_probe_sensors,
+)
+from ..context.tasks import (
+    _fmt_context_facts,
+    _fmt_durable_failures,
+    _fmt_failures,
     _fmt_recent_runs,
     _fmt_runnable_tasks,
-    _fmt_shell_capabilities,
     _fmt_similar_tasks,
     _fmt_task,
-    _fmt_tools,
     _fmt_waiting_tasks,
-    _fmt_wm,
-    _validate_context_schema,
-    apply_context_budget,
 )
+from ..context.utils import _fill_template, _validate_context_schema
 from ..output import _build_team_view_from_cfg
 
 if TYPE_CHECKING:

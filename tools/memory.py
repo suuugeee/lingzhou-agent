@@ -1,4 +1,4 @@
-"""tools/memory_ops.py — 记忆操作工具。"""
+"""tools/memory.py — 记忆操作工具。"""
 from __future__ import annotations
 
 import json
@@ -6,12 +6,20 @@ import logging
 import uuid
 from typing import Any
 
-_log = logging.getLogger("lingzhou.tools")
-
 from memory.quality_checker import evaluate_retrieval_quality
 from memory.working import WMItem
 from store.semantic import MemoryNode
-from tools.registry import CAPS_EXEMPT, ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import (
+    CAPS_EXEMPT,
+    ToolContext,
+    ToolManifest,
+    ToolParam,
+    ToolResult,
+    tool,
+    tool_metadata,
+)
+
+_log = logging.getLogger("lingzhou.tools")
 
 _PRIORITY_ALIASES = {"high": 0.9, "medium": 0.6, "mid": 0.6, "low": 0.3, "critical": 1.0}
 
@@ -34,6 +42,7 @@ def _coerce_fact_value(value: Any) -> str:
     if isinstance(value, (dict, list, tuple, bool, int, float)):
         return json.dumps(value, ensure_ascii=False)
     return str(value).strip()
+
 
 def _parse_float(val: Any, default: float) -> float:
     """把 '0.8' / 'high' / 0.8 / None 都安全转成 float。"""
@@ -194,22 +203,28 @@ async def memory_search(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     quality = evaluate_retrieval_quality(query, hits, ctx.semantic.decay_lambda)
     lines = []
     for i, hit in enumerate(hits, 1):
+        node_id = str(hit.get("id") or "")
         title = str(hit.get("title") or "")
         body = str(hit.get("body") or "")
         score = hit.get("score")
         score_part = ""
         if isinstance(score, (int, float)):
             score_part = f" (score={float(score):.3f})"
-        lines.append(f"[{i}] {title}{score_part}\n{body}")
+        prefix = f"[{i}] {title}{score_part}"
+        if node_id:
+            prefix += f" [{node_id}]"
+        lines.append(f"{prefix}\n{body}")
     overall = float(quality.get("overall_score") or 0.0)
     lines.append(f"\n检索质量: overall={overall:.3f}")
     return ToolResult(
         summary="\n\n".join(lines),
-        metadata={
-            "query": query,
-            "hits": len(hits),
-            "retrieval_quality": quality,
-        },
+        metadata=tool_metadata(
+            "memory.search",
+            f"memory.search query={query!r} hits={len(hits)} overall={overall:.3f}",
+            query=query,
+            hits=len(hits),
+            retrieval_quality=quality,
+        ),
         state_delta={"memory_hits": len(hits), "memory_quality": round(overall, 3)},
     )
 

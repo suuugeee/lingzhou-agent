@@ -22,7 +22,7 @@
 
 Provider 在 providers 段定义。推荐通过环境变量或 auth profile 提供 API key；若在首次向导里直接粘贴 key，也可以仅写入本机配置文件，不应提交到仓库。
 
-说明：下列 loop、memory、evolution、gateway 默认值由测试绑定 core/config.py；源码 default 变更时，文档必须同步更新。
+说明：下列 loop、memory、evolution、gateway 默认值由测试绑定 core/config/loader.py；源码 default 变更时，文档必须同步更新。
 
 ## 循环参数
 

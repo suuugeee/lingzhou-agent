@@ -5,11 +5,11 @@
 ## [2026.5.20.1] — 2026-05-20
 
 ### 重构
-- **loop 模块第二阶段拆分** — 新增 `core/loop/common.py`、`core/loop/tick.py`，将 `_tick`、`_tick_finalize` 与 post-tick memory/进度收尾从 `core/loop/runtime.py` 迁出，`runtime.py` 只保留装配与生命周期
-- **loop chat 子模块落地** — 新增 `core/loop/chat.py`，将会话绑定、reply session 恢复与 `tick_interact` 从主编排中抽出，修复“自主追问只写日志不外发”的链路缺口
+- **loop 模块第二阶段拆分** — 新增 `core/loop/shared/common.py`、`core/loop/tick.py`，将 `_tick`、`_tick_finalize` 与 post-tick memory/进度收尾从 `core/loop/runtime.py` 迁出，`runtime.py` 只保留装配与生命周期
+- **loop chat 子模块落地** — 新增 `core/loop/cycle/chat.py`，将会话绑定、reply session 恢复与 `tick_interact` 从主编排中抽出，修复“自主追问只写日志不外发”的链路缺口
 - **chat 口径统一为 chat_id** — chat IPC / loop chat / CLI chat / wechat 通道统一改用 `chat_id` 语义；SQLite 历史列名 `session_id` 保留为存储实现细节
-- **loop driver 子模块落地** — 新增 `core/loop/driver.py`，将 run 主循环中的“单轮执行 + 事件驱动等待”从 `runtime.py` 抽离，进一步收窄 runtime 职责
-- **loop startup 子模块落地** — 新增 `core/loop/startup.py`，将 `open()/run()` 启动期的 routing/provider 装配、soul bootstrap、self model 恢复与 DB 状态恢复从 `runtime.py` 抽离
+- **loop driver 子模块落地** — 新增 `core/loop/cycle/driver.py`，将 run 主循环中的“单轮执行 + 事件驱动等待”从 `runtime.py` 抽离，进一步收窄 runtime 职责
+- **loop startup 子模块落地** — 新增 `core/loop/runtime/startup.py`，将 `open()/run()` 启动期的 routing/provider 装配、soul bootstrap、self model 恢复与 DB 状态恢复从 `runtime.py` 抽离
 - **store/memory 主线落地** — chat/fact/failure/signal/run/reflection/task 持久化 helper 统一收口到 `store/memory/`；`memory/task_store.py` 只保留 façade；删除 `memory/store/` 旧兼容路径与误入仓库的运行期节点样本
 - **store/auth 主线落地** — auth 持久化统一收口到 `store/auth.py`，移除 `auth_store.py` 兼容入口
 - **冗余清理继续推进** — 删除 `runtime.py` 重复的 `_last_decision` 初始化；`cli/chat.py` 内部私有链路统一为 `chat_id`

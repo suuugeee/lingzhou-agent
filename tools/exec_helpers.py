@@ -281,9 +281,16 @@ def _terminate_info(info: ProcessInfo, *, force: bool = False) -> None:
             return
         if isinstance(proc, asyncio.subprocess.Process):
             if proc.returncode is None:
+                # 优先杀进程组，避免子进程残留（例如 bash -lc 拉起的子命令）
+                if getattr(proc, "pid", None):
+                    with contextlib.suppress(Exception):
+                        os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
                 (proc.kill if force else proc.terminate)()
         elif isinstance(proc, subprocess.Popen):
             if proc.poll() is None:
+                if getattr(proc, "pid", None):
+                    with contextlib.suppress(Exception):
+                        os.killpg(proc.pid, signal.SIGKILL if force else signal.SIGTERM)
                 (proc.kill if force else proc.terminate)()
         elif info.pid:
             os.kill(info.pid, signal.SIGKILL if force else signal.SIGTERM)
@@ -363,6 +370,7 @@ def _spawn_pty_process(command: str, workdir: str, env: dict[str, str]) -> tuple
         cwd=workdir,
         env=env,
         close_fds=True,
+        start_new_session=True,  # 让 killpg 能终止整组子进程，避免 orphan
     )
     os.close(slave_fd)
     return proc, master_fd

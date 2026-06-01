@@ -19,6 +19,39 @@ from conftest import (
 # ══════════════════════════════════════════════════════════════════════════════
 
 
+def test_worker_validates_required_tool_params_before_handler():
+    asyncio.run(_worker_validates_required_tool_params_before_handler())
+
+
+async def _worker_validates_required_tool_params_before_handler():
+    from core.execution import WorkerLayer
+    from core.judgment import JudgmentOutput
+    from tools.registry import ToolEntry, ToolManifest, ToolParam
+
+    async def _handler(params, ctx):
+        raise AssertionError("缺少 required 参数时不应进入 handler")
+
+    entry = ToolEntry(
+        manifest=ToolManifest(
+            name="demo.required",
+            description="demo",
+            params=[ToolParam("path", "string", "path", required=True)],
+        ),
+        handler=_handler,
+    )
+
+    result = await WorkerLayer(_test_config()).dispatch(
+        "tool-chain-worker",
+        entry,
+        JudgmentOutput(decision="act", chosen_action_id="demo.required", params={"path": "   "}),
+        _tool_ctx(),
+    )
+
+    assert result.skipped is True
+    assert result.error == "ToolInputInvalid"
+    assert result.metadata["missing_params"] == ["path"]
+
+
 def test_task_store_get_active_prefers_started_task_over_pending():
     asyncio.run(_task_store_get_active_prefers_started_task_over_pending())
 

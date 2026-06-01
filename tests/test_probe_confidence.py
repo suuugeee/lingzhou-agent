@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from core.judgment.context import _fmt_blind_spots, _fmt_probe_sensors
+from core.contracts.probe import ProbeConfig
+from core.judgment.context.skills import _fmt_blind_spots, _fmt_probe_sensors
 from core.probe.runner import _assess_confidence
-from core.probe.types import ProbeConfig
 
 
 def _curl_probe() -> ProbeConfig:

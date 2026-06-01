@@ -1,3 +1,19 @@
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolRegistry, ToolResult, tool
+from tools.registry import (
+    ToolContext,
+    ToolManifest,
+    ToolParam,
+    ToolRegistry,
+    ToolResult,
+    tool,
+    tool_metadata,
+)
 
-__all__ = ["ToolContext", "ToolManifest", "ToolParam", "ToolRegistry", "ToolResult", "tool"]
+__all__ = [
+    "ToolContext",
+    "ToolManifest",
+    "ToolParam",
+    "ToolRegistry",
+    "ToolResult",
+    "tool",
+    "tool_metadata",
+]

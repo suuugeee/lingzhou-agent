@@ -70,14 +70,25 @@ Reflection ->  Evolution
 
 ## Documentation
 
-Each document page now includes a language switch at the top.
+Pages with an `.en.md` sibling include a language switch at the top.
+
+**Architecture and governance**
 
 - [Architecture and Current Gaps](docs/design/ARCHITECTURE.en.md)
-- [Self-Drive](docs/guide/SELF_DRIVE.en.md)
+- [Engineering Roadmap](docs/design/ENGINEERING_OPTIMIZATION_ROADMAP.md) (zh) — phases, [REPO_MAP](docs/reference/REPO_MAP.md), [ADR](docs/adr/README.md)
+
+**Reference**
+
 - [Tool Catalog](docs/reference/TOOLS.en.md)
 - [Configuration Reference](docs/reference/CONFIG.en.md)
+
+**Guides**
+
+- [Self-Drive](docs/guide/SELF_DRIVE.en.md)
 - [Probe Guide](docs/guide/PROBE.en.md)
 - [Plugin Guide](docs/guide/PLUGIN.en.md)
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup (zh).
 
 ## Built-In Tool Surface
 

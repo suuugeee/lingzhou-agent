@@ -60,7 +60,7 @@ def test_emotion_state_ema():
 
 
 def test_emotion_state_uses_configured_feeling_and_regulation_thresholds():
-    from core.config import EmotionConfig
+    from core.config_models import EmotionConfig
     from core.perception import EmotionState
 
     default_guard = EmotionState(valence=0.6, arousal=0.5)
@@ -193,7 +193,7 @@ def test_reference_resolver_retrieve_candidates_uses_recent_pool_without_time_pa
             self.calls.append(limit)
             return [{"content": "昨天你说过的方案A", "ts": "2026-05-22 08:00:00 UTC"}]
 
-    from core.config import ThresholdsConfig
+    from core.config_models import ThresholdsConfig
     thresholds = ThresholdsConfig(reference_recent_narrative_limit=4, reference_recent_semantic_top_k=6)
     resolver = ReferenceResolver(thresholds=thresholds)
     sigs = resolver.extract_signals("昨天你说过的方案今天继续")
@@ -462,9 +462,15 @@ def test_judgment_output_parse_null_text_fields_as_empty():
     assert out.next_step == ""
 
 
+def test_reference_reasoning_categorizes_413():
+    from core.reference.reasoning import categorize_llm_error_code
+
+    assert categorize_llm_error_code("Client error '413 Request Entity Too Large' for url x") == "413"
+
+
 def test_coerce_reply_only_output_demotes_act_to_wait():
     from core.judgment import JudgmentOutput
-    from core.judgment.parser import coerce_reply_only_output
+    from core.judgment.boundary import coerce_reply_only_output
 
     out = coerce_reply_only_output(
         JudgmentOutput(
@@ -522,7 +528,7 @@ def test_judgment_prompt_keeps_detailed_rules_in_skills():
 
 def test_get_active_usage_is_limited_to_whitelisted_control_surfaces():
     allowed_definition_files = {
-        "core/loop/task_parallel.py",
+        "core/loop/task/parallel.py",
         "core/subagent.py",
         "store/task/__init__.py",
         "store/task/state.py",
@@ -688,7 +694,7 @@ def test_chat_print_input_prompt_when_tty(monkeypatch):
 
 
 def test_loop_logging_reply_not_truncated():
-    from core.loop.logging import _clip_reply_for_log
+    from core.loop.shared.logging import _clip_reply_for_log
 
     text = "x" * 600
 
@@ -731,6 +737,7 @@ def test_onboard_runs_setup_then_init_for_fresh_install(monkeypatch, tmp_path):
 
 
 def test_find_config_missing_instructs_onboard(monkeypatch, tmp_path):
+    pytest.importorskip("click")
     from click.exceptions import Exit
 
     from cli import common
@@ -812,15 +819,15 @@ def test_gateway_startup_config_log_line_includes_requested_and_effective_paths(
     )
 
     assert "channel=local" in line
-    assert "daemon=True" in line
+    assert "daemon=true" in line
     assert f"requested_config={Path('/tmp/requested/lingzhou.json').resolve()}" in line
     assert f"effective_config={(Path('/tmp/runtime-home') / 'lingzhou.json').resolve()}" in line
-    assert "main_model=copilot/gpt-5.4" in line
+    assert "model_ref=copilot/gpt-5.4" in line
     assert "routing=reader=bailian/qwen3.6-plus, reasoner=copilot/gpt-5.4" in line
 
 
 def test_runtime_config_snapshot_includes_effective_routing_summary():
-    from core.loop.startup import _runtime_config_snapshot
+    from core.loop.runtime.startup import _runtime_config_snapshot
 
     cfg = cast(
         "Any",
@@ -873,10 +880,12 @@ def test_config_reference_doc_defaults_match_code_defaults():
     assert {key: doc_defaults.get(key) for key in expected} == expected
 
 
-def test_create_provider_with_model_exposes_public_model_ref():
+def test_create_provider_with_model_exposes_public_model_ref(monkeypatch):
     from core.config import Config
     from provider import create_provider_with_model
     from provider.base import EmbeddingProvider
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "test-key")
 
     cfg = Config.model_validate({
         "providers": {
@@ -1080,7 +1089,7 @@ def test_configure_lingzhou_logging_resets_console_log_each_time():
 
 
 def test_judgment_context_budget_trims_low_priority_sections():
-    from core.judgment.context import apply_context_budget
+    from core.judgment.context.budget import apply_context_budget
 
     ctx = {
         "task_section": "T" * 2000,
@@ -1380,10 +1389,11 @@ async def _judgment_executor_logs_llm_usage(caplog):
     logs = [record.getMessage() for record in caplog.records if record.name == "lingzhou.judgment"]
     llm_logs = [msg for msg in logs if "[llm] ok" in msg]
     assert llm_logs
-    assert "model=copilot/adaptive-mini" in llm_logs[-1]
+    assert "model_ref=copilot/adaptive-mini" in llm_logs[-1]
     assert "usage_prompt=321" in llm_logs[-1]
     assert "usage_completion=45" in llm_logs[-1]
     assert "usage_total=366" in llm_logs[-1]
+    assert "usage_source=missing" in llm_logs[-1]
     assert "skills=memory.search,file.read" in llm_logs[-1]
 
 
@@ -1413,7 +1423,7 @@ def test_worker_layer_dispatches_specialized_handlers():
 
 
 async def _worker_layer_dispatches_specialized_handlers():
-    from core.worker import WorkerLayer
+    from core.execution import WorkerLayer
     from tools.registry import ToolEntry, ToolManifest, ToolResult
 
     async def _handler(params, ctx):
@@ -1467,7 +1477,7 @@ def test_worker_layer_throttles_same_pool_concurrency():
 
 
 async def _worker_layer_throttles_same_pool_concurrency():
-    from core.worker import WorkerLayer
+    from core.execution import WorkerLayer
     from tools.registry import ToolEntry, ToolManifest, ToolResult
 
     started: list[str] = []
@@ -1526,7 +1536,7 @@ def test_worker_layer_keeps_pools_independent():
 
 
 async def _worker_layer_keeps_pools_independent():
-    from core.worker import WorkerLayer
+    from core.execution import WorkerLayer
     from tools.registry import ToolEntry, ToolManifest, ToolResult
 
     started: set[str] = set()
@@ -2113,7 +2123,7 @@ def test_score_candidate_rewards_exception_handling():
 
 
 def test_evolution_config_competitive_candidates_default():
-    from core.config import EvolutionConfig
+    from core.config_models import EvolutionConfig
 
     cfg = EvolutionConfig()
     assert cfg.competitive_candidates == 1
@@ -2215,7 +2225,7 @@ async def test_refresh_running_runs_updates_finished_exec_runs():
     import os
     import time
 
-    from core.run_refresh import refresh_running_runs
+    from core.loop.runs.refresh import refresh_running_runs
     from store.task import TaskStore
     from tools.exec import _MANAGER, ProcessInfo
 
@@ -2266,7 +2276,7 @@ async def test_refresh_running_runs_updates_process_monitored_non_exec_runs():
     import os
     import time
 
-    from core.run_refresh import refresh_running_runs
+    from core.loop.runs.refresh import refresh_running_runs
     from store.task import TaskStore
     from tools.exec import _MANAGER, ProcessInfo
 
@@ -2311,7 +2321,7 @@ async def test_refresh_running_runs_crystallizes_progress():
     import os
     import time
 
-    from core.run_refresh import refresh_running_runs
+    from core.loop.runs.refresh import refresh_running_runs
     from store.task import TaskStore
     from tools.exec import _MANAGER, ProcessInfo
 
@@ -2362,7 +2372,7 @@ async def test_refresh_running_runs_crystallizes_progress():
 
 
 async def test_refresh_running_runs_updates_fact_monitored_non_exec_runs():
-    from core.run_refresh import refresh_running_runs
+    from core.loop.runs.refresh import refresh_running_runs
     from store.episodic import EpisodicMemory
     from store.semantic import SemanticMemory
     from store.task import TaskStore
@@ -2438,7 +2448,7 @@ async def test_refresh_running_runs_updates_fact_monitored_non_exec_runs():
 
 
 async def test_refresh_running_runs_failed_fact_monitored_run_records_learning():
-    from core.run_refresh import refresh_running_runs
+    from core.loop.runs.refresh import refresh_running_runs
     from store.episodic import EpisodicMemory
     from store.semantic import SemanticMemory
     from store.task import TaskStore
@@ -2501,7 +2511,7 @@ async def test_refresh_running_runs_failed_fact_monitored_run_records_learning()
 async def test_refresh_running_runs_failed_exec_run_records_learning():
     import time
 
-    from core.run_refresh import refresh_running_runs
+    from core.loop.runs.refresh import refresh_running_runs
     from store.episodic import EpisodicMemory
     from store.semantic import SemanticMemory
     from store.task import TaskStore
@@ -2954,6 +2964,57 @@ async def _exec_and_shell_explicit_no_output():
     json.dumps(shell_res.to_dict(), ensure_ascii=False)
 
 
+def test_probe_run_auto_rerun_when_name_missing():
+    asyncio.run(_probe_run_auto_rerun_when_name_missing())
+
+
+async def _probe_run_auto_rerun_when_name_missing():
+    from core.contracts.probe import ProbeConfig, ProbeResult
+    from tools.probe import probe_run
+
+    class _FakeProbeMgr:
+        async def list_probes(self):
+            return [
+                ProbeConfig(name="network_health", kind="shell", spec="echo 1", trigger="interval:60", enabled=True, last_error="timeout"),
+                ProbeConfig(name="cpu_health", kind="shell", spec="echo 2", trigger="interval:60", enabled=True, last_confidence=0.4),
+                ProbeConfig(name="ok_probe", kind="shell", spec="echo 3", trigger="interval:60", enabled=True, last_confidence=0.9),
+            ]
+
+        async def run_now(self, name: str):
+            return ProbeResult(
+                probe_name=name,
+                output="ok",
+                error=None,
+                triggered_at="2026-05-31T00:00:00+00:00",
+                duration_ms=5,
+                confidence=0.85,
+                confidence_reason="normal",
+                deployment_suspect=False,
+            )
+
+    ctx = _tool_ctx()
+    ctx.probe_manager = _FakeProbeMgr()  # type: ignore[attr-defined]
+
+    res = await probe_run({}, ctx)
+    assert res.error is None
+    assert "name 为空，自动重跑" in res.summary
+    assert "network_health" in res.summary
+
+
+def test_shell_run_uses_bash_compatible_syntax():
+    asyncio.run(_shell_run_uses_bash_compatible_syntax())
+
+
+async def _shell_run_uses_bash_compatible_syntax():
+    from tools.shell import shell_run
+
+    ctx = _tool_ctx()
+    # (( )) 是 bash 语法，/bin/sh 下常见会报 "Syntax error: ( unexpected"
+    res = await shell_run({"command": "x=1; ((x++)); echo $x"}, ctx)
+    assert res.error is None
+    assert "2" in res.summary
+
+
 def test_execution_durable_failure_sensing():
     asyncio.run(_execution_durable_failure_sensing())
 
@@ -3032,7 +3093,7 @@ async def _execution_durable_failure_sensing_for_file_tool():
 
 
 def test_classify_durable_failure_tolerates_non_string_tool_result_fields():
-    from core.execution_helpers import _classify_durable_failure
+    from core.execution.helpers import _classify_durable_failure
     from tools.registry import ToolResult
 
     result = ToolResult(
@@ -3172,7 +3233,7 @@ async def _execution_dispatch_records_run():
         assert runs[0].status == "succeeded"
         assert runs[0].tool_name == "file.read"
         assert runs[0].model_tier == "reader"
-        assert runs[0].progress == "hello"
+        assert "hello" in runs[0].progress
         assert runs[0].output_json["summary"] == "hello"
 
         started = episodic.list_events("run_started", limit=5)
@@ -3625,7 +3686,7 @@ def test_ingest_actionable_meta_reflections_dedupes():
 
 
 async def _ingest_actionable_meta_reflections_dedupes():
-    from core.task_runtime import _ingest_actionable_meta_reflections
+    from core.loop.task.runtime import _ingest_actionable_meta_reflections
     from memory.working import WorkingMemory
     from store.task import TaskStore
 
@@ -3708,7 +3769,7 @@ def test_meta_reflection_threshold_apply_surfaces_runtime_policy_hint():
 
 
 async def _meta_reflection_threshold_apply_surfaces_runtime_policy_hint():
-    from core.task_runtime import _ingest_actionable_meta_reflections
+    from core.loop.task.runtime import _ingest_actionable_meta_reflections
     from memory.working import WorkingMemory
     from store.task import TaskStore
     from tools.registry import ToolRegistry
@@ -3777,7 +3838,10 @@ def test_consume_task_runtime_hints_surfaces_replan_and_routing_once():
 
 
 async def _consume_task_runtime_hints_surfaces_replan_and_routing_once():
-    from core.task_runtime import _consume_task_runtime_hints, _ingest_actionable_meta_reflections
+    from core.loop.task.runtime import (
+        _consume_task_runtime_hints,
+        _ingest_actionable_meta_reflections,
+    )
     from memory.working import WorkingMemory
     from store.task import TaskStore
 
@@ -3844,7 +3908,7 @@ def test_meta_reflection_threshold_apply_queues_explicit_policy_hint():
 
 
 async def _meta_reflection_threshold_apply_queues_explicit_policy_hint():
-    from core.task_runtime import _ingest_actionable_meta_reflections
+    from core.loop.task.runtime import _ingest_actionable_meta_reflections
     from memory.working import WorkingMemory
     from store.task import TaskStore
 
@@ -3892,7 +3956,10 @@ def test_consume_task_runtime_hints_surfaces_preferred_tier_hint():
 
 
 async def _consume_task_runtime_hints_surfaces_preferred_tier_hint():
-    from core.task_runtime import _consume_task_runtime_hints, _ingest_actionable_meta_reflections
+    from core.loop.task.runtime import (
+        _consume_task_runtime_hints,
+        _ingest_actionable_meta_reflections,
+    )
     from memory.working import WorkingMemory
     from store.task import TaskStore
 
@@ -3933,7 +4000,10 @@ def test_consume_task_runtime_hints_surfaces_task_meta_reflection_to_wm():
 
 
 async def _consume_task_runtime_hints_surfaces_task_meta_reflection_to_wm():
-    from core.task_runtime import _consume_task_runtime_hints, _ingest_actionable_meta_reflections
+    from core.loop.task.runtime import (
+        _consume_task_runtime_hints,
+        _ingest_actionable_meta_reflections,
+    )
     from memory.working import WorkingMemory
     from store.task import TaskStore
 
@@ -3973,7 +4043,7 @@ def test_ingest_actionable_meta_reflections_queues_generic_control_hint():
 
 
 async def _ingest_actionable_meta_reflections_queues_generic_control_hint():
-    from core.task_runtime import _ingest_actionable_meta_reflections
+    from core.loop.task.runtime import _ingest_actionable_meta_reflections
     from memory.working import WorkingMemory
     from store.task import TaskStore
 
@@ -4525,7 +4595,7 @@ workspace authoritative
 
 
 def test_seed_workspace_skills_updates_unmodified_workspace_copy(monkeypatch, tmp_path):
-    from core import skill as skill_mod
+    import core.skill as skill_mod
 
     seed_dir = tmp_path / "seed"
     seed_skill_dir = seed_dir / "runtime.bootstrap"
@@ -4564,7 +4634,7 @@ seed v2
 
 
 def test_seed_workspace_skills_preserves_workspace_override_on_seed_change(monkeypatch, tmp_path):
-    from core import skill as skill_mod
+    import core.skill as skill_mod
 
     seed_dir = tmp_path / "seed"
     seed_skill_dir = seed_dir / "runtime.bootstrap"
@@ -4902,7 +4972,7 @@ Strong body.
 
 def test_skill_catalog_pinned_mark_appears_for_last_applied():
     """catalog 格式中，last_applied 的 skill 应带 [↑] 标记。"""
-    from core.judgment.context import _fmt_skill_catalog
+    from core.judgment.context.skills import _fmt_skill_catalog
     from core.skill import SkillRegistry
 
     # 构建两个最小 skill
@@ -4967,7 +5037,7 @@ body.
 
 def test_primary_skill_uses_last_applied_memory(tmp_path):
     """primary_skill_section 应基于 LLM 上轮记忆（last_applied），而不是 keyword 预选。"""
-    from core.judgment.context import _fmt_primary_skill
+    from core.judgment.context.skills import _fmt_primary_skill
     from core.skill import SkillRegistry
 
     skills_dir = tmp_path / "skills"
@@ -5009,7 +5079,7 @@ body.
 
 def test_primary_skill_none_when_no_last_applied():
     """无 last_applied 历史时，primary_skill 降级为空文本提示，不崩溃。"""
-    from core.judgment.context import _fmt_primary_skill
+    from core.judgment.context.skills import _fmt_primary_skill
 
     result = _fmt_primary_skill(None)
     assert result  # 有内容
@@ -5117,7 +5187,7 @@ def test_builtin_skill_catalog_coverage():
 
 def test_skill_catalog_section_contains_activation_hint():
     """catalog 格式字符串应包含 skill.activate 提示，告知 LLM 主动激活。"""
-    from core.judgment.context import _fmt_skill_catalog
+    from core.judgment.context.skills import _fmt_skill_catalog
     from core.skill import SkillRegistry
 
     reg = SkillRegistry()

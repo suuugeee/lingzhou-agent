@@ -8,9 +8,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from core.contracts.probe import ProbeConfig, ProbeResult
+
 from .runner import ProbeRunner
 from .store import ProbeStore
-from .types import ProbeConfig, ProbeResult
 
 if TYPE_CHECKING:
     import asyncio
@@ -70,7 +71,7 @@ class ProbeManager:
             self._runner.unschedule(name)
         _log.info("[probe] ProbeManager stopped")
 
-    # ── CRUD API（供 tools/probe_ops.py 调用） ─────────────────────────────────
+    # ── CRUD API（供 tools/probe.py 调用） ─────────────────────────────────────
 
     async def install(self, cfg: ProbeConfig) -> ProbeConfig:
         """安装或更新探针，立即启动调度。"""

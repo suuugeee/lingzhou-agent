@@ -47,8 +47,8 @@
 
 ## 核心模块
 
-### `core/loop/runtime.py` — 主循环 (CognitionLoop)
-编排感知→判断→执行→反思全流程。事件驱动等待（chat/task/超时）。包含热配置重载。
+### `core/loop/runtime/main.py` — 主循环 (CognitionLoop)
+编排感知→判断→执行→反思全流程。事件驱动等待（chat/task/超时）。包含热配置重载。对外稳定入口仍为 `core.loop` 包导出（`from core.loop import CognitionLoop`）。
 
 在并发 tick 模式下，runtime 还负责：
 - 维护全局共享资源（provider / task_store / 记忆系统）
@@ -57,8 +57,19 @@
 
 `core/loop/__init__.py` 只保留稳定导出。
 
-### `core/judgment/runtime.py` — 判断层 (JudgmentLayer)
-LLM 决策引擎：接收 WM + 信号 → 决定 action + tool。支持多模型路由 (reader/reasoner/repair)。内层 continue 循环：多次工具调用不重装上下文。`core/judgment/__init__.py` 只保留稳定导出，context/format helper 已拆到 `core/judgment/context.py`。
+### `core/judgment/` — 判断层 (JudgmentLayer)
+LLM 决策引擎：接收 WM + 信号 → 决定 action + tool。支持多模型路由 (reader/reasoner/repair)。内层 continue 循环：多次工具调用不重装上下文。
+
+| 模块 | 职责 |
+|------|------|
+| `runtime.py` | `JudgmentLayer` 稳定 façade |
+| `frame.py` | `CognitionFrame` 认知基底 |
+| `decision/rounds.py` | 首轮 `decide` / 续判 `decide_continue` 编排 |
+| `assembler/` | 上下文与 prompt 组装 |
+| `boundary/` | 输出归一化与解析流水线 |
+| `policy/` | continue / routing 阈值策略 |
+
+`core/judgment/__init__.py` 只保留稳定导出；context 在 `core/judgment/context/`（`budget` 预算裁剪、`signals` 判断信号、`tasks`/`skills`/`facts` 分区格式化）。
 
 **工具元数据**：工具通过 `ToolManifest` 自声明 tier 偏好，减少硬编码：
 
@@ -69,6 +80,9 @@ LLM 决策引擎：接收 WM + 信号 → 决定 action + tool。支持多模型
 **tier 路由**：`tool_tier(tool_id, registry)` 优先读 manifest.prefer_tier，回退到硬编码集合。`model_strategy` 还支持 `next_phase_tier` / `thinking_override` / `routing_overrides` 在 tick 间调整推理姿态。
 
 **演进方向**：从 tool-level routing 升级到 task-level routing；Judgment 未来需要能选择"创建 Run"而非永远在主循环内串行推进；双环反思应拆到独立 MetaReflection，不在 Judgment 内做。
+
+### `core/execution/` — 执行层 (ExecutionLayer)
+工具派发、Run 收尾、Worker 池。稳定导出见 `core.execution`（`ExecutionLayer`、`WorkerLayer`、`finalize_run`）。`action_key_param` 在 `core.contracts.execution`，供 loop/judgment policy 引用而不反向依赖执行实现。
 
 ### `core/perception/` — 感知层 (PerceptionLayer)
 从 WM/emotion/episodic 计算预测误差、认知信号。拆分为四个子模块：
@@ -96,7 +110,7 @@ LLM 决策引擎：接收 WM + 信号 → 决定 action + tool。支持多模型
 ### `core/evolution.py` — 进化引擎 (EvolutionEngine)
 检测失败模式 → LLM 生成改进代码 → 语法验证 → 热重载 → 注册验证 → 回滚。后进化验证确保系统可导入。
 
-### `core/behavior_tracker.py` — 行为追踪 (BehaviorTracker)
+### `core/loop/drive/behavior.py` — 行为追踪 (BehaviorTracker)
 追踪重复 action/read/list/edit 模式。将探针信号注入 WM 供 LLM 感知，不机械阻塞。
 
 ### `core/plugin.py` — 插件系统 (PluginManager)

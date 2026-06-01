@@ -9,7 +9,7 @@ def test_resolve_focus_task_prefers_chat_bound_task_over_unrelated_current_focus
 
 
 async def _resolve_focus_task_prefers_chat_bound_task_over_unrelated_current_focus():
-    from core.loop.focus import claim_focus_task, resolve_focus_task
+    from core.loop.cycle.focus import claim_focus_task, resolve_focus_task
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -58,7 +58,7 @@ def test_resolve_focus_task_with_chat_id_is_fail_closed_by_default():
 
 
 async def _resolve_focus_task_with_chat_id_is_fail_closed_by_default():
-    from core.loop.focus import resolve_focus_task
+    from core.loop.cycle.focus import resolve_focus_task
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -90,7 +90,7 @@ def test_prepare_focus_task_resumes_waiting_chat_task():
 
 
 async def _prepare_focus_task_resumes_waiting_chat_task():
-    from core.loop.focus import prepare_focus_task
+    from core.loop.cycle.focus import prepare_focus_task
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -124,7 +124,7 @@ def test_finalize_focus_task_parks_user_facing_pause_into_waiting():
 
 async def _finalize_focus_task_parks_user_facing_pause_into_waiting():
     from core.judgment import JudgmentOutput
-    from core.loop.focus import claim_focus_task, finalize_focus_task
+    from core.loop.cycle.focus import claim_focus_task, finalize_focus_task
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -177,8 +177,8 @@ def test_process_pending_chat_turn_routes_bound_chat_to_task_chain():
 
 
 async def _process_pending_chat_turn_routes_bound_chat_to_task_chain():
-    from core.loop.chat import _process_pending_chat_turn
-    from core.loop.focus import claim_focus_task
+    from core.loop.cycle.chat import _process_pending_chat_turn
+    from core.loop.cycle.focus import claim_focus_task
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -244,7 +244,7 @@ def test_wait_after_cycle_uses_focus_task_instead_of_global_active():
 
 async def _adopt_result_task_picks_task_created_by_task_add():
     from core.judgment import JudgmentOutput
-    from core.loop.focus import adopt_result_task
+    from core.loop.cycle.focus import adopt_result_task
     from store.task import TaskStore
     from tools.registry import ToolResult
 
@@ -267,8 +267,8 @@ async def _adopt_result_task_picks_task_created_by_task_add():
 
 
 async def _wait_after_cycle_uses_focus_task_instead_of_global_active():
-    from core.loop.driver import _wait_after_cycle_impl
-    from core.loop.focus import claim_focus_task
+    from core.loop.cycle.driver import _wait_after_cycle_impl
+    from core.loop.cycle.focus import claim_focus_task
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -300,7 +300,7 @@ async def _wait_after_cycle_uses_focus_task_instead_of_global_active():
         async def _noop_reload() -> None:
             return None
 
-        from core.loop import driver as driver_module
+        from core.loop.cycle import driver as driver_module
 
         original_wait = driver_module._wait_for_event_impl
         driver_module._wait_for_event_impl = _capture_wait  # type: ignore[assignment]

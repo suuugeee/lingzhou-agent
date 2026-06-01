@@ -219,7 +219,7 @@ async def _main(
     timeout: int,
     chat_id: str,
 ) -> None:
-    from core.loop.startup import _startup_health_check
+    from core.loop.runtime.startup import _startup_health_check
     from core.paths import project_root as _project_root
     from store.task import TaskStore
 

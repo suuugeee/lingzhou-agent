@@ -9,7 +9,15 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 
-from tools.registry import CAPS_EXEMPT, ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import (
+    CAPS_EXEMPT,
+    ToolContext,
+    ToolManifest,
+    ToolParam,
+    ToolResult,
+    tool,
+    tool_metadata,
+)
 
 
 @tool(ToolManifest(
@@ -53,6 +61,11 @@ async def task_ask(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(
         summary=summary,
         evidence=question,
-        metadata={"question": question, "choices": choices},
+        metadata=tool_metadata(
+            "task.ask",
+            f"task.ask choices={len(choices)}",
+            question=question,
+            choices=choices,
+        ),
         state_delta={"asked": question},
     )

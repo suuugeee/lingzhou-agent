@@ -13,7 +13,7 @@ from contextlib import redirect_stdout
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .types import ProbeConfig
+    from core.contracts.probe import ProbeConfig
 
 _log = logging.getLogger("lingzhou.probe")
 

@@ -19,8 +19,9 @@ import re
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from core.contracts.probe import ProbeConfig, ProbeResult
+
 from .executor import execute_probe
-from .types import ProbeConfig, ProbeResult
 
 if TYPE_CHECKING:
     from .store import ProbeStore

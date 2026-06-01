@@ -7,12 +7,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import signal
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 _DEFAULT_TIMEOUT = 30.0
 _DEFAULT_PREVIEW_CHARS = 0  # 0 = 不限制输出长度
@@ -66,14 +67,18 @@ _RISKY_PATTERNS: list[tuple[re.Pattern[str], str]] = [
 ]
 
 
-def _check_risky(command: str) -> tuple[bool, str]:
-    """检测命令是否含有高风险模式。返回 (is_risky, reason)。"""
+def check_command_risk(command: str) -> tuple[bool, str]:
+    """检测命令是否含有高风险模式。返回 (is_risky, reason)。公开契约，供 smoke/诊断使用。"""
     if not isinstance(command, str):
         raise TypeError(f"command 应为字符串，实际收到 {type(command).__name__}")
     for pattern, reason in _RISKY_PATTERNS:
         if pattern.search(command):
             return True, reason
     return False, ""
+
+
+def _check_risky(command: str) -> tuple[bool, str]:
+    return check_command_risk(command)
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[1]
@@ -196,6 +201,7 @@ async def _shell_run_impl(params: dict[str, Any], ctx: ToolContext, command: str
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         env=safe_env,
+        executable=(os.environ.get("SHELL") or shutil.which("bash") or "/bin/sh"),
         start_new_session=True,  # 新建进程组，超时时可整组终止
     )
 
@@ -236,24 +242,28 @@ async def _shell_run_impl(params: dict[str, Any], ctx: ToolContext, command: str
         summary = f"[risky:{risk_reason}] {summary}"
     summary += f" | {output_text}"
 
-    payload = {
-        "command": command,
-        "workdir": str(workdir),
-        "timeout_sec": timeout,
-        "timed_out": timed_out,
-        "returncode": returncode,
-        "stdout_chars": len(stdout),
-        "stderr_chars": len(stderr),
-        "output_chars": len(combined),
-        "output_preview": output_text,
-        "stdout_preview": stdout,
-        "stderr_preview": stderr,
-        "log_summary": f"shell.run {'timeout' if timed_out else f'exit={returncode}'} chars={len(combined)}",
-        "sandbox": use_sandbox,
-        "sandbox_dir": _sandbox_dir,
-        "risky": is_risky,
-        "risk_reason": risk_reason,
-    }
+    log_summary = (
+        f"shell.run {'timeout' if timed_out else f'exit={returncode}'} chars={len(combined)}"
+    )
+    payload = tool_metadata(
+        "shell.run",
+        log_summary,
+        command=command,
+        workdir=str(workdir),
+        timeout_sec=timeout,
+        timed_out=timed_out,
+        returncode=returncode,
+        stdout_chars=len(stdout),
+        stderr_chars=len(stderr),
+        output_chars=len(combined),
+        output_preview=output_text,
+        stdout_preview=stdout,
+        stderr_preview=stderr,
+        sandbox=use_sandbox,
+        sandbox_dir=_sandbox_dir,
+        risky=is_risky,
+        risk_reason=risk_reason,
+    )
 
     return ToolResult(
         summary=summary,

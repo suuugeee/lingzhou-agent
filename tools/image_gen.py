@@ -15,7 +15,7 @@ from typing import Any
 import httpx
 
 from core.paths import generated_dir
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 # ── 选项 ─────────────────────────────────────────────────────────────────────
 GEN_TIMEOUT = 120
@@ -153,7 +153,14 @@ async def image_generate(params: dict[str, Any], ctx: ToolContext) -> ToolResult
             resource_key=str(out_path),
             evidence=f"file://{out_path}",
             artifact_paths=[str(out_path)],
-            metadata={"prompt": prompt, "size": size, "backend": backend, "file": str(out_path)},
+            metadata=tool_metadata(
+                "image.generate",
+                f"image.generate backend={backend} bytes={len(img_data)}",
+                prompt=prompt,
+                size=size,
+                backend=backend,
+                file=str(out_path),
+            ),
             state_delta={"generated": str(out_path)},
         )
     except Exception as e:

@@ -1,4 +1,4 @@
-"""tools/skill_ops.py — skills catalog / activation / evolution 工具。
+"""tools/skill.py — skills catalog / activation / evolution 工具。
 
 给 LLM 提供自我感知与进化能力：
 - skill.list     列出当前可发现的 skills catalog
@@ -11,10 +11,9 @@
 """
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 
 def _skill_origin(skill) -> str:
@@ -23,10 +22,9 @@ def _skill_origin(skill) -> str:
 
 def _load_registry(ctx: ToolContext):
     from core.skill import SkillRegistry
+    from tools.paths import skills_dir_from_ctx
 
-    workspace_dir = Path(ctx.config.loop.workspace_dir)
-    skills_dir = workspace_dir / "skills"
-    return SkillRegistry(skills_dir=skills_dir)
+    return SkillRegistry(skills_dir=skills_dir_from_ctx(ctx))
 
 
 def _format_skill_line(skill) -> str:
@@ -155,13 +153,15 @@ async def skill_activate(params: dict[str, Any], ctx: ToolContext) -> ToolResult
         kind="skill_activation",
         priority=0.95,
         resource_key=skill.name,
-        metadata={
-            "skill": skill.name,
-            "source_path": skill.source_path,
-            "skill_dir": str(skill.skill_dir),
-            "resources": resources,
-            "include_frontmatter": include_frontmatter,
-        },
+        metadata=tool_metadata(
+            "skill.activate",
+            f"skill.activate name={skill.name}",
+            skill=skill.name,
+            source_path=skill.source_path,
+            skill_dir=str(skill.skill_dir),
+            resources=resources,
+            include_frontmatter=include_frontmatter,
+        ),
     )
 
 
@@ -215,10 +215,12 @@ async def skill_evolve(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         kind="skill_evolution",
         priority=0.9,
         resource_key=name,
-        metadata={
-            "skill": name,
-            "target": result.target or "",
-        },
+        metadata=tool_metadata(
+            "skill.evolve",
+            f"skill.evolve name={name}",
+            skill=name,
+            target=result.target or "",
+        ),
     )
 
 
@@ -276,7 +278,12 @@ async def skill_synthesize(params: dict[str, Any], ctx: ToolContext) -> ToolResu
         kind="skill_synthesis",
         priority=0.9,
         resource_key=name,
-        metadata={"skill": name, "target": result.target or ""},
+        metadata=tool_metadata(
+            "skill.synthesize",
+            f"skill.synthesize name={name}",
+            skill=name,
+            target=result.target or "",
+        ),
     )
 
 
@@ -331,5 +338,10 @@ async def model_upgrade(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         evidence=f"proposed_model={new_model}",
         kind="model_upgrade",
         priority=1.0,
-        metadata={"new_model": new_model, "reason": reason},
+        metadata=tool_metadata(
+            "model.upgrade",
+            f"model.upgrade proposed={new_model}",
+            new_model=new_model,
+            reason=reason,
+        ),
     )

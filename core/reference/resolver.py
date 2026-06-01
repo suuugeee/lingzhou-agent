@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from core.config import ThresholdsConfig
+from core.config_models import ThresholdsConfig
 
 from .entities import format_section, format_speaker_section, resolve_entities
 from .extraction import extract_identity_cues, extract_signals, extract_source_traits

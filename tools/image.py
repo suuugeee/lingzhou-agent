@@ -10,9 +10,9 @@ from typing import Any
 
 from provider import create_provider, create_provider_with_model
 from provider.base import Message
-from provider.catalog import find_model_ref_for_capability, model_supports
+from provider.capabilities import resolve_model_ref_for_input
 from tools.file import resolve_read_path
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 
 def _collect_image_sources(params: dict[str, Any]) -> list[str]:
@@ -87,20 +87,10 @@ def _resolve_multimodal_model_ref(
     capability: str,
     input_modality: str,
 ) -> str:
-    current_model_ref = ctx.config.model
-    if model_supports(current_model_ref, capability=capability, input_modality=input_modality):
-        return current_model_ref
-
-    fallback_ref = find_model_ref_for_capability(
+    return resolve_model_ref_for_input(
+        ctx.config,
         capability=capability,
         input_modality=input_modality,
-        preferred_provider=ctx.config.active_provider_name,
-    )
-    if fallback_ref:
-        return fallback_ref
-
-    raise RuntimeError(
-        f"当前模型 {current_model_ref} 不支持 {input_modality} 输入，且运行时目录中未找到具备 {capability} 能力的候选模型"
     )
 
 
@@ -162,11 +152,13 @@ async def image_analyze(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         resource_key=sources[0],
         fingerprint=f"image:{digest}",
         artifact_paths=[s for s in sources if not s.startswith(("http://", "https://", "data:image/"))],
-        metadata={
-            "image_count": len(sources),
-            "detail": detail,
-            "sources": sources,
-            "model_ref": model_ref,
-            "routed": model_ref != ctx.config.model,
-        },
+        metadata=tool_metadata(
+            "image.analyze",
+            f"image.analyze count={len(sources)} model={model_ref}",
+            image_count=len(sources),
+            detail=detail,
+            sources=sources,
+            model_ref=model_ref,
+            routed=model_ref != ctx.config.model,
+        ),
     )

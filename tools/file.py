@@ -19,7 +19,15 @@ from tools.file_helpers import (
     _verify_python_syntax,
     resolve_read_path,
 )
-from tools.registry import CAPS_EXEMPT, ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import (
+    CAPS_EXEMPT,
+    ToolContext,
+    ToolManifest,
+    ToolParam,
+    ToolResult,
+    tool,
+    tool_metadata,
+)
 
 _log = logging.getLogger("lingzhou.tools.file")
 
@@ -143,25 +151,27 @@ async def file_read(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         if max_chars is not None:
             text = text[:max(0, max_chars)]
 
+        log_summary = (
+            f"file.read path={path} chars={len(text)}"
+            + (f" range=[{start}:{end}]" if has_range else "")
+            + (f" preview={_log_preview_text(text)!r}" if text else " preview=''")
+        )
         return ToolResult(
             summary=text,
             resource_key=str(path),
             fingerprint=f"read:{hashlib.md5(text.encode('utf-8', errors='replace')).hexdigest()[:12]}",
             artifact_paths=[str(path)],
             state_delta=read_state_delta,
-            metadata={
-                "path": str(path),
-                "chars": len(text),
-                "has_range": has_range,
-                "start": start,
-                "end": end,
-                "max_chars": max_chars,
-                "log_summary": (
-                    f"file.read path={path} chars={len(text)}"
-                    + (f" range=[{start}:{end}]" if has_range else "")
-                    + (f" preview={_log_preview_text(text)!r}" if text else " preview=''" )
-                ),
-            },
+            metadata=tool_metadata(
+                "file.read",
+                log_summary,
+                path=str(path),
+                chars=len(text),
+                has_range=has_range,
+                start=start,
+                end=end,
+                max_chars=max_chars,
+            ),
         )
     except Exception as e:
         _log.exception("读取文件失败: %s", path)
@@ -236,7 +246,13 @@ async def file_write(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             fingerprint=f"write:{hashlib.md5(text.encode('utf-8', errors='replace')).hexdigest()[:12]}",
             artifact_paths=[str(path)],
             state_delta={"file": "written", "chars": len(text), "syntax_ok": syntax_ok},
-            metadata={"path": str(path), "chars": len(text), "syntax_ok": syntax_ok},
+            metadata=tool_metadata(
+                "file.write",
+                f"file.write path={path} chars={len(text)} syntax_ok={syntax_ok}",
+                path=str(path),
+                chars=len(text),
+                syntax_ok=syntax_ok,
+            ),
         )
     except Exception as e:
         _log.exception("写入文件失败: %s", path)
@@ -355,7 +371,11 @@ async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                         summary=f"edits[{i}]: oldText 在文件中未找到。{template_warning}{context}\n请用 file.read 确认完整的当前内容后重试。",
                         error="OldTextNotFound",
                         skipped=True,
-                        metadata={"partial_match": partial_idx != -1},
+                        metadata=tool_metadata(
+                            "file.edit",
+                            f"file.edit OldTextNotFound partial={partial_idx != -1}",
+                            partial_match=partial_idx != -1,
+                        ),
                     )
 
             second_idx = original.find(old_text, first_idx + 1)
@@ -428,7 +448,12 @@ async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             fingerprint=f"edit:{hashlib.md5(content.encode('utf-8', errors='replace')).hexdigest()[:12]}",
             artifact_paths=[str(path)],
             state_delta={"file": "edited", "changes": changes_made, "syntax_ok": syntax_ok},
-            metadata={**payload, "syntax_ok": syntax_ok},
+            metadata=tool_metadata(
+                "file.edit",
+                f"file.edit {path} changes={changes_made}",
+                **payload,
+                syntax_ok=syntax_ok,
+            ),
         )
     except Exception as e:
         _log.exception("编辑文件失败: %s", path)

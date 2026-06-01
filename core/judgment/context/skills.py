@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from core.probe.types import PROBE_COVERAGE_HINTS, normalize_probe_coverage_tags
+from core.contracts.probe import PROBE_COVERAGE_HINTS, normalize_probe_coverage_tags
 
 if TYPE_CHECKING:
     from core.perception import CognitiveSignals

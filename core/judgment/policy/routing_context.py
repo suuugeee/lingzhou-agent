@@ -1,0 +1,123 @@
+"""模型路由上下文策略：工具历史预算、姿态与 continue 压缩快照。"""
+from __future__ import annotations
+
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from core.contracts.execution import action_key_param
+from core.judgment.policy.continue_history import tool_history_compact_limits
+from tools.registry import tool_has_capability
+
+if TYPE_CHECKING:
+    from core.config import Config
+
+
+@dataclass(frozen=True, slots=True)
+class ToolHistoryBudget:
+    task_explore_count: int
+    repeat_action_count: int
+    repeat_read_count: int
+    ask_evidence_hits: int
+    global_cost_posture: str
+
+
+def trailing_repeat_count(
+    tool_history: list[dict[str, Any]],
+    matcher: Callable[[dict[str, Any]], bool],
+) -> int:
+    count = 0
+    for item in reversed(tool_history):
+        if not matcher(item):
+            break
+        count += 1
+    return count
+
+
+def routing_posture(
+    *,
+    user_message: str,
+    task_explore_count: int,
+    task_explore_converge_after: int,
+) -> str:
+    if user_message:
+        return "respond"
+    if task_explore_count >= task_explore_converge_after:
+        return "converge"
+    return "conserve"
+
+
+def analyze_tool_history_budget(
+    registry: Any,
+    cfg: Config,
+    tool_history: list[dict[str, Any]] | None,
+    *,
+    user_message: str,
+) -> ToolHistoryBudget:
+    """从工具历史推导探索/重复/取证计数与全局 cost posture。"""
+    history = tool_history or []
+    task_explore_count = 0
+    repeat_action_count = 0
+    repeat_read_count = 0
+
+    if history:
+        task_explore_count = sum(
+            1
+            for item in history
+            if any(
+                tool_has_capability(registry, str(item.get("tool") or ""), capability)
+                for capability in ("ask_evidence", "completion_info_only", "completion_verify")
+            )
+        )
+        if len(history) >= 2:
+            last_tool = str(history[-1].get("tool", ""))
+            last_action_sig = f"{last_tool}|{action_key_param(history[-1].get('params') or {})}"
+            repeat_action_count = trailing_repeat_count(
+                history,
+                lambda item: (
+                    f"{str(item.get('tool', ''))}|{action_key_param(item.get('params') or {})}"
+                    == last_action_sig
+                ),
+            )
+            if last_tool == "file.read":
+                last_path = json.dumps(history[-1].get("params", {}), ensure_ascii=False)
+                repeat_read_count = trailing_repeat_count(
+                    history,
+                    lambda item: (
+                        str(item.get("tool", "")) == "file.read"
+                        and json.dumps(item.get("params", {}), ensure_ascii=False) == last_path
+                    ),
+                )
+
+    ask_evidence_hits = sum(
+        1
+        for item in history
+        if tool_has_capability(registry, str(item.get("tool") or ""), "ask_evidence")
+        and str(item.get("result") or "").strip()
+        and not str(item.get("result") or "").startswith("ERROR[")
+    )
+    posture = routing_posture(
+        user_message=user_message,
+        task_explore_count=task_explore_count,
+        task_explore_converge_after=int(cfg.thresholds.task_explore_converge_after),
+    )
+    return ToolHistoryBudget(
+        task_explore_count=task_explore_count,
+        repeat_action_count=repeat_action_count,
+        repeat_read_count=repeat_read_count,
+        ask_evidence_hits=ask_evidence_hits,
+        global_cost_posture=posture,
+    )
+
+
+def continue_phase_policy_payload(cfg: Config, tool_history_count: int) -> dict[str, Any]:
+    compact_threshold, keep_last = tool_history_compact_limits(cfg)
+    return {
+        "tool_history_count": tool_history_count,
+        "tool_history_compact_threshold": compact_threshold,
+        "tool_history_keep_last": keep_last,
+        "tool_history_will_compact_next": (
+            tool_history_count >= compact_threshold and tool_history_count > keep_last
+        ),
+    }

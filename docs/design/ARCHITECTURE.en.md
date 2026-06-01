@@ -80,7 +80,7 @@ Evaluates whether the system should stay quiet, continue exploring, or reorganiz
 
 Detects failure patterns, asks the model to synthesize a patch, validates the result, hot-reloads the change, and rolls back when validation fails.
 
-### `core/behavior_tracker.py` — Behavior tracker
+### `core/loop/drive/behavior.py` — Behavior tracker
 
 Tracks repetitive actions and exploration loops, then writes those signals back into working memory for the model to notice.
 

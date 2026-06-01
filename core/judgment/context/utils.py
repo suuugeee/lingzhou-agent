@@ -1,5 +1,4 @@
-"""Judgment context shared utilities and low-level helpers."""
-
+"""core/judgment/context/utils.py — 缓存、模板、schema、token 估算（判断上下文共享工具）。"""
 from __future__ import annotations
 
 import functools
@@ -40,9 +39,10 @@ def _run_summary(run: Any) -> str:
     return ""
 
 
-def _clip_text(text: str, limit: int) -> str:
-    cleaned = " ".join((text or "").split())
-    return cleaned
+def _clip_text(text: str, limit: int = 0) -> str:
+    """仅归一化空白；不按 limit 截断正文（ADR 0015）。limit 保留供调用方签名兼容。"""
+    _ = limit
+    return " ".join((text or "").split())
 
 
 def _format_fact_value(raw: str) -> str:
@@ -111,6 +111,7 @@ def _split_segments(text: str) -> list[str]:
 
 
 def _compress_single_segment(text: str, keep_tokens: int) -> str:
+    """测试/工具用；不用于模型可见 judgment 组装（ADR 0015）。"""
     lines = text.splitlines(keepends=True)
     if len(lines) <= 1:
         return text[: max(1, min(len(text), keep_tokens * 4))]
@@ -130,6 +131,7 @@ def _compress_single_segment(text: str, keep_tokens: int) -> str:
 
 
 def _compress_text_segments(text: str, keep_tokens: int) -> str:
+    """测试/工具用；不用于模型可见 judgment 组装（ADR 0015）。"""
     if keep_tokens <= 0:
         return ""
     if _estimate_tokens(text) <= keep_tokens:
@@ -199,21 +201,3 @@ def _validate_context_schema(ctx: dict) -> tuple[bool, str]:
     if missing:
         return False, f"缺少必需字段: {', '.join(missing)}"
     return True, "ok"
-
-
-__all__ = [
-    "_context_fmt_cache",
-    "_MAX_CONTEXT_CACHE_SIZE",
-    "_cache_put",
-    "_clear_context_cache",
-    "_run_summary",
-    "_clip_text",
-    "_format_fact_value",
-    "_fill_template",
-    "_estimate_tokens",
-    "_split_segments",
-    "_compress_single_segment",
-    "_compress_text_segments",
-    "_CONTEXT_SCHEMA_KEYS",
-    "_validate_context_schema",
-]

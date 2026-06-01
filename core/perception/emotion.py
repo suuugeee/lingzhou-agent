@@ -8,7 +8,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from core.config import Config, EmotionConfig
+    from core.config import Config
+    from core.config_models import EmotionConfig
 
 
 # ── 辅助 ──────────────────────────────────────────────────────────────────────

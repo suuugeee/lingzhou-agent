@@ -277,7 +277,7 @@ def _run_init(
     async def _run() -> bool:
         import datetime as _dt
 
-        from core.soul import SoulManager
+        from core.persona.soul import SoulManager
         from memory.working import WorkingMemory
         from store.task import TaskStore
 

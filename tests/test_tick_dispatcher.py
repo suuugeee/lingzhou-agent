@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from core.loop.dispatcher import ConcurrentTickDispatcher, TickJob
+from core.loop.cycle.dispatcher import ConcurrentTickDispatcher, TickJob
 
 
 class _FakeLoop:

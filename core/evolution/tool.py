@@ -201,7 +201,9 @@ async def evolve_tool(
 
             import ast as _ast
 
-            root = Path(__file__).resolve().parents[2]
+            from core.paths import project_root
+
+            root = project_root()
             all_ok = True
             errors: list[str] = []
             for py in sorted(root.rglob("*.py")):

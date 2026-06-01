@@ -10,7 +10,12 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
-from .types import ProbeConfig, ProbeDataBack, ProbeKind, normalize_probe_coverage_tags
+from core.contracts.probe import (
+    ProbeConfig,
+    ProbeDataBack,
+    ProbeKind,
+    normalize_probe_coverage_tags,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path

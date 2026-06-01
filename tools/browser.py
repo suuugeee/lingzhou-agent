@@ -20,7 +20,7 @@ import shutil
 import subprocess
 from typing import Any
 
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 BROWSER_CMD = "agent-browser"
@@ -186,7 +186,13 @@ async def browser_navigate(params: dict[str, Any], ctx: ToolContext) -> ToolResu
                     summary=f"导航失败[{label}](exit={code}): {detail or '无详细输出'}",
                     error=err,
                     evidence=detail,
-                    metadata={"url": url, "exit_code": code, "failure_kind": label},
+                    metadata=tool_metadata(
+                        "browser.navigate",
+                        f"browser.navigate fail url={url} kind={label}",
+                        url=url,
+                        exit_code=code,
+                        failure_kind=label,
+                    ),
                 )
         if code != 0 and not has_content:
             detail = (stderr or stdout or "").strip()
@@ -194,20 +200,37 @@ async def browser_navigate(params: dict[str, Any], ctx: ToolContext) -> ToolResu
                 summary=f"导航失败[{label}](exit={code}): {detail or '无详细输出'}",
                 error=err,
                 evidence=detail,
-                metadata={"url": url, "exit_code": code, "failure_kind": label},
+                metadata=tool_metadata(
+                    "browser.navigate",
+                    f"browser.navigate fail url={url} kind={label}",
+                    url=url,
+                    exit_code=code,
+                    failure_kind=label,
+                ),
             )
         if not has_content:
             return ToolResult(
                 summary=f"导航失败[页面空白](exit={code}): 页面已打开，但快照为空或只有空白骨架",
                 error="NavigateBlankPage",
                 evidence=stdout,
-                metadata={"url": url, "exit_code": code, "failure_kind": "页面空白"},
+                metadata=tool_metadata(
+                    "browser.navigate",
+                    f"browser.navigate blank url={url}",
+                    url=url,
+                    exit_code=code,
+                    failure_kind="页面空白",
+                ),
             )
         return ToolResult(
             summary=f"已打开: {url}\n{_make_snapshot_summary(stdout)}",
             resource_key=url,
             evidence=stdout,
-            metadata={"url": url, "snapshot_chars": len(stdout)},
+            metadata=tool_metadata(
+                "browser.navigate",
+                f"browser.navigate ok url={url} chars={len(stdout)}",
+                url=url,
+                snapshot_chars=len(stdout),
+            ),
             state_delta={"page": url},
         )
     except Exception as e:
@@ -240,7 +263,11 @@ async def browser_snapshot(params: dict[str, Any], ctx: ToolContext) -> ToolResu
         return ToolResult(
             summary=_make_snapshot_summary(raw),
             evidence=raw,
-            metadata={"snapshot_chars": len(raw)},
+            metadata=tool_metadata(
+                "browser.snapshot",
+                f"browser.snapshot chars={len(raw)}",
+                snapshot_chars=len(raw),
+            ),
         )
     except Exception as e:
         return ToolResult(summary=f"快照异常: {e}", error="BrowserError")
@@ -276,7 +303,7 @@ async def browser_click(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(
             summary=f"已点击 {ref}\n{_make_snapshot_summary(stdout)}",
             evidence=stdout,
-            metadata={"ref": ref},
+            metadata=tool_metadata("browser.click", f"browser.click ref={ref}", ref=ref),
             state_delta={"clicked": ref},
         )
     except Exception as e:
@@ -320,7 +347,12 @@ async def browser_type(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(
             summary=f"已输入: {text}",
             evidence=text,
-            metadata={"text_len": len(text), "ref": ref or "focus"},
+            metadata=tool_metadata(
+                "browser.type",
+                f"browser.type len={len(text)} ref={ref or 'focus'}",
+                text_len=len(text),
+                ref=ref or "focus",
+            ),
         )
     except Exception as e:
         return ToolResult(summary=f"输入异常: {e}", error="BrowserError")
@@ -357,6 +389,12 @@ async def browser_scroll(params: dict[str, Any], ctx: ToolContext) -> ToolResult
         return ToolResult(
             summary=f"已滚动 {direction} {amount}px\n{_make_snapshot_summary(stdout, 30)}",
             evidence=stdout,
+            metadata=tool_metadata(
+                "browser.scroll",
+                f"browser.scroll {direction} {amount}px",
+                direction=direction,
+                amount=amount,
+            ),
         )
     except Exception as e:
         return ToolResult(summary=f"滚动异常: {e}", error="BrowserError")

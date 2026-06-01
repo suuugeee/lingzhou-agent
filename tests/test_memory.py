@@ -218,7 +218,7 @@ def test_semantic_store_reflection_title_uses_unique_suffix():
 
 
 def test_build_consolidation_plan_extracts_explicit_user_facts_and_semantic_promotions():
-    from core.config import MemoryConfig
+    from core.config_models import MemoryConfig
     from memory.consolidation import build_consolidation_plan, build_daily_summary_node
 
     plan = build_consolidation_plan(
@@ -299,7 +299,7 @@ def test_episodic_search_short_ascii_not_overmatching():
     with tempfile.TemporaryDirectory() as d:
         ep = EpisodicMemory(Path(d), max_events=0)
         ep.record("user", "阅读 core/ 中的关键模块，理解架构", task_id="task-1")
-        ep.record("user", "检查 core/config.py 文件权限", task_id="task-2")
+        ep.record("user", "检查 core/config/loader.py 文件权限", task_id="task-2")
         ep.record("user", "今天天气不错，适合散步", task_id="task-3")
 
         result = ep.search("阅读 core/ 中的关键模块", max_chars=2000)

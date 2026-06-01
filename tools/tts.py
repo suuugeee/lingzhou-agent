@@ -11,7 +11,7 @@ import os
 from typing import Any
 
 from core.paths import generated_dir
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 OUT_DIR = generated_dir()
 
@@ -52,7 +52,13 @@ async def tts_speak(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 summary=f"✅ 语音已生成: {out_path} ({len(stdout)} bytes)",
                 resource_key=str(out_path),
                 artifact_paths=[str(out_path)],
-                metadata={"voice": voice, "backend": "edge-tts", "file": str(out_path)},
+                metadata=tool_metadata(
+                    "tts.speak",
+                    f"tts.speak backend=edge-tts file={out_path.name}",
+                    voice=voice,
+                    backend="edge-tts",
+                    file=str(out_path),
+                ),
             )
         # edge-tts 未安装或失败 → 尝试 DashScope
     except (FileNotFoundError, Exception):
@@ -89,7 +95,13 @@ async def tts_speak(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                         summary=f"✅ 语音已生成: {out_path} ({len(resp2.content)} bytes)",
                         resource_key=str(out_path),
                         artifact_paths=[str(out_path)],
-                        metadata={"voice": voice, "backend": "dashscope", "file": str(out_path)},
+                        metadata=tool_metadata(
+                            "tts.speak",
+                            f"tts.speak backend=dashscope file={out_path.name}",
+                            voice=voice,
+                            backend="dashscope",
+                            file=str(out_path),
+                        ),
                     )
                 return ToolResult(summary=f"DashScope TTS 失败: {data.get('message', data)}", error="TTSError")
         except Exception as e:

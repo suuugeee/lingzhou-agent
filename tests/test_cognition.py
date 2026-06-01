@@ -65,7 +65,7 @@ def test_cognition_loop_init():
 
 
 def test_memory_config_accepts_legacy_decay_lambda_key_and_property():
-    from core.config import MemoryConfig
+    from core.config_models import MemoryConfig
 
     cfg = MemoryConfig.model_validate({"decay_lambda": 0.25})
 
@@ -120,7 +120,7 @@ def test_self_drive_signal_does_not_auto_create_task():
 
 
 def test_crash_recovery_uses_runtime_emotion_fallback():
-    from core.loop.startup import _inject_crash_recovery
+    from core.loop.runtime.startup import _inject_crash_recovery
     from memory.working import WorkingMemory
 
     with tempfile.TemporaryDirectory() as d:
@@ -202,7 +202,7 @@ def test_continue_phase_uses_configured_tool_history_compaction_threshold():
 
 async def _continue_phase_uses_configured_tool_history_compaction_threshold():
     from core.config import Config
-    from core.loop.continue_phase import _run_continue_phase
+    from core.loop.shared.continue_phase import _run_continue_phase
     from memory.working import WorkingMemory
     from tools.registry import ToolResult
 
@@ -285,7 +285,8 @@ async def _continue_phase_uses_configured_tool_history_compaction_threshold():
 
     assert len(seen_histories) == 1
     assert seen_histories[0][0]["tool"] == "[compacted]"
-    assert "早期 1 条工具调用已压缩" in seen_histories[0][0]["result"]
+    assert "早期 1 条工具调用已" in seen_histories[0][0]["result"]
+    assert "压缩" in seen_histories[0][0]["result"]
     assert seen_histories[0][1]["tool"] == "task.list"
 
 
@@ -671,7 +672,7 @@ def test_consolidate_promotes_semantic_nodes_and_durable_user_facts():
 
 
 async def _consolidate_promotes_semantic_nodes_and_durable_user_facts():
-    from core.config import MemoryConfig
+    from core.config_models import MemoryConfig
     from core.loop.runtime import CognitionLoop
     from memory.working import WMItem, WorkingMemory
     from store.episodic import EpisodicMemory
@@ -1195,7 +1196,7 @@ def test_resolve_reply_chat_id_falls_back_to_last_chat_fact():
 
 
 async def _resolve_reply_chat_id_falls_back_to_last_chat_fact():
-    from core.loop.chat import _resolve_reply_chat_id
+    from core.loop.cycle.chat import _resolve_reply_chat_id
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:

@@ -1,4 +1,4 @@
-"""tools/probe_ops.py — 探针系统工具集。
+"""tools/probe.py — 探针系统工具集。
 
 提供 LLM 可直接调用的工具，用于安装、移除、列出、立即执行探针。
 
@@ -18,10 +18,51 @@ from __future__ import annotations
 import logging
 from typing import Any, cast
 
-from core.probe.types import ProbeConfig, ProbeDataBack, ProbeKind, normalize_probe_coverage_tags
-from tools.registry import CAPS_EXEMPT, ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from core.contracts.probe import (
+    ProbeConfig,
+    ProbeDataBack,
+    ProbeKind,
+    normalize_probe_coverage_tags,
+)
+from tools.registry import (
+    CAPS_EXEMPT,
+    ToolContext,
+    ToolManifest,
+    ToolParam,
+    ToolResult,
+    tool,
+    tool_metadata,
+)
 
 _log = logging.getLogger("lingzhou.probe")
+
+
+def _pick_unhealthy_probe_names(probes: list[ProbeConfig], limit: int = 3) -> list[str]:
+    """优先选择最近异常/低可信度探针，用于 probe.run 缺参时的自愈降级。"""
+    ranked: list[tuple[int, str]] = []
+    for p in probes:
+        if not p.enabled:
+            continue
+        score = 0
+        if p.last_error:
+            score += 3
+        if p.last_confidence is not None and p.last_confidence < 0.6:
+            score += 2
+        if p.last_suspect:
+            score += 1
+        ranked.append((score, p.name))
+
+    if not ranked:
+        return []
+
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    selected = [name for score, name in ranked if score > 0][:limit]
+    if selected:
+        return selected
+
+    # 若无异常探针，兜底选前几个 enabled 探针，避免空转 NotFound。
+    fallback = [name for _, name in ranked[:limit]]
+    return fallback
 
 # ── 工具实现 ──────────────────────────────────────────────────────────────────
 
@@ -111,6 +152,13 @@ async def probe_install(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             + ("\n" + first_run_hint if first_run_hint else "")
         ),
         state_delta={"probe": "installed", "name": saved.name},
+        metadata=tool_metadata(
+            "probe.install",
+            f"probe.install name={saved.name} trigger={saved.trigger}",
+            name=saved.name,
+            kind=saved.kind,
+            trigger=saved.trigger,
+        ),
     )
 
 
@@ -139,6 +187,7 @@ async def probe_remove(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(
         summary=f"探针已移除: {name}",
         state_delta={"probe": "removed", "name": name},
+        metadata=tool_metadata("probe.remove", f"probe.remove name={name}", name=name),
     )
 
 
@@ -149,7 +198,7 @@ async def probe_remove(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         "结果始终直接返回，不受 data_back 设置影响。"
     ),
     params=[
-        ToolParam("name", "string", "探针名称", required=True),
+        ToolParam("name", "string", "探针名称（可选；为空时自动重跑最近异常探针）", required=False),
     ],
     prefer_tier="reasoner",
     progress_category="info",
@@ -160,9 +209,56 @@ async def probe_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(summary="探针系统未初始化", error="ProbeManagerNotFound", skipped=True)
 
     name = str(params.get("name") or "").strip()
+
+    if not name:
+        probes = await probe_mgr.list_probes()
+        if not probes:
+            return ToolResult(summary="当前没有可执行探针。请先用 probe.install 安装探针。", skipped=True)
+
+        candidates = _pick_unhealthy_probe_names(probes, limit=3)
+        if not candidates:
+            return ToolResult(summary="当前无可执行探针（可能全部被禁用）。", skipped=True)
+
+        lines: list[str] = [
+            f"name 为空，自动重跑 {len(candidates)} 个探针: {', '.join(candidates)}"
+        ]
+        errored = 0
+        for candidate in candidates:
+            result = await probe_mgr.run_now(candidate)
+            if result is None:
+                errored += 1
+                lines.append(f"- {candidate}: NotFound")
+                continue
+            if result.error:
+                errored += 1
+                lines.append(f"- {candidate}: ERROR {result.error}")
+                continue
+            lines.append(
+                f"- {candidate}: ok {result.duration_ms}ms conf={result.confidence:.2f}"
+            )
+
+        return ToolResult(
+            summary="\n".join(lines),
+            error=("PartialFailure" if errored else None),
+            state_delta={
+                "probe_batch": "auto_rerun",
+                "probe_targets": candidates,
+                "probe_errors": errored,
+            },
+            metadata=tool_metadata(
+                "probe.run",
+                f"probe.run batch={len(candidates)} errors={errored}",
+                probe_targets=candidates,
+                probe_errors=errored,
+            ),
+        )
+
     result = await probe_mgr.run_now(name)
     if result is None:
-        return ToolResult(summary=f"探针不存在: {name}", error="NotFound", skipped=True)
+        probes = await probe_mgr.list_probes()
+        candidates = [p.name for p in probes if p.enabled][:8]
+        hint = f" 可选: {', '.join(candidates)}" if candidates else ""
+        return ToolResult(summary=f"探针不存在: {name}.{hint}", error="NotFound", skipped=True)
 
     if result.error:
         return ToolResult(
@@ -188,6 +284,14 @@ async def probe_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             "probe_confidence": round(result.confidence, 3),
             "probe_suspect": result.deployment_suspect,
         },
+        metadata=tool_metadata(
+            "probe.run",
+            f"probe.run name={name} ms={result.duration_ms} conf={result.confidence:.2f}",
+            probe_name=name,
+            duration_ms=result.duration_ms,
+            confidence=result.confidence,
+            alerted=result.alerted,
+        ),
     )
 
 
@@ -235,7 +339,10 @@ async def probe_list(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             + (f"\n{confidence_preview}" if confidence_preview else ""),
         )
 
-    return ToolResult(summary="\n".join(lines))
+    return ToolResult(
+        summary="\n".join(lines),
+        metadata=tool_metadata("probe.list", f"probe.list count={len(probes)}", count=len(probes)),
+    )
 
 
 @tool(ToolManifest(
@@ -257,8 +364,11 @@ async def probe_disable(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     ok = await probe_mgr.set_enabled(name, False)
     if not ok:
         return ToolResult(summary=f"探针不存在: {name}", error="NotFound", skipped=True)
-    return ToolResult(summary=f"探针已暂停: {name}（配置保留，用 probe.enable 恢复）",
-                      state_delta={"probe": "disabled", "name": name})
+    return ToolResult(
+        summary=f"探针已暂停: {name}（配置保留，用 probe.enable 恢复）",
+        state_delta={"probe": "disabled", "name": name},
+        metadata=tool_metadata("probe.disable", f"probe.disable name={name}", name=name),
+    )
 
 
 @tool(ToolManifest(
@@ -280,8 +390,11 @@ async def probe_enable(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     ok = await probe_mgr.set_enabled(name, True)
     if not ok:
         return ToolResult(summary=f"探针不存在: {name}", error="NotFound", skipped=True)
-    return ToolResult(summary=f"探针已恢复运行: {name}",
-                      state_delta={"probe": "enabled", "name": name})
+    return ToolResult(
+        summary=f"探针已恢复运行: {name}",
+        state_delta={"probe": "enabled", "name": name},
+        metadata=tool_metadata("probe.enable", f"probe.enable name={name}", name=name),
+    )
 
 
 # ── 内部工具函数 ────────────────────────────────────────────────────────────────

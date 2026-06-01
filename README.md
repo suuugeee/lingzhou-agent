@@ -68,16 +68,27 @@ sudo systemctl enable --now lingzhou
 反思层  ->  进化引擎
 ```
 
-## 文档目录
+## 文档
 
-每个文档页顶部都带有中英文切换入口。
+各页顶部有中英文切换（如有对应 `.en.md`）。
 
-- [架构设计与当前差距](docs/design/ARCHITECTURE.md)
-- [自驱力与自主探索](docs/guide/SELF_DRIVE.md)
+**架构与治理**
+
+- [架构设计与当前差距](docs/design/ARCHITECTURE.md) — 认知循环、模块、蓝图差距
+- [工程优化路线图](docs/design/ENGINEERING_OPTIMIZATION_ROADMAP.md) — 分阶段计划、目录边界（含 [REPO_MAP](docs/reference/REPO_MAP.md)）、[ADR](docs/adr/README.md)
+
+**参考**
+
 - [工具目录](docs/reference/TOOLS.md)
 - [配置参考](docs/reference/CONFIG.md)
+
+**指南**
+
+- [自驱力与自主探索](docs/guide/SELF_DRIVE.md)
 - [探针说明](docs/guide/PROBE.md)
-- [插件开发指南](docs/guide/PLUGIN.md)
+- [插件开发](docs/guide/PLUGIN.md)
+
+贡献与测试流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 内置工具面
 
@@ -121,9 +132,10 @@ lingzhou-agent/
 ├── cli/        # chat、gateway、auth、logs、bootstrap
 ├── core/       # 认知循环、判断、执行、进化
 ├── docs/
-│   ├── design/   # 架构设计文档
-│   ├── guide/    # 操作指南
-│   └── reference/ # 配置与工具参考
+│   ├── design/     # 架构、路线图
+│   ├── reference/  # 配置、工具、REPO_MAP
+│   ├── guide/      # 操作指南
+│   └── adr/        # 架构决策记录
 ├── memory/     # 记忆系统 facade
 ├── plugins/    # 插件工作区
 ├── provider/   # 模型 provider

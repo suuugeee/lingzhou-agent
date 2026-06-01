@@ -55,6 +55,81 @@ def test_github_device_client_id_prefers_env(monkeypatch, tmp_path):
     assert auth_mod.load_github_device_client_id() == "Iv1.env-client"
 
 
+def test_openai_compat_rejects_empty_api_key_env(monkeypatch):
+    from provider.openai_compat import _build_mode_adapter
+
+    monkeypatch.delenv("EMPTY_OPENAI_KEY", raising=False)
+
+    with pytest.raises(OSError, match="EMPTY_OPENAI_KEY"):
+        _build_mode_adapter(
+            mode="openai",
+            base_url="https://example.invalid/v1",
+            api_key_env="EMPTY_OPENAI_KEY",
+            timeout=30.0,
+        )
+
+
+def test_openai_compat_usage_normalizes_input_output_aliases():
+    """部分 OpenAI-compat 网关用 input/output 命名 usage 字段。"""
+    from core.config import Config
+    from provider.openai_compat import OpenAICompatProvider
+
+    os.environ["GITHUB_TOKEN"] = "dummy-token"
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "mode": "openai",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "GITHUB_TOKEN",
+            }
+        },
+        "model": "copilot/adaptive-mini",
+        "temperature": 0.7,
+        "timeout": 30.0,
+        "loop": {"workspace_dir": "~/.lingzhou/workspace"},
+    })
+    provider = OpenAICompatProvider(cfg)
+    try:
+        provider._record_usage({"input_tokens": 12, "output_tokens": 3})
+        assert provider.last_usage["prompt_tokens"] == 12
+        assert provider.last_usage["completion_tokens"] == 3
+        assert provider.last_usage["total_tokens"] == 15
+        assert provider.last_usage["usage_source"] == "alias"
+    finally:
+        asyncio.run(provider.close())
+
+
+def test_openai_compat_usage_marks_missing_when_fields_absent():
+    from core.config import Config
+    from provider.openai_compat import OpenAICompatProvider
+
+    os.environ["GITHUB_TOKEN"] = "dummy-token"
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "mode": "openai",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "GITHUB_TOKEN",
+            }
+        },
+        "model": "copilot/adaptive-mini",
+        "temperature": 0.7,
+        "timeout": 30.0,
+        "loop": {"workspace_dir": "~/.lingzhou/workspace"},
+    })
+    provider = OpenAICompatProvider(cfg)
+    try:
+        provider._record_usage({})
+        assert provider.last_usage["prompt_tokens"] == 0
+        assert provider.last_usage["completion_tokens"] == 0
+        assert provider.last_usage["total_tokens"] == 0
+        assert provider.last_usage["usage_source"] == "missing"
+    finally:
+        asyncio.run(provider.close())
+
+
 def _write_hot_reload_config(
     path: Path,
     *,
@@ -172,7 +247,7 @@ def test_hot_reload_build_failure_keeps_old_runtime(monkeypatch, tmp_path):
 
 
 async def _hot_reload_build_failure_keeps_old_runtime(monkeypatch, tmp_path):
-    import core.loop.reload as reload_mod
+    import core.loop.runtime.reload as reload_mod
     from core.config import Config
 
     cfg_path = tmp_path / "lingzhou.json"
@@ -224,7 +299,7 @@ def test_hot_reload_success_atomically_replaces_runtime(monkeypatch, tmp_path):
 
 
 async def _hot_reload_success_atomically_replaces_runtime(monkeypatch, tmp_path):
-    import core.loop.reload as reload_mod
+    import core.loop.runtime.reload as reload_mod
     from core.config import Config
 
     cfg_path = tmp_path / "lingzhou.json"
@@ -261,7 +336,13 @@ async def _hot_reload_success_atomically_replaces_runtime(monkeypatch, tmp_path)
         ),
     )
 
-    monkeypatch.setattr(reload_mod, "create_provider", lambda cfg: new_provider)
+    create_calls = {"count": 0}
+
+    def _create_provider_once(cfg):
+        create_calls["count"] += 1
+        return new_provider
+
+    monkeypatch.setattr(reload_mod, "create_provider", _create_provider_once)
     monkeypatch.setattr(reload_mod, "_build_routing_providers", lambda cfg: {"reader": new_reader})
     monkeypatch.setattr(reload_mod, "JudgmentLayer", _ReloadJudgment)
     monkeypatch.setattr(reload_mod, "ExecutionLayer", _ReloadExecution)
@@ -285,6 +366,7 @@ async def _hot_reload_success_atomically_replaces_runtime(monkeypatch, tmp_path)
     assert callable(loop._semantic._embed_fn)
     assert loop._semantic._embedding_weight == loop._cfg.memory.embedding_weight
     assert self_model.last_cfg is loop._cfg
+    assert create_calls["count"] == 1
 
 
 def test_hot_reload_refreshes_runtime_routing_overrides_from_db(monkeypatch, tmp_path):
@@ -292,7 +374,7 @@ def test_hot_reload_refreshes_runtime_routing_overrides_from_db(monkeypatch, tmp
 
 
 async def _hot_reload_refreshes_runtime_routing_overrides_from_db(monkeypatch, tmp_path):
-    import core.loop.reload as reload_mod
+    import core.loop.runtime.reload as reload_mod
     from core.config import Config
 
     cfg_path = tmp_path / "lingzhou.json"
@@ -746,6 +828,85 @@ def test_copilot_normalize_base_url_uses_default_base_url():
 
     assert _normalize_copilot_api_base_url("") == DEFAULT_COPILOT_API_BASE_URL
     assert _normalize_copilot_api_base_url("https://api.githubcopilot.com") == DEFAULT_COPILOT_API_BASE_URL
+
+
+def test_copilot_mode_ignores_empty_cached_token(monkeypatch):
+    import httpx
+
+    import provider.openai_compat as openai_mod
+
+    class _Cache:
+        token = "   "
+        expires_at_ms = int((time.time() + 3600) * 1000)
+
+    class _FakeAsyncClient:
+        def __init__(self, timeout: float = 15.0) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+        async def get(self, url, *, headers=None):
+            req = httpx.Request("GET", url)
+            return httpx.Response(
+                200,
+                json={
+                    "token": "fresh-copilot-token",
+                    "expires_at": str(int(time.time()) + 3600),
+                },
+                request=req,
+            )
+
+    monkeypatch.setattr(openai_mod, "load_copilot_token_cache", lambda: _Cache())
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    mode = openai_mod._CopilotMode(  # type: ignore[attr-defined]
+        base_url="https://api.individual.githubcopilot.com",
+        api_key="gh-token",
+        timeout=30.0,
+    )
+    token = asyncio.run(mode._ensure_copilot_token())  # type: ignore[attr-defined]
+    assert token == "fresh-copilot-token"
+
+
+def test_copilot_request_headers_reject_empty_token_from_fallback():
+    from provider.openai_compat import OpenAICompatProvider
+
+    provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+    provider._mode = None  # type: ignore[assignment]
+
+    async def _empty_token(*, force_refresh: bool = False) -> str:
+        return "   "
+
+    provider._ensure_copilot_token = _empty_token  # type: ignore[assignment]
+    provider._copilot_request_headers = lambda token: {"Authorization": f"Bearer {token}"}  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="token 为空"):
+        asyncio.run(provider._request_headers())  # type: ignore[attr-defined]
+
+
+def test_copilot_embed_rejects_empty_cached_token(monkeypatch):
+    import provider.openai_compat as openai_mod
+    from provider.openai_compat import OpenAICompatProvider
+
+    class _Cache:
+        token = " "
+        expires_at_ms = int((time.time() + 3600) * 1000)
+
+    monkeypatch.setattr(openai_mod, "load_copilot_token_cache", lambda: _Cache())
+
+    provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+    provider._provider_mode = "copilot"
+    provider._embed_model = "text-embedding-v3"
+    provider._mode = type("_M", (), {"embedding_url": lambda self: "/embeddings"})()
+    provider._resolve_url = lambda path: f"https://api.individual.githubcopilot.com{path}"  # type: ignore[assignment]
+    provider._sync_client = type("_C", (), {"post": lambda self, *a, **k: None})()
+
+    with pytest.raises(RuntimeError, match="缓存为空"):
+        provider.embed("hello")
 
 
 def test_login_copilot_help_is_registered():

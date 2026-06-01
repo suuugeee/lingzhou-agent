@@ -1,4 +1,4 @@
-"""core.loop - 稳定 façade，只导出 loop 包的公开 API。"""
+"""core.loop — 认知循环；子域见 runtime / tick / task / cycle / runs / shared / drive。"""
 
 from .runtime import CognitionLoop
 

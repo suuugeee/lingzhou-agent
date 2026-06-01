@@ -11,7 +11,7 @@ from urllib.parse import urlparse
 
 import httpx
 
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 DEFAULT_UA = (
@@ -136,12 +136,14 @@ async def web_fetch(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             summary=f"获取成功: {url}\n状态: {resp.status_code}  大小: {len(text)} 字符",
             resource_key=url,
             evidence=text,
-            metadata={
-                "url": url,
-                "status": resp.status_code,
-                "chars": len(text),
-                "content_type": content_type,
-            },
+            metadata=tool_metadata(
+                "web.fetch",
+                f"web.fetch url={url} status={resp.status_code} chars={len(text)}",
+                url=url,
+                status=resp.status_code,
+                chars=len(text),
+                content_type=content_type,
+            ),
             state_delta={"fetched": url, "chars": len(text)},
         )
     except httpx.HTTPStatusError as e:
@@ -201,7 +203,12 @@ async def web_search(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             return ToolResult(
                 summary=f"搜索无结果: {query}",
                 evidence="",
-                metadata={"query": query, "results": 0},
+                metadata=tool_metadata(
+                    "web.search",
+                    f"web.search query={query!r} results=0",
+                    query=query,
+                    results=0,
+                ),
             )
 
         summary_lines = [f"搜索 '{query}': {len(results)} 条结果"]
@@ -215,7 +222,12 @@ async def web_search(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             summary="\n".join(summary_lines),
             resource_key=f"search:{hashlib.md5(query.encode()).hexdigest()[:12]}",
             evidence=summary_lines[-1] if len(summary_lines) > 1 else "",
-            metadata={"query": query, "results": len(results)},
+            metadata=tool_metadata(
+                "web.search",
+                f"web.search query={query!r} results={len(results)}",
+                query=query,
+                results=len(results),
+            ),
             state_delta={"searched": query, "results": len(results)},
         )
     except Exception as e:

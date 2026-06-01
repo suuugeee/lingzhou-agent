@@ -27,7 +27,7 @@ from tools.exec_helpers import (
     _terminate_info,
     _watch_pty_process,
 )
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 _log = logging.getLogger("lingzhou.tools.exec")
 
@@ -62,7 +62,7 @@ async def shell_capabilities(params: dict[str, Any], ctx: ToolContext) -> ToolRe
         evidence=json.dumps(caps, ensure_ascii=False),
         resource_key=workdir,
         fingerprint=f"caps:{len(caps['available_commands'])}:{int(caps['has_pty'])}",
-        metadata={"caps": caps},
+        metadata=tool_metadata("shell.capabilities", summary, caps=caps),
     )
 
 
@@ -155,7 +155,11 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                     resource_key=session_id,
                     artifact_paths=[info.meta_path, info.log_path],
                     state_delta={"process": "started", "background": True, "pty": True},
-                    metadata=payload,
+                    metadata=tool_metadata(
+                        "exec",
+                        f"exec background pty pid={proc.pid}",
+                        **payload,
+                    ),
                 )
             await _watch_pty_process(info)
         else:
@@ -166,6 +170,7 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=workdir,
                 env=exec_env,
+                start_new_session=True,  # 超时/中断时可 killpg，避免子进程残留
             )
             info.proc = proc
             info.pid = proc.pid
@@ -186,7 +191,11 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                     resource_key=session_id,
                     artifact_paths=[info.meta_path, info.log_path],
                     state_delta={"process": "started", "background": True, "pty": False},
-                    metadata=payload,
+                    metadata=tool_metadata(
+                        "exec",
+                        f"exec background pid={proc.pid}",
+                        **payload,
+                    ),
                 )
             await _watch_pipe_process(info)
 
@@ -216,7 +225,11 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 resource_key=session_id,
                 artifact_paths=[info.meta_path, info.log_path],
                 state_delta={"process": "timed_out"},
-                metadata=payload,
+                metadata=tool_metadata(
+                    "exec",
+                    f"exec timeout={timeout}s command={command!r}",
+                    **payload,
+                ),
             )
 
         output_text = output or "(无输出)"
@@ -231,6 +244,8 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         }, ensure_ascii=False)
         payload = json.loads(evidence)
         payload.update({"process_id": session_id, "meta_path": info.meta_path, "log_path": info.log_path})
+        log_summary = f"exec exit={info.return_code} chars={payload['output_chars']}"
+        exec_meta = tool_metadata("exec", log_summary, **payload)
         if info.return_code == 0:
             return ToolResult(
                 summary=f"命令完成 (exit=0):\n{output_text}",
@@ -239,7 +254,7 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 fingerprint=f"exec:{info.return_code}:{payload['output_chars']}",
                 artifact_paths=[info.meta_path, info.log_path],
                 state_delta={"process": "finished", "exit_code": info.return_code},
-                metadata=payload,
+                metadata=exec_meta,
             )
         return ToolResult(
             summary=f"执行出错 (exit={info.return_code}):\n{output_text}",
@@ -249,7 +264,7 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             fingerprint=f"exec:{info.return_code}:{payload['output_chars']}",
             artifact_paths=[info.meta_path, info.log_path],
             state_delta={"process": "finished", "exit_code": info.return_code},
-            metadata=payload,
+            metadata=exec_meta,
         )
     except Exception as exc:
         info.error = str(exc)
@@ -262,7 +277,13 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             resource_key=session_id,
             artifact_paths=[info.meta_path, info.log_path] if info.meta_path or info.log_path else [],
             state_delta={"process": "failed_to_start"},
-            metadata={"process_id": session_id, "command": command, "workdir": workdir},
+            metadata=tool_metadata(
+                "exec",
+                f"exec failed_to_start command={command!r}",
+                process_id=session_id,
+                command=command,
+                workdir=workdir,
+            ),
         )
 
 
@@ -382,7 +403,13 @@ async def process_list(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         lines.append(f"  {p.session_id}: {state} [{mode}] | {p.command} | {duration:.0f}s")
     return ToolResult(
         summary=f"进程列表 ({len(procs)} 个):\n" + "\n".join(lines),
-        metadata={"count": len(procs), "status_filter": status_filter, "items": process_items},
+        metadata=tool_metadata(
+            "process.list",
+            f"process.list count={len(procs)} filter={status_filter}",
+            count=len(procs),
+            status_filter=status_filter,
+            items=process_items,
+        ),
     )
 
 
@@ -398,7 +425,11 @@ async def process_poll(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         resource_key=session_id,
         fingerprint=f"poll:{status['status']}:{status['return_code']}",
         artifact_paths=[p for p in [info.meta_path, info.log_path] if p],
-        metadata=status,
+        metadata=tool_metadata(
+            "process.poll",
+            f"process.poll {session_id} status={status.get('status')}",
+            **status,
+        ),
     )
 
 
@@ -421,7 +452,12 @@ async def process_log(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if not output:
         return ToolResult(
             summary=f"进程 {session_id} 暂无输出（进程可能刚启动或尚未产生日志）",
-            metadata={"session_id": session_id, "total_output_chars": 0},
+            metadata=tool_metadata(
+                "process.log",
+                f"process.log {session_id} empty",
+                session_id=session_id,
+                total_output_chars=0,
+            ),
         )
     if offset >= len(output):
         return ToolResult(summary=f"输出总长 {len(output)} 字符，offset={offset} 超出范围", skipped=True)
@@ -442,7 +478,11 @@ async def process_log(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         resource_key=session_id,
         fingerprint=f"log:{offset}:{len(chunk)}",
         artifact_paths=[p for p in [info.meta_path, info.log_path] if p],
-        metadata=payload,
+        metadata=tool_metadata(
+            "process.log",
+            f"process.log {session_id} chars={len(chunk)}",
+            **payload,
+        ),
     )
 
 
@@ -464,7 +504,12 @@ async def process_write(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             skipped=True,
             resource_key=session_id,
             artifact_paths=[p for p in [info.meta_path, info.log_path] if p],
-            metadata={"handle_lost": True, "restored": info.restored},
+            metadata=tool_metadata(
+                "process.write",
+                f"process.write {session_id} handle_lost",
+                handle_lost=True,
+                restored=info.restored,
+            ),
         )
 
     try:
@@ -488,7 +533,13 @@ async def process_write(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             resource_key=session_id,
             state_delta={"stdin_write_chars": len(data), "eof": eof},
             artifact_paths=[p for p in [info.meta_path, info.log_path] if p],
-            metadata={"session_id": session_id, "chars": len(data), "eof": eof},
+            metadata=tool_metadata(
+                "process.write",
+                f"process.write {session_id} chars={len(data)}",
+                session_id=session_id,
+                chars=len(data),
+                eof=eof,
+            ),
         )
     except Exception as e:
         info.error = str(e)
@@ -516,7 +567,12 @@ async def process_kill(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             resource_key=session_id,
             state_delta={"process": "killed"},
             artifact_paths=[p for p in [info.meta_path, info.log_path] if p],
-            metadata={"session_id": session_id, "pid": info.pid},
+            metadata=tool_metadata(
+                "process.kill",
+                f"process.kill {session_id} pid={info.pid}",
+                session_id=session_id,
+                pid=info.pid,
+            ),
         )
     except Exception as e:
         info.error = str(e)

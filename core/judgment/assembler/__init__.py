@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from .assemble_context import _assemble_context as _assemble_context_impl
@@ -15,7 +14,7 @@ _log = logging.getLogger("lingzhou.judgment")
 
 if TYPE_CHECKING:
     from core.config import Config
-    from core.judgment.runtime import CognitionFrame
+    from core.judgment.frame import CognitionFrame
     from core.perception import (
         CognitiveSignals,
         EmotionState,
@@ -54,7 +53,9 @@ class JudgmentContextAssembler:
         self._system_prompt = cfg.load_prompt("system")
         self._identity_prefix: str = ""
         self._judgment_template = cfg.load_prompt("judgment")
-        _skills_dir = Path(cfg.loop.workspace_dir).expanduser() / "skills"
+        # 统一使用 cfg.workspace_dir（~ 展开 + 相对路径按配置文件目录解析），
+        # 避免不同运行环境中 workspace 路径漂移（例如 "~" 未展开）。
+        _skills_dir = cfg.workspace_dir / "skills"
         self._skills = SkillRegistry(skills_dir=_skills_dir)
         self._ref_resolver = ReferenceResolver(provider=provider, thresholds=cfg.thresholds, reason_temperature=cfg.temperature)
         self._last_context_text: str = ""
@@ -79,7 +80,7 @@ class JudgmentContextAssembler:
         semantic: SemanticMemory | None,
         emotion: EmotionState | None,
     ) -> tuple[Percept, WorkingMemory, TaskStore, EpisodicMemory, SemanticMemory, EmotionState]:
-        from ..runtime import CognitionFrame as _CognitionFrame
+        from ..frame import CognitionFrame as _CognitionFrame
 
         if isinstance(frame_or_percept, _CognitionFrame):
             return (

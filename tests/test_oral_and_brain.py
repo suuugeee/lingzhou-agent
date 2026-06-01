@@ -528,7 +528,7 @@ class TestSpeechIntentDemotion:
 class TestContinuePhaseAndAutonomousReplyGuard:
     @pytest.mark.asyncio
     async def test_continue_phase_demotes_reply_to_speech_intent(self):
-        from core.loop.continue_phase import _run_continue_phase
+        from core.loop.shared.continue_phase import _run_continue_phase
 
         cont = _make_judgment_output(decision="act", reply_to_user="我继续处理这张图")
         cont.chosen_action_id = "image.analyze"
@@ -559,7 +559,7 @@ class TestContinuePhaseAndAutonomousReplyGuard:
             _pending_routing_overrides=None,
         )
 
-        with patch("core.loop.continue_phase._maybe_reconcile_bootstrap", new=AsyncMock()):
+        with patch("core.loop.shared.continue_phase._maybe_reconcile_bootstrap", new=AsyncMock()):
             final_action, final_result = await _run_continue_phase(
                 loop=loop,
                 ctx=MagicMock(),
@@ -780,6 +780,7 @@ class TestDecideContinuePassthrough:
 
         jl._assembler = asm
         jl._executor = executor
+        jl._cfg = MagicMock(thinking="low")
 
         # no-op _normalize_output
         async def _normalize(output, **kw):

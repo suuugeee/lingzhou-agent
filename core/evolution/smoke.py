@@ -38,7 +38,12 @@ def smoke_test_module(
 
     from core.smoke_tests import FALLBACK_SNIPPET, SMOKE_TESTS
 
-    root = project_root or Path(__file__).resolve().parents[2]
+    if project_root is None:
+        from core.paths import project_root as _project_root
+
+        root = _project_root()
+    else:
+        root = project_root
     smoke_timeout = timeout if timeout is not None else getattr(getattr(getattr(engine, "_cfg", None), "evolution", None), "smoke_timeout", 15.0)
 
     try:

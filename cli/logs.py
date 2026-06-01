@@ -175,6 +175,9 @@ def logs_stats() -> None:
     llm_fails = len(re.findall(r"LLM[^\n]*失败|LLM 不可用", text))
     overflow_prompt = text.count("overflow_kind=prompt")
     overflow_output = text.count("overflow_kind=output")
+    messages_omitted = text.count("messages_omitted=true")
+    messages_omit_skipped = text.count("messages_omitted=false")
+    # 旧日志字段（ADR 0015 前）
     compression_applied = text.count("compression_applied=true")
     compression_skipped = text.count("compression_applied=false")
     backoff_values = [
@@ -193,7 +196,10 @@ def logs_stats() -> None:
     console.print(f"  微信:      {wechat_msgs} 收 / {wechat_sent} 发")
     console.print(f"  LLM失败:   {llm_fails}")
     console.print(f"  overflow:  prompt={overflow_prompt} output={overflow_output}")
-    console.print(f"  压缩路径:  applied={compression_applied} skipped={compression_skipped}")
+    console.print(
+        f"  超窗省略:  omitted={messages_omitted} skipped={messages_omit_skipped}"
+        f"  (legacy compress applied={compression_applied} skipped={compression_skipped})"
+    )
     console.print(f"  backoff:   {backoff_count} 次 (avg={backoff_avg:.2f}s)")
     console.print(f"  日志文件:  {log_file}  ({log_file.stat().st_size:,} bytes)")
 

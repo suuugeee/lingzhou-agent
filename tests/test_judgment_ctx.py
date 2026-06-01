@@ -65,43 +65,24 @@ def test_semantic_multi_anchor_empty_anchors():
 
 
 def test_fill_template_raises_when_variable_missing():
-    from core.judgment.context import _fill_template
+    from core.judgment.context.utils import _fill_template
 
     with pytest.raises(ValueError, match="missing_field"):
         _fill_template("hello {{ missing_field }}", {"other": "value"})
 
 
-def test_memory_honesty_guard_rewrites_reply_when_daily_gap_fill():
-    from core.judgment.runtime import _apply_memory_honesty_guard
+def test_judgment_output_preserves_model_reply_without_mechanical_rewrite():
+    """记忆表述由 LLM 结合 context 判断，parser 层不做正则改写。"""
+    from core.judgment.boundary import normalize_action_shape
 
     output = _judgment_output(
         decision="wait",
         reply_to_user="我记得你之前说过你叫 bat。",
     )
 
-    guarded = _apply_memory_honesty_guard(
-        output,
-        context_text="recall_mode: daily_gap_fill\ndaily_fallback_used: yes",
-    )
+    normalized = normalize_action_shape(output)
 
-    assert guarded.reply_to_user.startswith("从近期线索看，")
-    assert "我记得" not in guarded.reply_to_user
-
-
-def test_memory_honesty_guard_keeps_reply_when_long_term_memory_is_strong():
-    from core.judgment.runtime import _apply_memory_honesty_guard
-
-    output = _judgment_output(
-        decision="wait",
-        reply_to_user="我记得你之前说过你叫 bat。",
-    )
-
-    guarded = _apply_memory_honesty_guard(
-        output,
-        context_text="recall_mode: long_term_primary\ndaily_fallback_used: no",
-    )
-
-    assert guarded.reply_to_user == "我记得你之前说过你叫 bat。"
+    assert normalized.reply_to_user == "我记得你之前说过你叫 bat。"
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -201,7 +182,7 @@ def test_select_tier_logic():
 
 
 def test_prefer_tier_for_task_uses_pending_then_task_default():
-    from core.loop.common import _next_initial_tier_hint, _prefer_tier_for_task
+    from core.loop.shared.common import _next_initial_tier_hint, _prefer_tier_for_task
     from store.task import Task
 
     task = Task(
@@ -237,7 +218,7 @@ def test_prefer_tier_for_task_uses_pending_then_task_default():
 
 def test_behavior_gate_passthrough_and_logs_observation(caplog):
     """重复信号只做感知和日志，不替 LLM 改 decision。"""
-    from core.behavior_tracker import BehaviorTracker
+    from core.loop.drive.behavior import BehaviorTracker
 
     caplog.set_level(logging.INFO, logger="lingzhou.behavior_tracker")
     tracker = BehaviorTracker()
@@ -361,7 +342,7 @@ def test_judgment_skills_for_log_formats_selected_names():
 
 def test_behavior_list_result_aware():
     """file.list 应按“结果是否相同”而不是仅按路径判定重复。"""
-    from core.behavior_tracker import BehaviorTracker
+    from core.loop.drive.behavior import BehaviorTracker
 
     tracker = BehaviorTracker()
 
@@ -384,7 +365,7 @@ def test_behavior_list_result_aware():
 
 
 def test_behavior_explore_awareness_requires_task_context():
-    from core.behavior_tracker import BehaviorTracker
+    from core.loop.drive.behavior import BehaviorTracker
 
     tracker = BehaviorTracker()
     items = []
@@ -395,7 +376,7 @@ def test_behavior_explore_awareness_requires_task_context():
 
 
 def test_behavior_tracker_uses_explicit_registry_capabilities():
-    from core.behavior_tracker import BehaviorTracker
+    from core.loop.drive.behavior import BehaviorTracker
     from tools.registry import ToolEntry, ToolManifest
 
     class _Registry:
@@ -420,7 +401,7 @@ def test_behavior_tracker_uses_explicit_registry_capabilities():
 
 
 def test_next_thinking_override_is_one_shot_and_strict():
-    from core.loop.common import _next_thinking_override
+    from core.loop.shared.common import _next_thinking_override
 
     assert _next_thinking_override({"thinking_override": "low"}) == "low"
     assert _next_thinking_override({"thinking_override": "invalid"}) is None
@@ -429,7 +410,7 @@ def test_next_thinking_override_is_one_shot_and_strict():
 
 
 def test_resolve_thinking_override_uses_mode_defaults_and_strategy():
-    from core.loop.common import _resolve_thinking_override
+    from core.loop.shared.common import _resolve_thinking_override
 
     cfg = cast("Any", SimpleNamespace(
         thinking="off",
@@ -443,7 +424,7 @@ def test_resolve_thinking_override_uses_mode_defaults_and_strategy():
 
 
 def test_thinking_floor_respects_chat_minimum_for_user_message():
-    from core.loop.common import _thinking_floor
+    from core.loop.shared.common import _thinking_floor
 
     assert _thinking_floor("off", "low") == "low"
     assert _thinking_floor("minimal", "low") == "low"
@@ -452,7 +433,7 @@ def test_thinking_floor_respects_chat_minimum_for_user_message():
 
 
 def test_recent_runs_summary_prefers_output_and_progress():
-    from core.judgment.context import _fmt_recent_runs
+    from core.judgment.context.tasks import _fmt_recent_runs
     from store.task import Run
 
     runs = [
@@ -478,7 +459,7 @@ def test_recent_runs_summary_prefers_output_and_progress():
 
 
 def test_waiting_tasks_section_exposes_wait_reason_and_next_step():
-    from core.judgment.context import _fmt_waiting_tasks
+    from core.judgment.context.tasks import _fmt_waiting_tasks
     from store.task import Task
 
     tasks = [
@@ -502,7 +483,7 @@ def test_waiting_tasks_section_exposes_wait_reason_and_next_step():
 
 
 def test_runnable_tasks_section_omits_active_task():
-    from core.judgment.context import _fmt_runnable_tasks
+    from core.judgment.context.tasks import _fmt_runnable_tasks
     from store.task import Task
 
     tasks = [
@@ -532,7 +513,7 @@ def test_runnable_tasks_section_omits_active_task():
 
 
 def test_similar_tasks_section_exposes_similarity_and_context():
-    from core.judgment.context import _fmt_similar_tasks
+    from core.judgment.context.tasks import _fmt_similar_tasks
     from store.task import Task
 
     items = [(
@@ -703,7 +684,7 @@ def test_select_provider_matches_routing_provider_by_public_model_ref():
 
 def test_fmt_config_snapshot_exposes_judgment_signal_thresholds():
     from core.config import Config
-    from core.judgment.context import _fmt_config_snapshot
+    from core.judgment.context.sections import _fmt_config_snapshot
 
     cfg = Config.model_validate({
         "providers": {
@@ -773,7 +754,7 @@ def test_fmt_config_snapshot_exposes_judgment_signal_thresholds():
 
 def test_fmt_config_snapshot_exposes_reference_thresholds():
     from core.config import Config
-    from core.judgment.context import _fmt_config_snapshot
+    from core.judgment.context.sections import _fmt_config_snapshot
 
     cfg = Config.model_validate({
         "providers": {
@@ -884,7 +865,7 @@ def test_fmt_config_snapshot_exposes_reference_thresholds():
 
 
 def test_fmt_soul_uses_config_ethos_fallback_when_db_missing():
-    from core.judgment.context import _fmt_soul
+    from core.judgment.context.sections import _fmt_soul
 
     # hard_axioms 已由宪法层硬阻断，不再注入 prompt；只验证 ethos_baseline fallback
     text = _fmt_soul(
@@ -1008,9 +989,9 @@ def test_executor_retry_after_and_backoff_respects_lower_bound():
 
 @pytest.mark.asyncio
 async def test_chat_with_retry_applies_retry_after_backoff_and_fallback(monkeypatch):
-    from provider.base import Message
     from core.config import Config
     from core.judgment import JudgmentLayer, ModelSelection
+    from provider.base import Message
     from tools.registry import ToolRegistry
 
     class _ProviderAlwaysFail:
@@ -1068,7 +1049,7 @@ async def test_chat_with_retry_applies_retry_after_backoff_and_fallback(monkeypa
     async def _fake_sleep(delay: float) -> None:
         sleep_calls.append(delay)
 
-    monkeypatch.setattr("core.judgment.executor_helpers.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr("core.judgment.decision.helpers.asyncio.sleep", _fake_sleep)
 
     messages = [Message(role="user", content="hello")]
     selected_provider = main_provider
@@ -1100,9 +1081,9 @@ async def test_chat_with_retry_applies_retry_after_backoff_and_fallback(monkeypa
 
 @pytest.mark.asyncio
 async def test_chat_with_retry_same_model_uses_retry_after_delay(monkeypatch):
-    from provider.base import Message
     from core.config import Config
     from core.judgment import JudgmentLayer, ModelSelection
+    from provider.base import Message
     from tools.registry import ToolRegistry
 
     class _ProviderFailThenOk:
@@ -1141,7 +1122,7 @@ async def test_chat_with_retry_same_model_uses_retry_after_delay(monkeypatch):
     async def _fake_sleep(delay: float) -> None:
         sleep_calls.append(delay)
 
-    monkeypatch.setattr("core.judgment.executor_helpers.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr("core.judgment.decision.helpers.asyncio.sleep", _fake_sleep)
 
     raw, final_selection, err = await layer._executor._chat_with_retry(
         selected_provider=provider,
@@ -1170,9 +1151,9 @@ async def test_chat_with_retry_same_model_uses_retry_after_delay(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chat_with_retry_output_overflow_skips_prompt_compression(monkeypatch, caplog):
-    from provider.base import Message
     from core.config import Config
     from core.judgment import JudgmentLayer, ModelSelection
+    from provider.base import Message
     from tools.registry import ToolRegistry
 
     class _ProviderOutputOverflowThenOk:
@@ -1221,7 +1202,7 @@ async def test_chat_with_retry_output_overflow_skips_prompt_compression(monkeypa
         sleep_calls.append(delay)
 
     monkeypatch.setattr(layer._executor, "_trim_messages_for_prompt_limit", _fake_trim)
-    monkeypatch.setattr("core.judgment.executor_helpers.asyncio.sleep", _fake_sleep)
+    monkeypatch.setattr("core.judgment.decision.helpers.asyncio.sleep", _fake_sleep)
 
     caplog.set_level(logging.WARNING, logger="lingzhou.judgment")
 
@@ -1250,19 +1231,24 @@ async def test_chat_with_retry_output_overflow_skips_prompt_compression(monkeypa
     assert len(sleep_calls) == 1
     assert sleep_calls[0] >= 1.0
     assert "overflow_kind=output" in caplog.text
-    assert "compression_applied=false" in caplog.text
+    assert "messages_omitted=false" in caplog.text
 
 
 def test_fmt_chat_history_keeps_full_content():
-    from core.judgment.context import _fmt_chat_history
+    """有预算时丢弃最旧整轮，不在单条消息内截断（ADR 0015）。"""
+    from core.judgment.context.sections import _fmt_chat_history
 
-    text = _fmt_chat_history([
+    messages = [
         {"role": "user", "content": "abcdefghi"},
         {"role": "assistant", "content": "123456789"},
-    ], max_chars=5)
+    ]
+    full = _fmt_chat_history(messages, max_chars=0)
+    assert "用户: abcdefghi" in full
+    assert "我: 123456789" in full
 
-    assert "用户: abcdefghi" in text
-    assert "我: 123456789" in text
+    trimmed = _fmt_chat_history(messages, max_chars=20)
+    assert trimmed == "我: 123456789"
+    assert "abcdefghi" not in trimmed
 
 
 def test_tool_tier_uses_manifest_truth_for_reasoner_tools():
@@ -1673,7 +1659,7 @@ def test_model_routing_section_exposes_tool_history_compaction_policy():
 
 
 def test_fmt_durable_failures_exposes_policy_and_muted_actions():
-    from core.judgment.context import _fmt_durable_failures
+    from core.judgment.context.tasks import _fmt_durable_failures
 
     text = _fmt_durable_failures({
         "threshold": 3,
@@ -1696,7 +1682,7 @@ def test_fmt_durable_failures_exposes_policy_and_muted_actions():
 
 
 async def test_load_durable_failure_snapshot_reads_policy_and_active_mutes():
-    from core.judgment.context import _load_durable_failure_snapshot
+    from core.judgment.context.facts import _load_durable_failure_snapshot
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -1853,7 +1839,7 @@ async def test_decide_continue_updates_last_call_meta_after_fallback():
 
 
 def test_action_made_progress_result_aware():
-    from core.loop.progress import _action_made_progress, _result_fingerprint
+    from core.loop.shared.progress import _action_made_progress, _result_fingerprint
     from tools.registry import ToolEntry, ToolManifest, ToolResult
 
     list_action = _judgment_output(decision="act", chosen_action_id="file.list", params={"path": "/tmp"})
@@ -1918,7 +1904,7 @@ def test_write_success_stall_meta_reflection_records_task_hint():
 
 
 async def _write_success_stall_meta_reflection_records_task_hint():
-    from core.loop.postprocess import _write_success_stall_meta_reflection
+    from core.loop.shared.postprocess import _write_success_stall_meta_reflection
     from store.task import TaskStore
     from tools.registry import ToolResult
 
@@ -1982,7 +1968,7 @@ async def _success_stall_reflection_tracks_capability_based_tool():
 
 
 def test_fallback_reply_for_user_describes_waiting_state():
-    from core.loop.logging import _fallback_reply_for_user
+    from core.loop.shared.logging import _fallback_reply_for_user
     from store.task import Task
     from tools.registry import ToolResult
 
@@ -2001,7 +1987,7 @@ def test_fallback_reply_for_user_describes_waiting_state():
 
 
 def test_fallback_reply_for_user_uses_real_error_instead_of_background_ack():
-    from core.loop.logging import _fallback_reply_for_user
+    from core.loop.shared.logging import _fallback_reply_for_user
     from tools.registry import ToolResult
 
     action = _judgment_output(decision="pause", rationale="源路径证据不存在，需要用户补充。")
@@ -2016,7 +2002,7 @@ def test_fallback_reply_for_user_uses_real_error_instead_of_background_ack():
 
 
 def test_fallback_reply_for_user_does_not_echo_tool_summary_on_success():
-    from core.loop.logging import _fallback_reply_for_user
+    from core.loop.shared.logging import _fallback_reply_for_user
     from tools.registry import ToolResult
 
     action = _judgment_output(decision="act", chosen_action_id="file.read", rationale="我已经收集到关键证据。")
@@ -2164,8 +2150,8 @@ async def test_persist_tick_user_reply_does_not_append_skill_suffix():
 
 
 def test_infer_valence_from_text_uses_explicit_hint_only():
-    from core.config import EmotionConfig
-    from core.loop.common import _infer_valence_from_text
+    from core.config_models import EmotionConfig
+    from core.loop.shared.common import _infer_valence_from_text
 
     default_cfg = EmotionConfig()
     assert _infer_valence_from_text("继续推进，暂无结构化情绪提示", 0.6, default_cfg) == 0.6
@@ -2178,7 +2164,7 @@ def test_infer_valence_from_text_uses_explicit_hint_only():
 
 
 def test_should_continue_within_tick_for_autonomous_act():
-    from core.loop.common import _next_initial_tier_hint, _should_continue_within_tick
+    from core.loop.shared.common import _next_initial_tier_hint, _should_continue_within_tick
 
     assert _should_continue_within_tick(_judgment_output(decision="act", chosen_action_id="file.read")) is True
     assert _should_continue_within_tick(_judgment_output(decision="act", chosen_action_id="task.complete")) is False
@@ -2310,6 +2296,79 @@ async def test_decide_continue_surfaces_missing_chosen_action_id_without_runtime
     assert out.params == {}
     assert out.rationale == "act 决策缺少 chosen_action_id"
     assert provider.calls == 1
+
+
+async def test_judgment_normalizes_whitespace_tool_name_to_wait():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+
+    class _DummyProvider:
+        last_usage = {"prompt_tokens": 1, "completion_tokens": 1}
+        model_ref = "bailian/qwen3.6-plus"
+
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"act","chosen_action_id":"   ","params":{"path":"x"},"rationale":"bad"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+    })
+    layer = JudgmentLayer(_DummyProvider(), _tool_registry(), cfg)
+    layer._assembler._last_context_text = "cached context"
+
+    out = await layer.decide_continue(
+        [{"tool": "task.list", "params": {}, "result": "ok"}],
+        prefer_tier="reasoner",
+    )
+
+    assert out.decision == "wait"
+    assert out.chosen_action_id == ""
+    assert out.rationale == "act 决策缺少 chosen_action_id"
+
+
+async def test_judgment_rejects_unregistered_tool_before_execution():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+
+    class _DummyProvider:
+        last_usage = {"prompt_tokens": 1, "completion_tokens": 1}
+        model_ref = "bailian/qwen3.6-plus"
+
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"act","chosen_action_id":"not.a.tool","params":{},"rationale":"bad"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+    })
+    layer = JudgmentLayer(_DummyProvider(), _tool_registry(), cfg)
+    layer._assembler._last_context_text = "cached context"
+
+    out = await layer.decide_continue(
+        [{"tool": "task.list", "params": {}, "result": "ok"}],
+        prefer_tier="reasoner",
+    )
+
+    assert out.decision == "wait"
+    assert out.rationale == "未知工具: 'not.a.tool'"
 
 
 async def test_repair_output_uses_broken_output_only():
@@ -2509,7 +2568,7 @@ async def test_decide_continue_keeps_complex_act_without_runtime_rewrite():
 
 
 def test_preferred_continue_tier_uses_manifest_reader_tier():
-    from core.loop.common import _should_continue_within_tick
+    from core.loop.shared.common import _should_continue_within_tick
     from tools.registry import ToolContext, ToolManifest, ToolRegistry, ToolResult, tool
 
     @tool(ToolManifest(
@@ -2533,7 +2592,7 @@ def test_preferred_continue_tier_uses_manifest_reader_tier():
 
 
 async def test_sync_task_progress_state_promotes_previous_next_step():
-    from core.task_runtime import _sync_task_progress_state
+    from core.loop.task.runtime import _sync_task_progress_state
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -2568,7 +2627,7 @@ async def test_sync_task_progress_state_promotes_previous_next_step():
 
 
 async def test_sync_task_progress_state_preserves_explicit_current_step_from_state_delta():
-    from core.task_runtime import _sync_task_progress_state
+    from core.loop.task.runtime import _sync_task_progress_state
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -2595,7 +2654,7 @@ async def test_sync_task_progress_state_preserves_explicit_current_step_from_sta
 
 
 def test_fmt_task_exposes_runtime_state_to_llm():
-    from core.judgment.context import _fmt_task
+    from core.judgment.context.tasks import _fmt_task
     from store.task import Task
 
     task = Task(
@@ -2629,7 +2688,8 @@ def test_load_context_facts_snapshot_uses_configured_exclude_prefixes_and_limits
 
 
 async def _fmt_context_facts_surfaces_task_and_recent_general_facts():
-    from core.judgment.context import _fmt_context_facts, _load_context_facts_snapshot
+    from core.judgment.context.facts import _load_context_facts_snapshot
+    from core.judgment.context.tasks import _fmt_context_facts
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:
@@ -2653,7 +2713,7 @@ async def _fmt_context_facts_surfaces_task_and_recent_general_facts():
 
 
 async def _load_context_facts_snapshot_uses_configured_exclude_prefixes_and_limits():
-    from core.judgment.context import _load_context_facts_snapshot
+    from core.judgment.context.facts import _load_context_facts_snapshot
 
     class _Store:
         def __init__(self) -> None:
@@ -2734,8 +2794,19 @@ def test_tool_result_log_fields_prefer_log_summary_over_raw_text():
     assert state == ""
 
 
+def test_run_progress_text_prefers_log_summary_over_huge_summary():
+    from core.execution.helpers import _run_progress_text
+    from tools.registry import ToolResult
+
+    res = ToolResult(
+        summary="X" * 200000,
+        metadata={"log_summary": "file.read path=/tmp/big.txt chars=200000"},
+    )
+    assert _run_progress_text(res) == "file.read path=/tmp/big.txt chars=200000"
+
+
 def test_clip_reply_for_log_strips_memory_context():
-    from core.loop.logging import _clip_reply_for_log
+    from core.loop.shared.logging import _clip_reply_for_log
 
     clipped = _clip_reply_for_log("<memory-context>hidden</memory-context>\n用户可见回复")
     assert clipped == "用户可见回复"

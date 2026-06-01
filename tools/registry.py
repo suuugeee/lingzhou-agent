@@ -140,6 +140,17 @@ class ToolManifest:
         }
 
 
+def tool_metadata(
+    tool_name: str,
+    log_summary: str,
+    **extra: Any,
+) -> dict[str, Any]:
+    """构造统一 metadata 字段（tool_name + log_summary + 工具特有键）。"""
+    meta: dict[str, Any] = {"tool_name": tool_name, "log_summary": log_summary}
+    meta.update(extra)
+    return meta
+
+
 @dataclass
 class ToolResult:
     summary: str
@@ -208,6 +219,11 @@ class ToolEntry:
 # ── 全局注册表（模块级单例）────────────────────────────────────────────────────
 
 _registry: dict[str, ToolEntry] = {}
+
+
+def lookup_registered_tool(name: str) -> ToolEntry | None:
+    """查询当前进程内 @tool 已注册条目（smoke / 诊断用，非运行时调度入口）。"""
+    return _registry.get(name)
 
 
 @lru_cache(maxsize=1)

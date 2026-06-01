@@ -21,14 +21,14 @@ from typing import TYPE_CHECKING, Any
 from rich.console import Console
 from rich.panel import Panel
 
-from core.behavior_tracker import BehaviorTracker
 from core.evolution import EvolutionEngine
 from core.execution import ExecutionLayer
 from core.judgment import JudgmentLayer, JudgmentOutput
+from core.loop.drive.behavior import BehaviorTracker
 from core.metabolic import MetabolicEngine
 from core.perception import EmotionState
+from core.persona.soul import SoulManager
 from core.probe import ProbeManager
-from core.soul import SoulManager
 from memory.working import WorkingMemory
 from provider import create_provider
 from provider.base import EmbeddingProvider
@@ -37,19 +37,19 @@ from store.semantic import SemanticMemory
 from store.task import Task, TaskStore
 from tools.registry import ToolRegistry
 
-from ..dispatcher import ConcurrentTickDispatcher, TickJob
-from ..driver import _run_cycle_impl, _wait_after_cycle_impl
-from ..focus import resolve_focus_task
-from ..run_driver import RunDriver
-from ..startup import _open_runtime_impl, _prepare_runtime_run_impl
+from ..cycle.dispatcher import ConcurrentTickDispatcher, TickJob
+from ..cycle.driver import _run_cycle_impl, _wait_after_cycle_impl
+from ..cycle.focus import resolve_focus_task
+from ..runs.driver import RunDriver
 from ..tick import _post_tick_memory_impl, _tick_impl
-from .helpers_chain import (
+from .chain import (
     mount_chain_view,
     new_chain_runtime_state,
     run_dispatched_tick,
     sync_chain_state_from_view,
 )
-from .helpers_memory import consolidate, emit_curiosity_signal, emit_self_drive_signal
+from .memory_hooks import consolidate, emit_curiosity_signal, emit_self_drive_signal
+from .startup import _open_runtime_impl, _prepare_runtime_run_impl
 
 if TYPE_CHECKING:
     from core.config import Config
@@ -153,7 +153,11 @@ class CognitionLoop:
                 st_module = importlib.import_module("sentence_transformers")
                 sentence_transformer = st_module.SentenceTransformer
                 local_st = sentence_transformer(cfg.memory.local_embed_model, **st_kwargs)
-                embed_fn = lambda texts: local_st.encode(texts, normalize_embeddings=True).tolist()
+
+                def _local_embed(texts: list[str]) -> list[list[float]]:
+                    return local_st.encode(texts, normalize_embeddings=True).tolist()
+
+                embed_fn = _local_embed
             except Exception as exc:
                 _log.warning("[loop] 本地 embedding 模型加载失败，回退到 API: %s", exc)
                 embed_fn = (
@@ -191,7 +195,7 @@ class CognitionLoop:
         )
 
         # 自驱力引擎 (Active Inference + Intrinsic Motivation)
-        from core.self_drive import SelfDriveEngine
+        from core.loop.drive.self_drive import SelfDriveEngine
 
         self._self_drive = SelfDriveEngine(str(cfg.db_path))
 
@@ -222,7 +226,7 @@ class CognitionLoop:
         # "full" = 首次运行；"none" = 正常运行（BOOTSTRAP.md 已删除）
         self._bootstrap_mode: str = "none"
         # 探针系统：配置来自工作区 probes.json（与主 DB 完全解耦）
-        probe_file = Path(cfg.loop.workspace_dir).expanduser() / "probes.json"
+        probe_file = cfg.workspace_dir / "probes.json"
         self._probe_manager: ProbeManager = ProbeManager(probe_file)
         self._judgment._assembler._probe_manager = self._probe_manager
         # 按请求计费聚合:追踪距上次真正调用 LLM 已经过了几轮

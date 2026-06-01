@@ -135,7 +135,7 @@
 
 #### 4b. 人格器官
 **定义**：长期稳定的行为风格、偏好、气质、表达方式、处事倾向。  
-**现有实现**：`core/soul.py`（部分）+ `soul:ethos_baseline` DB 值 + `SOUL.md` 镜像  
+**现有实现**：`core/persona/soul.py`（部分）+ `soul:ethos_baseline` DB 值 + `SOUL.md` 镜像  
 **改造方向**：
 - 当前 soul 把人格和灵魂混在一起，需拆分。
 - 人格参数应可被经历、反思、演化慢速塑造，塑造记录不可抹去。
@@ -184,7 +184,7 @@
 
 **职责**：观测世界与观测自己，产出感知帧，不做裁决。  
 **原则**：探针提供可观测能力，灵舟根据观测结果由主脑决定如何行动。  
-**现有实现**：`core/perception/` + `core/probe/` + `core/behavior_tracker.py`  
+**现有实现**：`core/perception/` + `core/probe/` + `core/loop/drive/behavior.py`  
 **改造方向**：
 - 感知器官只产出感知帧，不直接触发动作。
 - 极少数宪法级反射弧（如心跳失败、关键器官崩溃）可触发免疫器官的保护流程，但这属于免疫器官响应，不是感知器官决策。
@@ -295,7 +295,7 @@ SubagentProposal:
 | 现有模块 | 归属新器官 | 改造动作 |
 |---------|-----------|---------|
 | `core/judgment/` | 主脑器官 | 收敛边界，不再直接写状态 |
-| `core/soul.py` | 人格器官 + 灵魂器官 | 拆分，human axioms → 宪法器官 |
+| `core/persona/soul.py` | 人格器官 + 灵魂器官 | 拆分，human axioms → 宪法器官 |
 | `core/evolution.py` | 进化器官 | 补自修改协议与回滚机制 |
 | `core/smoke_tests.py` | 进化器官（验证子系统） | 归入进化器官下层 |
 | `core/self_drive.py` | 进化器官（自驱动策略） | 归入进化器官 |
@@ -304,12 +304,12 @@ SubagentProposal:
 | `core/subagent.py` | 子灵系统（行动器官之下） | 实现五层授权协议 |
 | `core/perception/` | 感知器官 | 保留，明确不做裁决 |
 | `core/probe/` | 感知器官 | 归入感知器官 |
-| `core/behavior_tracker.py` | 感知器官（统计层） | 触发动作逻辑迁移 |
+| `core/loop/drive/behavior.py` | 感知器官（统计层） | 触发动作逻辑迁移 |
 | `core/reference.py` | 主脑器官（认知辅助） | 归入主脑，作为辅助思考工具 |
-| `core/self_model.py` | 主脑器官（自我认知） | 归入主脑 |
+| `core/persona/self_model.py` | 主脑器官（自我认知） | 归入主脑 |
 | `core/skill.py` | 进化器官（技能子系统） | 技能演化归进化器官 |
 | `core/run_refresh.py` | 代谢器官（执行轨迹刷新） | 迁移到代谢器官 |
-| `core/task_runtime.py` | 代谢器官（任务状态管理） | 迁移到代谢器官 |
+| `core/loop/task/runtime.py` | 代谢器官（任务状态管理） | 迁移到代谢器官 |
 | `core/loop/` | 主循环（编排骨架） | 拆成装配层 + tick 编排层 |
 | `memory/episodic.py` | 记忆器官 | 保留，明确角色 |
 | `memory/semantic.py` | 记忆器官 | 保留，明确角色 |
@@ -329,7 +329,7 @@ SubagentProposal:
 | `provider/` | 主脑器官（模型实现件） | 保留，归主脑器官下层 |
 | `store/` | 代谢器官（存储适配层） | 作为代谢器官的底层 |
 | `cli/` | 接入门层 | 纯门，不含业务逻辑 |
-| `core/config.py` | 全局配置（横切关注点） | 收敛为查询服务，不再全局单体暴露 |
+| `core/config/loader.py` | 全局配置（横切关注点） | 收敛为查询服务，不再全局单体暴露 |
 
 ---
 
@@ -344,8 +344,8 @@ SubagentProposal:
 | 任务 | 改动文件 |
 |------|----------|
 | 新建 `workspace/CONSTITUTION.md`，以蓝图 10 条公理为初始内容 | 新建文件 |
-| `core/config.py` 增加 `constitution_path: str` 字段，默认 `workspace/CONSTITUTION.md` | `core/config.py` |
-| `core/loop/startup.py` 启动时：①文件存在且非空 ②内容哈希缓存到内存 | `core/loop/startup.py` |
+| `core/config/loader.py` 增加 `constitution_path: str` 字段，默认 `workspace/CONSTITUTION.md` | `core/config/loader.py` |
+| `core/loop/runtime/startup.py` 启动时：①文件存在且非空 ②内容哈希缓存到内存 | `core/loop/runtime/startup.py` |
 | `core/probe/` 新增 constitution probe：定时校验文件哈希未被程序写入 | 新增 probe |
 
 #### 1-B 免疫器官骨架
@@ -387,7 +387,7 @@ class MetabolicEngine:
 **同步代码质量修复**：
 - 🔧 **[模式 2]** 收拢工具分类：`_DEFAULT_BLOCKED_TOOLS` 从 `core/subagent.py` 迁入免疫器官；`_READER_TOOLS` 合并为 `ToolManifest.prefer_tier` 统一查询。影响文件：`subagent.py`、`judgment/output.py`、`judgment/runtime.py`、`execution.py`。
 - 🔧 **[模式 4]** 消灭 `execution._registry` 私有替换（`subagent.py:872-877`）：改为子灵构造时注入独立 registry，而非运行时临时替换父灵私有属性。
-- 🔧 **[模式 7]** 消灭 ethos 维度列表重复：`core/soul.py` 与 `core/perception/signals.py` 中的维度列表，统一定义一处，另一处引用。
+- 🔧 **[模式 7]** 消灭 ethos 维度列表重复：`core/persona/soul.py` 与 `core/perception/signals.py` 中的维度列表，统一定义一处，另一处引用。
 
 ---
 
@@ -401,7 +401,7 @@ class MetabolicEngine:
 | `core/loop/tick.py` | ~7 处 | routing_overrides、soul:emotion_state、soul:ethos_baseline 等 |
 | `core/reference.py` | ~7 处 | entity、relation、interlocutor facts |
 | `core/execution.py` | ~4 处 | run 结果、failure 状态、记忆节点 |
-| `core/task_runtime.py` | 多处 | meta-reflection、task hint facts |
+| `core/loop/task/runtime.py` | 多处 | meta-reflection、task hint facts |
 | `core/run_refresh.py` | 多处 | run result、meta reflection |
 | `core/self_drive.py` | 1 处 | curiosity state JSON 文件写入 |
 
@@ -415,7 +415,7 @@ class MetabolicEngine:
 **同步代码质量修复**：
 - 🔧 **[模式 3]** 7 处 `core/loop/tick.py` 的 set_fact 调用，统一改为提交 `StateProposal`。
 - 🔧 **[模式 3]** `core/reference.py` 7 处直接写 entity/relation/interlocutor facts → 提案提交。
-- 🔧 **[模式 3]** `core/task_runtime.py`、`core/run_refresh.py` 的 set_fact → 提案提交。
+- 🔧 **[模式 3]** `core/loop/task/runtime.py`、`core/run_refresh.py` 的 set_fact → 提案提交。
 - 🔧 **[模式 5]** `_DURABLE_FAILURE_TTL_SEC = 7200`、`_DURABLE_FAILURE_THRESHOLD = 3`（`core/execution.py`）归入 `Config.thresholds`。
 - 🔧 **[模式 7]** run result 写入 activation/valence 的重复逻辑（`execution.py` 与 `run_refresh.py`），收口到共享 helper。
 
@@ -425,7 +425,7 @@ class MetabolicEngine:
 **目标**：记忆 / 人格 / 灵魂三器官边界清晰。
 
 **架构改造**：
-1. `core/soul.py` 拆分：宪法部分归免疫器官，人格参数归人格器官，存在取向归灵魂器官。
+1. `core/persona/soul.py` 拆分：宪法部分归免疫器官，人格参数归人格器官，存在取向归灵魂器官。
 2. 人格器官与灵魂器官的变化记录纳入生命史账本。
 3. 主脑升级协议实现：三器官联合确认。
 
@@ -463,7 +463,7 @@ class MetabolicEngine:
 **同步代码质量修复**：
 - 🔧 **[模式 1]** `core/loop/tick.py` 的 `_tick_impl`（600+ 行）拆分为 `TickPerception`、`TickJudgment`、`TickExecution`、`TickMemory` 四个编排器，每个只有自己的器官依赖注入。
 - 🔧 **[模式 5]** `_CHAIN_STATE_FIELDS` 硬编码元组（`runtime.py`）改为 `@dataclass ChainState`，字段变更由编译器检测而非运行时反射复制。
-- 🔧 **[模式 5]** `core/loop/driver.py` 的 arousal 调制系数（`0.8, 1.0, 0.4, 0.5`）归入 Config。
+- 🔧 **[模式 5]** `core/loop/cycle/driver.py` 的 arousal 调制系数（`0.8, 1.0, 0.4, 0.5`）归入 Config。
 - 🔧 **[模式 7]** tool_history 压缩逻辑（`continue_phase.py` 与 `judgment/context.py` 重复）提取为 `ToolHistoryCompactor` 共享类。
 
 ---
@@ -523,7 +523,7 @@ class MetabolicEngine:
 **影响范围**：30+ 文件（几乎所有 core/、memory/、channels/）  
 **表现**：所有模块都直接 `self._cfg.xxx`，Config 既是数据源又是运行时真相。  
 **具体热点**：
-- `core/config.py`：2000+ 行，200+ 字段，嵌套结构边界不清。
+- `core/config/loader.py`：2000+ 行，200+ 字段，嵌套结构边界不清。
 - `core/loop/tick.py`、`core/judgment/runtime.py`、`core/execution.py` 深度依赖 cfg 各子结构。
 **改造方向**：Config 分域拆分为 `LoopConfig / MemoryConfig / ProviderConfig / ThresholdsConfig / ChannelConfig`，通过注入而非全局单体访问。新增用能力值配置器接口（config query service）统一暴露。
 
@@ -554,7 +554,7 @@ class MetabolicEngine:
 | `core/loop/tick.py` | 7 处 | routing_overrides、soul:emotion_state、soul:ethos_baseline 等 |
 | `core/execution.py` | 4 处 | run 结果、failure 状态、记忆节点 |
 | `core/reference.py` | 7 处 | entity、relation、interlocutor facts |
-| `core/task_runtime.py` | 多处 | meta-reflection、task hint facts |
+| `core/loop/task/runtime.py` | 多处 | meta-reflection、task hint facts |
 | `core/run_refresh.py` | 多处 | run result、meta reflection |
 | `core/self_drive.py` | 文件写入 | curiosity state JSON |
 
@@ -571,8 +571,8 @@ class MetabolicEngine:
 | `core/subagent.py:811-813` | 三个 view 均用 `cast(Any, ...)` 绕过类型 |
 | `core/subagent.py:872-877` | 临时替换 `execution._registry` 私有属性（`type: ignore`）+ try/finally |
 | `core/judgment/runtime.py:114,118,133` | `cast(Any, list_runnable/finder)` |
-| `core/loop/task_parallel.py:361` | `cast(Any, finder)` |
-| `core/loop/reload.py:71` | `cast(Any, loop._semantic)` |
+| `core/loop/task/parallel.py:361` | `cast(Any, finder)` |
+| `core/loop/runtime/reload.py:71` | `cast(Any, loop._semantic)` |
 
 **改造方向**：为 `TaskStoreView` / `EpisodicView` / `SemanticView` / `ExecutionRegistry` 定义 Protocol/ABC，子灵视图实现接口而非绕过。`execution._registry` 改为构造时注入。
 
@@ -585,12 +585,12 @@ class MetabolicEngine:
 | 常数 | 所在文件 | 含义 |
 |------|---------|------|
 | `_DURABLE_FAILURE_TTL_SEC = 7200` | `core/execution.py` | 持久失败 TTL |
-| `_BELIEF_STALE_THRESHOLD = 4` | `core/behavior_tracker.py` | 信念陈旧阈值 |
-| `_BELIEF_WINDOW = 8` | `core/behavior_tracker.py` | 信念窗口 |
-| `_SEQ_WINDOW_WARN_AT = 3` | `core/behavior_tracker.py` | 连续动作告警 |
+| `_BELIEF_STALE_THRESHOLD = 4` | `core/loop/drive/behavior.py` | 信念陈旧阈值 |
+| `_BELIEF_WINDOW = 8` | `core/loop/drive/behavior.py` | 信念窗口 |
+| `_SEQ_WINDOW_WARN_AT = 3` | `core/loop/drive/behavior.py` | 连续动作告警 |
 | `TASK_DUPLICATE_REUSE_SCORE = 0.66` | `memory/task_store.py` 和 `task_parallel.py` | 任务复用评分 |
 | `TASK_SIMILARITY_CONTEXT_SCORE = 0.45` | 两处 | 相似度阈值 |
-| `arousal_factor = max(0.8, 1.0 - 0.4 * (_arousal - 0.5))` | `core/loop/driver.py` | 唤醒度调制 |
+| `arousal_factor = max(0.8, 1.0 - 0.4 * (_arousal - 0.5))` | `core/loop/cycle/driver.py` | 唤醒度调制 |
 | `_LOG_TEXT_CHARS = 240` | `core/execution.py` | 日志截断 |
 | `min_runs` | `core/evolution.py` | 进化最少运行次数 |
 
@@ -616,10 +616,10 @@ cfg.soul.ethos_baseline.get('truth', 0.5)  # 缺值静默降级
 
 | 重复内容 | 文件 A | 文件 B |
 |---------|--------|--------|
-| 任务相似度计算 | `memory/task_store.py` | `core/loop/task_parallel.py` |
-| tool_history 压缩 | `core/loop/continue_phase.py` | `core/judgment/context.py` |
+| 任务相似度计算 | `memory/task_store.py` | `core/loop/task/parallel.py` |
+| tool_history 压缩 | `core/loop/shared/continue_phase.py` | `core/judgment/context.py` |
 | run result 写入 activation/valence | `core/execution.py` | `core/run_refresh.py` |
-| ethos 维度列表 | `core/soul.py` | `core/perception/signals.py` |
+| ethos 维度列表 | `core/persona/soul.py` | `core/perception/signals.py` |
 | 工具分类逻辑 | `core/judgment/output.py` | `tools/registry.py` |
 
 **改造方向**：每对中选一处作为权威实现，另一处改为调用。
@@ -633,11 +633,11 @@ cfg.soul.ethos_baseline.get('truth', 0.5)  # 缺值静默降级
 | `core/loop/tick.py` | 1400+ | `_tick_impl` 600+ 行混合所有职责；7 处直接 set_fact | 🔴 高 |
 | `core/judgment/runtime.py` | 2000+ | `decide()` 800+ 行；15+ 处 cast(Any)；`_READER_TOOLS` 重复 | 🔴 高 |
 | `core/subagent.py` | 1000+ | 4 个工具名 frozenset；5+ cast(Any)；`execution._registry` 私有替换 | 🔴 高 |
-| `core/config.py` | 2000+ | 全局单体被 30+ 文件直接依赖 | 🔴 高 |
+| `core/config/loader.py` | 2000+ | 全局单体被 30+ 文件直接依赖 | 🔴 高 |
 | `core/execution.py` | 900+ | 4 处直接写 set_fact；错误关键字列表硬编码 | 🟠 中高 |
 | `core/judgment/context.py` | 1500+ | 200+ 格式化函数堆积；无过期缓存策略 | 🟠 中高 |
 | `memory/task_store.py` | 1000+ | 语义过载（7种数据混合）；相似度计算重复 | 🟠 中高 |
-| `core/task_runtime.py` | 400+ | 多处 set_fact；meta-reflection 逻辑分散 | 🟡 中 |
+| `core/loop/task/runtime.py` | 400+ | 多处 set_fact；meta-reflection 逻辑分散 | 🟡 中 |
 | `core/reference.py` | 800+ | 7 处 set_fact；LLM prompt 硬编码 | 🟡 中 |
 | `core/evolution.py` | 1200+ | 多处硬编码阈值；备份/恢复散落 | 🟡 中 |
 | `core/loop/runtime.py` | 600+ | `_CHAIN_STATE_FIELDS` 硬编码元组；组装职责过多 | 🟡 中 |
@@ -809,7 +809,7 @@ Doctor 知道：API key 如何从环境变量、legacy credentials、auth profil
 | ✅ `core/immune/` 源码（pycache 已有痕迹但无 .py） | Phase 1-B |
 | ✅ `core/metabolic/` 源码（pycache 已有痕迹但无 .py） | Phase 1-C |
 | ✅ ~40 处散落 set_fact 收口 | Phase 2 |
-| ✅ `core/soul.py` 拆分为 persona + soul | Phase 3 |
+| ✅ `core/persona/soul.py` 拆分为 persona + soul | Phase 3 |
 | ✅ `SubagentProposal` + cast(Any) 消灭 | Phase 4 |
 | ✅ `_tick_impl` 600+ 行拆装 | Phase 5 |
 | ✅ `EvolutionProposal` + 三审协议 | Phase 6 |

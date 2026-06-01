@@ -20,7 +20,7 @@ from conftest import (
 
 def test_compact_tool_history_keeps_same_list_reference():
     """tool_history 压缩必须原地修改，不能切断外层列表引用。"""
-    from core.loop.continue_phase import _compact_tool_history
+    from core.loop.shared.continue_phase import _compact_tool_history
 
     history = [
         {"tool": f"tool-{idx}", "params": {}, "result": f"result-{idx}", "status": "ok", "error": ""}
@@ -36,12 +36,39 @@ def test_compact_tool_history_keeps_same_list_reference():
     assert history[0]["tool"] == "[compacted]"
 
 
+def test_compact_tool_history_uses_evidence_pointers_for_old_large_results():
+    """早期大结果进入结构化摘要，避免把整份文件反复回灌给续判上下文。"""
+    from core.loop.shared.continue_phase import _compact_tool_history
+
+    large_result = "x" * 50_000
+    history = [
+        {
+            "tool": "file.read",
+            "params": {"path": "/workspace/core.py"},
+            "result": large_result,
+            "summary": large_result,
+            "status": "ok",
+            "error": "",
+            "artifact_paths": ["/workspace/core.py"],
+            "fingerprint": "read:abc123",
+            "metadata": {"log_summary": "file.read path=/workspace/core.py chars=50000"},
+        },
+        {"tool": "task.update", "params": {}, "result": "recent", "status": "ok", "error": ""},
+    ]
+
+    _compact_tool_history(history, keep_last=1)
+
+    assert large_result not in history[0]["result"]
+    assert "file.read path=/workspace/core.py chars=50000" in history[0]["result"]
+    assert "/workspace/core.py" in history[0]["result"]
+
+
 def test_process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch, caplog):
     asyncio.run(_process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch, caplog))
 
 
 async def _process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch, caplog):
-    from core.loop.chat import _process_pending_chat_turn
+    from core.loop.cycle.chat import _process_pending_chat_turn
 
     released_ids: list[tuple[int, ...]] = []
 
@@ -50,7 +77,7 @@ async def _process_pending_chat_turn_defers_when_dispatch_queue_full_without_blo
     async def _unexpected_sleep(_delay: float):
         raise AssertionError("queue full 时不应在 chat 主循环里 sleep 阻塞")
 
-    monkeypatch.setattr("core.loop.chat.asyncio.sleep", _unexpected_sleep)
+    monkeypatch.setattr("core.loop.cycle.chat.asyncio.sleep", _unexpected_sleep)
 
     class _FakeStore:
         def __init__(self) -> None:
@@ -101,7 +128,7 @@ def test_process_pending_chat_turn_skips_pop_when_dispatcher_is_saturated():
 
 
 async def _process_pending_chat_turn_skips_pop_when_dispatcher_is_saturated():
-    from core.loop.chat import _process_pending_chat_turn
+    from core.loop.cycle.chat import _process_pending_chat_turn
 
     class _FakeStore:
         async def pop_pending_chat_message(self):
@@ -129,7 +156,7 @@ def test_scoped_task_store_get_active_returns_pinned():
 
 
 async def _scoped_task_store_get_active_returns_pinned():
-    from core.loop.task_parallel import _ScopedTaskStore
+    from core.loop.task.parallel import _ScopedTaskStore
 
     # inner store 返回 task_A
     task_a = SimpleNamespace(id=1, goal="goal-A")
@@ -151,7 +178,7 @@ def test_scoped_task_store_delegates_other_methods():
 
 
 async def _scoped_task_store_delegates_other_methods():
-    from core.loop.task_parallel import _ScopedTaskStore
+    from core.loop.task.parallel import _ScopedTaskStore
 
     calls: list[str] = []
 
@@ -186,9 +213,42 @@ async def _scoped_task_store_delegates_other_methods():
     assert "inner_get_active" not in calls
 
 
+def test_scoped_task_store_add_task_forwards_priority_keyword():
+    """并行 wrapper 的 add_task 签名必须与真实 TaskStore 兼容。"""
+    asyncio.run(_scoped_task_store_add_task_forwards_priority_keyword())
+
+
+async def _scoped_task_store_add_task_forwards_priority_keyword():
+    from core.loop.task.parallel import _ScopedTaskStore
+
+    calls: list[dict[str, Any]] = []
+
+    class _InnerStore:
+        async def add_task(self, title, goal="", priority="normal", **kwargs):
+            calls.append({
+                "title": title,
+                "goal": goal,
+                "priority": priority,
+                "kwargs": dict(kwargs),
+            })
+            return 123
+
+    scoped = _ScopedTaskStore(_InnerStore(), cast("Any", SimpleNamespace(id=5, goal="pin")))
+
+    task_id = await scoped.add_task("title", "goal", "critical", source="internal")
+
+    assert task_id == 123
+    assert calls == [{
+        "title": "title",
+        "goal": "goal",
+        "priority": "critical",
+        "kwargs": {"source": "internal"},
+    }]
+
+
 def test_scoped_task_store_does_not_leak_unknown_methods():
     """_ScopedTaskStore 不应再通过 __getattr__ 泄漏父 store 的新增方法。"""
-    from core.loop.task_parallel import _ScopedTaskStore
+    from core.loop.task.parallel import _ScopedTaskStore
 
     class _InnerStore:
         async def delete_fact(self, key):
@@ -209,7 +269,7 @@ def test_run_one_task_dispatch_ctx_pins_own_task():
 
 async def _run_one_task_dispatch_ctx_pins_own_task():
     from core.judgment import JudgmentOutput
-    from core.loop.task_parallel import _run_one_task
+    from core.loop.task.parallel import _run_one_task
     from tools.registry import ToolResult
 
     # inner store 的 get_active() 返回"错误"任务（id=999）
@@ -265,7 +325,7 @@ def test_run_one_task_does_not_inject_task_id_into_task_tool_params():
 
 async def _run_one_task_does_not_inject_task_id_into_task_tool_params():
     from core.judgment import JudgmentOutput
-    from core.loop.task_parallel import _run_one_task
+    from core.loop.task.parallel import _run_one_task
     from tools.registry import ToolResult
 
     class _FakeStore:
@@ -319,7 +379,7 @@ def test_run_one_task_surfaces_terminal_wait_decision_to_parent_history():
 
 async def _run_one_task_surfaces_terminal_wait_decision_to_parent_history():
     from core.judgment import JudgmentOutput
-    from core.loop.task_parallel import _run_one_task
+    from core.loop.task.parallel import _run_one_task
 
     captured_result_json: dict[str, Any] = {}
     status_calls: list[tuple[int, str]] = []
@@ -397,7 +457,7 @@ def test_run_tasks_parallel_each_task_sees_own_active():
 
 async def _run_tasks_parallel_each_task_sees_own_active():
     from core.judgment import JudgmentOutput
-    from core.loop.task_parallel import run_tasks_parallel
+    from core.loop.task.parallel import run_tasks_parallel
     from store.task import TaskStore
     from tools.registry import ToolResult
 
@@ -461,7 +521,7 @@ def test_run_tasks_parallel_reuses_similar_open_task():
 
 
 async def _run_tasks_parallel_reuses_similar_open_task():
-    from core.loop.task_parallel import run_tasks_parallel
+    from core.loop.task.parallel import run_tasks_parallel
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as d:

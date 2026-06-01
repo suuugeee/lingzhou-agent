@@ -1,4 +1,4 @@
-"""tools/subagent_ops.py — 子灵工具。
+"""tools/subagent.py — 子灵工具。
 
 提供两个工具：
   subagent.run    — 派生子灵执行子任务（Tier-0~Tier-2）
@@ -10,7 +10,7 @@ import json
 import logging
 from typing import Any
 
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 _log = logging.getLogger("lingzhou.subagent_ops")
 
@@ -131,19 +131,20 @@ async def subagent_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
     return ToolResult(
         summary=summary,
-        metadata={
-            "subagent_id": result.subagent_id,
-            "goal": result.goal,
-            "ticks_run": result.ticks_run,
-            "completed": result.completed,
-            "error": result.error,
-            "observations": result.observations,
-            "label": result.label,
-            "memory_dir": result.memory_dir,
-            "absorbed_memories_count": len(result.absorbed_memories),
-            # 序列化待合并节点（供 subagent.absorb 读取）
-            "absorbed_memories": result.absorbed_memories,
-        },
+        metadata=tool_metadata(
+            "subagent.run",
+            summary,
+            subagent_id=result.subagent_id,
+            goal=result.goal,
+            ticks_run=result.ticks_run,
+            completed=result.completed,
+            error=result.error,
+            observations=result.observations,
+            label=result.label,
+            memory_dir=result.memory_dir,
+            absorbed_memories_count=len(result.absorbed_memories),
+            absorbed_memories=result.absorbed_memories,
+        ),
         state_delta={
             "subagent_completed": result.completed,
             "subagent_ticks": result.ticks_run,
@@ -245,15 +246,17 @@ async def subagent_absorb(params: dict[str, Any], ctx: ToolContext) -> ToolResul
 
     return ToolResult(
         summary=summary,
-        metadata={
-            "subagent_id": sub_id,
-            "absorbed": absorbed,
-            "selected_total": len(nodes),
-            "requested_total": requested_total,
-            "truncated": truncated,
-            "invalid": invalid,
-            "errors": errors,
-        },
+        metadata=tool_metadata(
+            "subagent.absorb",
+            summary,
+            subagent_id=sub_id,
+            absorbed=absorbed,
+            selected_total=len(nodes),
+            requested_total=requested_total,
+            truncated=truncated,
+            invalid=invalid,
+            errors=errors,
+        ),
         state_delta={"absorbed_memories": absorbed},
     )
 

@@ -263,13 +263,9 @@ def resolve_read_path(path: Path, ctx: ToolContext | None = None) -> Path:
 
 
 def _workspace_dir(ctx: ToolContext) -> Path | None:
-    raw = getattr(getattr(ctx.config, "loop", None), "workspace_dir", "")
-    if not raw:
-        return None
-    try:
-        return Path(str(raw)).expanduser()
-    except (TypeError, ValueError):
-        return None
+    from tools.paths import workspace_dir_from_ctx
+
+    return workspace_dir_from_ctx(ctx)
 
 
 def workspace_candidate_path(path: Path, ctx: ToolContext) -> Path | None:

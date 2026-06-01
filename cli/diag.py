@@ -224,50 +224,29 @@ def _check_database(cfg: Any) -> _CheckResult:
 def _check_config_schema() -> list[_CheckResult]:
     results: list[_CheckResult] = []
     try:
-        from core.loop.startup import (
+        from core.loop.runtime.startup import (
             _MEMORY_FIELD_PATCHES,
             _THRESHOLDS_FIELD_PATCHES,
-            _patch_config_classes,
+            _missing_config_schema_fields,
         )
-        _config_py = PROJECT_ROOT / "core" / "config.py"
-        _all_patched = _patch_config_classes(_config_py, {
-            "ThresholdsConfig": _THRESHOLDS_FIELD_PATCHES,
-            "MemoryConfig":     _MEMORY_FIELD_PATCHES,
-        })
+
+        missing_all = _missing_config_schema_fields()
         for _cls_name, _patches in [
             ("ThresholdsConfig", _THRESHOLDS_FIELD_PATCHES),
-            ("MemoryConfig",     _MEMORY_FIELD_PATCHES),
+            ("MemoryConfig", _MEMORY_FIELD_PATCHES),
         ]:
-            _injected = _all_patched.get(_cls_name)
-            if _injected:
+            _still_missing = missing_all.get(_cls_name, [])
+            if _still_missing:
                 results.append(_CheckResult(
                     ok=False,
-                    message=f"  {_WARN} {_cls_name} 缺少字段，已自动注入: {_injected}",
+                    message=f"  {_FAIL} {_cls_name} 缺少字段: {_still_missing}  [dim](请 git pull 升级 core.config_models)[/dim]",
+                    issue=f"core.config_models 版本过旧，{_cls_name} 缺少: {_still_missing}",
                 ))
             else:
-                try:
-                    import importlib as _il
-                    _mod = _il.import_module("core.config")
-                    _cls = getattr(_mod, _cls_name)
-                    _inst = _cls()
-                    _still_missing = [f for f in _patches if not hasattr(_inst, f)]
-                    if _still_missing:
-                        results.append(_CheckResult(
-                            ok=False,
-                            message=f"  {_FAIL} {_cls_name} 缺少字段: {_still_missing}  [dim](自动注入失败，请手动 git pull)[/dim]",
-                            issue=f"core/config.py 版本过旧，{_cls_name} 缺少: {_still_missing}",
-                        ))
-                    else:
-                        results.append(_CheckResult(
-                            ok=True,
-                            message=f"  {_OK} {_cls_name} schema 兼容  [dim]({len(_patches)} 个关键字段均存在)[/dim]",
-                        ))
-                except Exception as _e:
-                    results.append(_CheckResult(
-                        ok=False,
-                        message=f"  {_FAIL} {_cls_name} schema 检查失败: {_e}",
-                        issue=f"{_cls_name} 无法导入: {_e}",
-                    ))
+                results.append(_CheckResult(
+                    ok=True,
+                    message=f"  {_OK} {_cls_name} schema  [dim]({len(_patches)} 个关键字段均存在)[/dim]",
+                ))
     except Exception as e:
         results.append(_CheckResult(
             ok=False,

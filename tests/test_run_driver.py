@@ -21,12 +21,12 @@ def _make_execution_mock():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_run_driver_importable():
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
     assert RunDriver is not None
 
 
 def test_run_driver_has_dispatch_and_default_tier():
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
     execution = _make_execution_mock()
     driver = RunDriver(execution)
     assert callable(driver.dispatch)
@@ -35,7 +35,7 @@ def test_run_driver_has_dispatch_and_default_tier():
 
 @pytest.mark.asyncio
 async def test_run_driver_dispatch_delegates_to_execution():
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
     execution = _make_execution_mock()
     driver = RunDriver(execution)
 
@@ -62,14 +62,14 @@ async def test_run_driver_dispatch_delegates_to_execution():
     ("multimodal", "task_default"),
 ])
 def test_default_tier_for_known_run_types(run_type, expected_tier):
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
     execution = _make_execution_mock()
     driver = RunDriver(execution)
     assert driver.default_tier_for(run_type) == expected_tier
 
 
 def test_default_tier_for_unknown_run_type_returns_task_default():
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
     execution = _make_execution_mock()
     driver = RunDriver(execution)
     assert driver.default_tier_for("nonexistent_type") == "task_default"
@@ -81,11 +81,11 @@ def test_default_tier_for_unknown_run_type_returns_task_default():
 
 def test_run_driver_merges_catalog_routing_over_defaults():
     """catalog 路由应覆盖内置默认值。"""
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
 
     # 模拟 catalog 返回自定义映射
     custom_routing = {"judge": "reasoner", "custom_type": "reader"}
-    with patch("core.loop.run_driver._load_catalog_routing", return_value=custom_routing):
+    with patch("core.loop.runs.driver._load_catalog_routing", return_value=custom_routing):
         # 重新导入来触发 __init__ 中的加载逻辑
         execution = _make_execution_mock()
         driver = RunDriver(execution)
@@ -97,9 +97,9 @@ def test_run_driver_merges_catalog_routing_over_defaults():
 
 def test_run_driver_falls_back_to_defaults_when_catalog_empty():
     """catalog 为空时完全使用内置默认值。"""
-    from core.loop.run_driver import _RUN_TYPE_DEFAULT_TIER, RunDriver
+    from core.loop.runs.driver import _RUN_TYPE_DEFAULT_TIER, RunDriver
 
-    with patch("core.loop.run_driver._load_catalog_routing", return_value={}):
+    with patch("core.loop.runs.driver._load_catalog_routing", return_value={}):
         execution = _make_execution_mock()
         driver = RunDriver(execution)
 
@@ -110,9 +110,9 @@ def test_run_driver_falls_back_to_defaults_when_catalog_empty():
 
 def test_run_driver_tolerates_catalog_load_failure():
     """catalog 加载失败时不应抛出异常，回退到内置默认值。"""
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
 
-    with patch("core.loop.run_driver._load_catalog_routing", side_effect=RuntimeError("load fail")):
+    with patch("core.loop.runs.driver._load_catalog_routing", side_effect=RuntimeError("load fail")):
         # _load_catalog_routing 内部已 catch；但万一 RunDriver.__init__ 自身抛，也应处理
         try:
             execution = _make_execution_mock()
@@ -245,7 +245,7 @@ async def test_cancel_stale_runs_ignores_terminal_runs():
 
 def test_run_driver_merges_config_run_type_routing_over_catalog():
     """Config.run_type_routing 的值应覆盖 catalog 内置映射。"""
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
 
     execution = _make_execution_mock()
     # 模拟 cfg.run_type_routing = {"judge": "reasoner"}
@@ -253,7 +253,7 @@ def test_run_driver_merges_config_run_type_routing_over_catalog():
     cfg_mock.run_type_routing = {"judge": "reasoner"}
     execution._cfg = cfg_mock
 
-    with patch("core.loop.run_driver._load_catalog_routing", return_value={"judge": "reader"}):
+    with patch("core.loop.runs.driver._load_catalog_routing", return_value={"judge": "reader"}):
         driver = RunDriver(execution)
 
     # Config 覆盖优先于 catalog，judge → reasoner
@@ -262,14 +262,14 @@ def test_run_driver_merges_config_run_type_routing_over_catalog():
 
 def test_run_driver_config_routing_empty_falls_back_to_catalog():
     """Config.run_type_routing 为空时不影响 catalog 结果。"""
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
 
     execution = _make_execution_mock()
     cfg_mock = MagicMock()
     cfg_mock.run_type_routing = {}
     execution._cfg = cfg_mock
 
-    with patch("core.loop.run_driver._load_catalog_routing", return_value={"probe": "reader"}):
+    with patch("core.loop.runs.driver._load_catalog_routing", return_value={"probe": "reader"}):
         driver = RunDriver(execution)
 
     assert driver.default_tier_for("probe") == "reader"
@@ -398,8 +398,8 @@ async def test_poll_pending_runs_claims_judge_run_and_enqueues_tick():
     import tempfile
     from pathlib import Path
 
-    from core.loop.dispatcher import TickJob
-    from core.loop.run_driver import RunDriver
+    from core.loop.cycle.dispatcher import TickJob
+    from core.loop.runs.driver import RunDriver
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -444,7 +444,7 @@ async def test_poll_pending_runs_returns_none_when_no_pending():
     import tempfile
     from pathlib import Path
 
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -468,7 +468,7 @@ async def test_poll_pending_runs_skips_non_judge_run():
     import tempfile
     from pathlib import Path
 
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -498,7 +498,7 @@ async def test_poll_pending_runs_restores_pending_when_queue_full():
     import tempfile
     from pathlib import Path
 
-    from core.loop.run_driver import RunDriver
+    from core.loop.runs.driver import RunDriver
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -536,8 +536,8 @@ async def test_poll_pending_runs_uses_focus_task_chain_over_global_active():
     import tempfile
     from pathlib import Path
 
-    from core.loop.focus import claim_focus_task
-    from core.loop.run_driver import RunDriver
+    from core.loop.cycle.focus import claim_focus_task
+    from core.loop.runs.driver import RunDriver
     from store.task import TaskStore
 
     with tempfile.TemporaryDirectory() as tmpdir:

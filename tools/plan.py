@@ -9,7 +9,15 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from tools.registry import CAPS_EXEMPT, ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import (
+    CAPS_EXEMPT,
+    ToolContext,
+    ToolManifest,
+    ToolParam,
+    ToolResult,
+    tool,
+    tool_metadata,
+)
 
 
 @tool(ToolManifest(
@@ -119,6 +127,13 @@ async def task_plan(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     return ToolResult(
         summary="\n".join(lines),
         evidence=json.dumps(clean_plan, ensure_ascii=False),
-        metadata={"task_id": task.id, "steps": len(clean_plan), "done": done, "pending": pending},
+        metadata=tool_metadata(
+            "task.plan",
+            f"task.plan id={task.id} steps={len(clean_plan)} done={done}",
+            task_id=task.id,
+            steps=len(clean_plan),
+            done=done,
+            pending=pending,
+        ),
         state_delta={"plan_steps": len(clean_plan), "plan_done": done},
     )

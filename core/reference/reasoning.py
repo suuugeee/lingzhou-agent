@@ -8,6 +8,8 @@ from .common import _REASON_SYSTEM, _SPEAKER_REASON_SYSTEM, normalize_text
 
 def categorize_llm_error_code(err_text: str) -> str:
     text = (err_text or "").lower()
+    if " 413 " in f" {text} " or "request entity too large" in text or "payload too large" in text:
+        return "413"
     if " 429 " in f" {text} " or "too many requests" in text:
         return "429"
     if " 401 " in f" {text} " or "unauthorized" in text:
@@ -34,7 +36,7 @@ async def reason_about_candidates_with_llm(
 
     cand_lines: list[str] = []
     for nid, nd in candidates.items():
-        body_snippet = nd.get("body", "").replace("\n", " ")
+        body_snippet = str(nd.get("body", "")).replace("\n", " ")
         created_at = str(nd.get("created_at", ""))
         cand_lines.append(
             f'  {{"id":"{nid}","kind":"{nd.get("kind","")}","title":"{nd.get("title","")}","created_at":"{created_at}","body":"{body_snippet}"}}'

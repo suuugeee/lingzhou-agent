@@ -92,7 +92,7 @@ pending → running → succeeded
 
 - 同一任务链（`task_id` 相同）上的 Run 仍严格串行。
 - 不同任务链的 Run 可在 `max_concurrent_ticks` 范围内并发。
-- 并发判断逻辑复用现有 `loop/task_parallel.py` 隔离机制。
+- 并发判断逻辑复用现有 `loop/task/parallel.py` 隔离机制。
 
 ### 3.3 生命史账本与 Run 对齐
 
@@ -114,7 +114,7 @@ pending → running → succeeded
 
 ### Phase 3b：RunDriver 路由层
 
-- 新建 `core/loop/run_driver.py`：接收 `Run`，按 `run_type` 分发到对应执行器
+- 新建 `core/loop/runs/driver.py`：接收 `Run`，按 `run_type` 分发到对应执行器
 - tick.py 委托给 `RunDriver`，保持单入口
 - 验证：现有测试 + `tests/test_run_driver.py`
 

@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import functools
 import json
 import re
 from dataclasses import dataclass, field
@@ -47,15 +48,58 @@ def is_plan_alignment_exempt(tool_id: str, registry: ToolRegistry | None = None)
     return tool_has_capability(registry, tool_id, "plan_alignment_exempt")
 
 
+def registry_manifest_signature(registry: ToolRegistry) -> tuple[
+    tuple[str, str | None, str, tuple[str, ...]],
+    ...,
+]:
+    """工具清单签名（名称 + 分层相关 manifest 字段），供路由上下文缓存复用。"""
+    return tuple(
+        (
+            manifest.name,
+            manifest.prefer_tier,
+            manifest.progress_category or "",
+            tuple(sorted(manifest.capabilities or ())),
+        )
+        for manifest in sorted(registry.list_manifests(), key=lambda item: item.name)
+    )
+
+
+def _tier_for_manifest_fields(
+    prefer_tier: str | None,
+    progress_category: str,
+    caps: tuple[str, ...],
+) -> str:
+    if prefer_tier in {"reader", "reasoner", "repair"}:
+        return prefer_tier
+    cap_set = set(caps)
+    if "completion_mutation" in cap_set or "completion_verify" in cap_set or "multimodal" in cap_set:
+        return "reasoner"
+    if "completion_info_only" in cap_set and "completion_mutation" not in cap_set:
+        return "reader"
+    if progress_category in {"mutation", "io"}:
+        return "reasoner"
+    if progress_category == "info":
+        return "reader"
+    return "reasoner"
+
+
+@functools.lru_cache(maxsize=16)
+def _tool_tier_mapping_cached(
+    signature: tuple[tuple[str, str | None, str, tuple[str, ...]], ...],
+) -> dict[str, tuple[str, ...]]:
+    mapping: dict[str, list[str]] = {"reader": [], "reasoner": [], "repair": []}
+    for name, prefer_tier, progress_category, caps in signature:
+        tier = _tier_for_manifest_fields(prefer_tier, progress_category, caps)
+        mapping.setdefault(tier, []).append(name)
+    return {tier: tuple(sorted(dict.fromkeys(names))) for tier, names in mapping.items()}
+
+
 def tool_tier_mapping(registry: ToolRegistry | None = None) -> dict[str, list[str]]:
     mapping: dict[str, list[str]] = {"reader": [], "reasoner": [], "repair": []}
     if registry is None:
         return mapping
-    for manifest in registry.list_manifests():
-        mapping.setdefault(tool_tier(manifest.name, registry), []).append(manifest.name)
-    for tier in mapping:
-        mapping[tier] = sorted(dict.fromkeys(mapping[tier]))
-    return mapping
+    cached = _tool_tier_mapping_cached(registry_manifest_signature(registry))
+    return {tier: list(names) for tier, names in cached.items()}
 
 
 def _structured_tool_history_window(tool_history: list[dict[str, Any]]) -> tuple[str, str]:
@@ -234,35 +278,36 @@ class JudgmentOutput:
     def from_llm(cls, text: str) -> JudgmentOutput:
         """从 LLM 输出文本解析 JudgmentOutput，容错处理。"""
         original = text.strip()
-        text = original
-        text = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
-        if not text.startswith("{") and not text.startswith("```"):
+        # 保留 original 不做机械删改；仅用于解析时做局部清洗，避免 think block 破坏 JSON 提取。
+        parse_text = original
+        parse_text = re.sub(r"<think>[\s\S]*?</think>", "", parse_text).strip()
+        if not parse_text.startswith("{") and not parse_text.startswith("```"):
             stripped = re.sub(
                 r"(?:^|\n)(?:[\w./_-]+/\s*\n)?(?:[│├└──+|\\]+[ \t]+[\w.+/_-]+[ \t]*(?:#.*)?\n)+",
                 "\n",
-                text,
+                parse_text,
             )
-            if stripped != text:
-                text = stripped.strip()
-        if not text or ("{" not in text and "decision" not in text):
+            if stripped != parse_text:
+                parse_text = stripped.strip()
+        if not parse_text or ("{" not in parse_text and "decision" not in parse_text):
             return cls(decision="pause", rationale=f"LLM 输出解析失败（非JSON）: {original}")
-        match = re.search(r"```(?:json)?\s*([\s\S]+?)```", text)
+        match = re.search(r"```(?:json)?\s*([\s\S]+?)```", parse_text)
         if match:
-            text = match.group(1).strip()
+            parse_text = match.group(1).strip()
         else:
-            start = text.find("{")
-            end = text.rfind("}")
+            start = parse_text.find("{")
+            end = parse_text.rfind("}")
             if start != -1 and end != -1:
-                text = text[start:end + 1]
+                parse_text = parse_text[start:end + 1]
         try:
-            data = json.loads(text)
+            data = json.loads(parse_text)
         except json.JSONDecodeError:
-            fixed = text
+            fixed = parse_text
             fixed = re.sub(r',\s*([}\]])', r'\1', fixed)
             try:
                 data = json.loads(fixed)
             except json.JSONDecodeError:
-                return cls(decision="pause", rationale=f"LLM 输出解析失败: {text}")
+                return cls(decision="pause", rationale=f"LLM 输出解析失败: {parse_text}")
 
         return cls(
             decision=cls._coerce_text(data.get("decision", "wait")).lower(),

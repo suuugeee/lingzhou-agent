@@ -40,11 +40,15 @@ def _startup_config_log_line(
     routing_items = ", ".join(
         f"{tier}={model_ref}" for tier, model_ref in sorted(routing.items())
     ) if routing else "(none)"
-    return (
-        "[startup] "
-        f"channel={channel} daemon={daemon} "
-        f"requested_config={requested} effective_config={effective} "
-        f"main_model={getattr(cfg, 'model', '')} routing={routing_items}"
+    from core.log_fields import format_log_fields
+
+    return "[startup] " + format_log_fields(
+        channel=channel,
+        daemon=daemon,
+        requested_config=str(requested),
+        effective_config=str(effective),
+        model_ref=getattr(cfg, "model", ""),
+        routing=routing_items,
     )
 
 

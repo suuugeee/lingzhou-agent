@@ -40,6 +40,10 @@ if TYPE_CHECKING:
 _log = logging.getLogger("lingzhou.provider.openai_compat")
 
 
+def _token_state(token: str) -> str:
+    return "nonempty" if str(token or "").strip() else "empty"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 模式适配器：用数据封装 openai / copilot 的差异，消除 if/elif 堆砌
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -119,13 +123,17 @@ class _CopilotMode(_ModeAdapter):
 
         cache = load_copilot_token_cache()
         if (not force_refresh) and cache and (time.time() * 1000) < cache.expires_at_ms - 300_000:
-            self._copilot_token = cache.token
-            self._copilot_token_expires = cache.expires_at_ms / 1000
-            self._copilot_api_base_url = (
-                _derive_copilot_api_base_url_from_token(cache.token)
-                or DEFAULT_COPILOT_API_BASE_URL
-            )
-            return self._copilot_token
+            cached_token = str(getattr(cache, "token", "") or "").strip()
+            # 缓存里若是空 token，会导致 Authorization: Bearer 触发 httpx Illegal header value。
+            # 将其视为无效缓存，继续走 token exchange 刷新。
+            if cached_token:
+                self._copilot_token = cached_token
+                self._copilot_token_expires = cache.expires_at_ms / 1000
+                self._copilot_api_base_url = (
+                    _derive_copilot_api_base_url_from_token(cached_token)
+                    or DEFAULT_COPILOT_API_BASE_URL
+                )
+                return self._copilot_token
 
         try:
             async with httpx.AsyncClient(timeout=15.0) as tmp:
@@ -195,7 +203,14 @@ def _build_mode_adapter(
         return _CopilotMode(base_url, resolved.token, timeout)
 
     # openai 模式（百炼、DeepSeek 等标准 OpenAI 兼容）
-    api_key = os.environ.get(api_key_env, "")
+    if not api_key_env.strip():
+        raise OSError("OpenAI 兼容 provider 缺少 api_key_env，不能构造空 Authorization header")
+    api_key = os.environ.get(api_key_env, "").strip()
+    if not api_key:
+        raise OSError(
+            f"OpenAI 兼容 provider 的环境变量 {api_key_env!r} 为空，"
+            "请设置该变量或从 routing/model_fallbacks 中移除此 provider。"
+        )
     return _OpenAIMode(base_url, api_key, timeout)
 
 
@@ -255,7 +270,17 @@ class OpenAICompatProvider:
         _ensure_token = self.__dict__.get("_ensure_copilot_token")
         _request_headers = self.__dict__.get("_copilot_request_headers")
         if callable(_ensure_token) and callable(_request_headers):
-            token = await cast("Callable[..., Awaitable[str]]", _ensure_token)()
+            token = str(await cast("Callable[..., Awaitable[str]]", _ensure_token)()).strip()
+            mode = str(getattr(self, "_provider_mode", "unknown"))
+            model_ref = str(getattr(self, "model_ref", getattr(self, "_model", "unknown")))
+            _log.debug(
+                "[copilot.auth] source=fallback mode=%s model_ref=%s token_state=%s",
+                mode,
+                model_ref,
+                _token_state(token),
+            )
+            if not token:
+                raise RuntimeError("Copilot token 为空，拒绝构造 Authorization header")
             return cast("Callable[[str], dict[str, str]]", _request_headers)(token)
         return {}
 
@@ -263,12 +288,32 @@ class OpenAICompatProvider:
         """Force-refresh Copilot token and return new request headers."""
         _m = self.__dict__.get("_mode")
         if _m is not None and hasattr(_m, "_ensure_copilot_token"):
-            token = await _m._ensure_copilot_token(force_refresh=True)  # type: ignore[union-attr]
+            token = str(await _m._ensure_copilot_token(force_refresh=True)).strip()  # type: ignore[union-attr]
+            mode = str(getattr(self, "_provider_mode", "unknown"))
+            model_ref = str(getattr(self, "model_ref", getattr(self, "_model", "unknown")))
+            _log.debug(
+                "[copilot.auth] source=refresh mode=%s model_ref=%s token_state=%s",
+                mode,
+                model_ref,
+                _token_state(token),
+            )
+            if not token:
+                raise RuntimeError("Copilot token refresh 返回空 token")
             return _build_copilot_ide_headers() | {"Authorization": f"Bearer {token}"}
         _ensure_token = self.__dict__.get("_ensure_copilot_token")
         _request_headers = self.__dict__.get("_copilot_request_headers")
         if callable(_ensure_token) and callable(_request_headers):
-            token = await cast("Callable[..., Awaitable[str]]", _ensure_token)(force_refresh=True)
+            token = str(await cast("Callable[..., Awaitable[str]]", _ensure_token)(force_refresh=True)).strip()
+            mode = str(getattr(self, "_provider_mode", "unknown"))
+            model_ref = str(getattr(self, "model_ref", getattr(self, "_model", "unknown")))
+            _log.debug(
+                "[copilot.auth] source=fallback-refresh mode=%s model_ref=%s token_state=%s",
+                mode,
+                model_ref,
+                _token_state(token),
+            )
+            if not token:
+                raise RuntimeError("Copilot token refresh 返回空 token")
             return cast("Callable[[str], dict[str, str]]", _request_headers)(token)
         return await self._request_headers()
 
@@ -393,10 +438,35 @@ class OpenAICompatProvider:
     def _record_usage(self, usage: dict | None) -> None:
         if not isinstance(usage, dict):
             return
+        # 不同 OpenAI-compat / Copilot / 第三方网关对 usage 字段命名不一致。
+        # 统一归一化到 prompt/completion/total，避免日志里 usage_prompt=0 误导预算与健康度判断。
+        def _as_int(v: Any) -> int:
+            try:
+                return int(v or 0)
+            except Exception:
+                return 0
+
+        native_present = any(key in usage for key in ("prompt_tokens", "completion_tokens", "total_tokens"))
+        alias_present = any(key in usage for key in ("input_tokens", "output_tokens", "tokens"))
+        usage_source = "native" if native_present else ("alias" if alias_present else "missing")
+
+        prompt = _as_int(usage.get("prompt_tokens"))
+        completion = _as_int(usage.get("completion_tokens"))
+        total = _as_int(usage.get("total_tokens"))
+
+        # 常见别名（部分代理/网关用 input/output）
+        if prompt <= 0:
+            prompt = _as_int(usage.get("input_tokens"))
+        if completion <= 0:
+            completion = _as_int(usage.get("output_tokens"))
+        if total <= 0:
+            total = _as_int(usage.get("tokens")) or (prompt + completion)
+
         self.last_usage = {
-            "prompt_tokens": int(usage.get("prompt_tokens") or 0),
-            "completion_tokens": int(usage.get("completion_tokens") or 0),
-            "total_tokens": int(usage.get("total_tokens") or 0),
+            "prompt_tokens": max(0, prompt),
+            "completion_tokens": max(0, completion),
+            "total_tokens": max(0, total),
+            "usage_source": usage_source,
         }
 
     def _model_api(self) -> str:
@@ -492,10 +562,9 @@ class OpenAICompatProvider:
             )
         msg = choices[0]["message"]
         content: str = msg.get("content") or ""
-        if msg.get("reasoning_content"):
-            return content
-        import re as _re
-        return _re.sub(r"<think>[\s\S]*?</think>", "", content).strip()
+        # 不在 provider 层机械剥离 <think>...</think>。
+        # 若下游只需要 JSON，会在解析层做“仅用于解析”的局部清洗；保留原文有利于感知与取证。
+        return content
 
     async def close(self) -> None:
         await self._client.aclose()
@@ -549,7 +618,18 @@ class OpenAICompatProvider:
                     "Copilot embeddings 需要先完成 GitHub token → Copilot token exchange。\n"
                     "请先执行一次 chat 请求，或关闭 embedding_model。"
                 )
-            headers = _build_copilot_ide_headers() | {"Authorization": f"Bearer {cache.token}"}
+            token = str(cache.token or "").strip()
+            mode = str(getattr(self, "_provider_mode", "unknown"))
+            model_ref = str(getattr(self, "model_ref", getattr(self, "_model", "unknown")))
+            _log.debug(
+                "[copilot.auth] source=embed-cache mode=%s model_ref=%s token_state=%s",
+                mode,
+                model_ref,
+                _token_state(token),
+            )
+            if not token:
+                raise RuntimeError("Copilot token 缓存为空，无法调用 embeddings")
+            headers = _build_copilot_ide_headers() | {"Authorization": f"Bearer {token}"}
 
         target = self._resolve_url(self._mode.embedding_url())
         resp = self._sync_client.post(

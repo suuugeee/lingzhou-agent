@@ -1,9 +1,22 @@
-"""tools/task_ops.py — 任务管理工具（供 LLM 通过判断层调用）。"""
+"""tools/task.py — 任务管理工具（供 LLM 通过判断层调用）。"""
 from __future__ import annotations
 
 import logging as _logging
 import uuid
 from typing import Any
+
+from store.semantic import MemoryNode
+from store.task import build_task_similarity_query
+from tools.registry import (
+    CAPS_EXEMPT,
+    ToolContext,
+    ToolManifest,
+    ToolParam,
+    ToolResult,
+    tool,
+    tool_has_capability,
+    tool_metadata,
+)
 
 _log_task_ops = _logging.getLogger("lingzhou.task_ops")
 
@@ -36,21 +49,22 @@ async def _resolve_task(task_id: Any, ctx: ToolContext):
         _log_task_ops.warning("[task_ops] task_id=%d 不存在，回退到活跃任务", tid)
         return await _resolve_active_task(ctx)
 
-from store.semantic import MemoryNode
-from store.task import build_task_similarity_query
-from tools.registry import (
-    CAPS_EXEMPT,
-    ToolContext,
-    ToolManifest,
-    ToolParam,
-    ToolResult,
-    tool,
-    tool_has_capability,
-)
 
-
-def _task_metadata(task: Any) -> dict[str, Any]:
-    return {"task_id": task.id, "chain_id": task.chain_id}
+def _task_metadata(
+    task: Any,
+    *,
+    tool_name: str = "task",
+    log_summary: str | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    summary = log_summary or f"{tool_name} task_id={task.id}"
+    return tool_metadata(
+        tool_name,
+        summary,
+        task_id=task.id,
+        chain_id=task.chain_id,
+        **extra,
+    )
 
 
 def _similar_task_source_filters(source: str) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
@@ -97,7 +111,12 @@ async def task_advance(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         evidence=f"task_id={task.id} next_step={next_step}",
         resource_key=str(task.id),
         state_delta={"task_status": "in_progress", "next_step": next_step},
-        metadata={"task_id": task.id, "next_step": next_step, "chain_id": task.chain_id},
+        metadata=_task_metadata(
+            task,
+            tool_name="task.advance",
+            log_summary=f"task.advance id={task.id} status=in_progress",
+            next_step=next_step,
+        ),
     )
 
 
@@ -120,7 +139,7 @@ async def task_advance(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
 async def task_add(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     title = (params.get("title") or "").strip()
     if not title:
-        return ToolResult(summary="任务标题不能为空", skipped=True)
+        return ToolResult(summary="任务标题不能为空", skipped=True, error="ValidationError")
     goal = params.get("goal") or ""
     priority = params.get("priority") or "normal"
     source = (params.get("source") or "external").strip() or "external"
@@ -155,19 +174,22 @@ async def task_add(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                     "chain_id": existing.chain_id,
                     "source": existing.source,
                 },
-                metadata={
-                    "task_id": existing.id,
-                    "chain_id": existing.chain_id,
-                    "parent_task_id": existing.parent_task_id,
-                    "source": existing.source,
-                    "reused_existing_task": True,
-                    "similarity_score": round(score, 3),
-                },
+                metadata=_task_metadata(
+                    existing,
+                    tool_name="task.add",
+                    log_summary=(
+                        f"task.add reused id={existing.id} score={score:.2f}"
+                    ),
+                    parent_task_id=existing.parent_task_id,
+                    source=existing.source,
+                    reused_existing_task=True,
+                    similarity_score=round(score, 3),
+                ),
             )
     task_id = await ctx.task_store.add_task(
         title,
         goal,
-        priority,
+        priority=priority,
         source=source,
         chain_id=chain_id,
         parent_task_id=str(parent.id) if parent else (str(parent_task_id or "") if parent_task_id else ""),
@@ -180,7 +202,14 @@ async def task_add(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         evidence=f"task_id={task_id}",
         resource_key=str(task_id),
         state_delta={"task_status": "pending", "chain_id": chain_id, "source": source},
-        metadata={"task_id": task_id, "chain_id": chain_id, "parent_task_id": str(parent.id) if parent else "", "source": source},
+        metadata=tool_metadata(
+            "task.add",
+            f"task.add id={task_id} title={title[:80]!r}",
+            task_id=task_id,
+            chain_id=chain_id,
+            parent_task_id=str(parent.id) if parent else "",
+            source=source,
+        ),
     )
 
 
@@ -226,7 +255,11 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 ),
                 error="UserInboxPending",
                 skipped=True,
-                metadata={"task_id": task.id},
+                metadata=_task_metadata(
+                    task,
+                    tool_name="task.complete",
+                    log_summary=f"task.complete rejected UserInboxPending id={task.id}",
+                ),
             )
         recent_runs = await ctx.task_store.list_runs(task_id=task.id, limit=12)
         recent_tools = [
@@ -244,7 +277,12 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 ),
                 error="InsufficientEvidence",
                 skipped=True,
-                metadata={"task_id": task.id, "recent_tools": recent_tools},
+                metadata=_task_metadata(
+                    task,
+                    tool_name="task.complete",
+                    log_summary=f"task.complete rejected InsufficientEvidence id={task.id}",
+                    recent_tools=recent_tools,
+                ),
             )
 
         # 新门槛：如果最近有 mutation（manifest 标注 completion_mutation），
@@ -272,11 +310,15 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                     ),
                     error="MutationWithoutVerification",
                     skipped=True,
-                    metadata={
-                        "task_id": task.id,
-                        "last_mutation": recent_tools[latest_mutation_idx],
-                        "post_mutation_tools": post_mutation_tools,
-                    },
+                    metadata=_task_metadata(
+                        task,
+                        tool_name="task.complete",
+                        log_summary=(
+                            f"task.complete rejected MutationWithoutVerification id={task.id}"
+                        ),
+                        last_mutation=recent_tools[latest_mutation_idx],
+                        post_mutation_tools=post_mutation_tools,
+                    ),
                 )
 
     await ctx.task_store.update_status(task.id, "done", "completed via agent")
@@ -307,7 +349,12 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             evidence=f"task_id={task.id} skill_node={node.id}",
             resource_key=str(task.id),
             state_delta={"task_status": "done", "compiled_skill": node.id},
-            metadata={"task_id": task.id, "skill_node": node.id, "chain_id": task.chain_id},
+            metadata=_task_metadata(
+                task,
+                tool_name="task.complete",
+                log_summary=f"task.complete id={task.id} compiled_skill={node.id}",
+                skill_node=node.id,
+            ),
         )
 
     return ToolResult(
@@ -315,7 +362,11 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         evidence=f"task_id={task.id}",
         resource_key=str(task.id),
         state_delta={"task_status": "done"},
-        metadata={"task_id": task.id, "chain_id": task.chain_id},
+        metadata=_task_metadata(
+            task,
+            tool_name="task.complete",
+            log_summary=f"task.complete id={task.id}",
+        ),
     )
 
 
@@ -344,7 +395,15 @@ async def task_list(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         wait = f" wait={t.wait_kind}:{t.wait_key}" if t.wait_kind else ""
         step = f" step={t.current_step}" if t.current_step else ""
         lines.append(f"[{t.id}] [{t.status}] [{t.priority}] {t.title}{chain}{step}{wait}")
-    return ToolResult(summary="\n".join(lines), evidence=f"count={len(tasks)}", metadata={"count": len(tasks)})
+    return ToolResult(
+        summary="\n".join(lines),
+        evidence=f"count={len(tasks)}",
+        metadata=tool_metadata(
+            "task.list",
+            f"task.list count={len(tasks)} status={status or 'all'}",
+            count=len(tasks),
+        ),
+    )
 
 
 @tool(ToolManifest(
@@ -390,7 +449,11 @@ async def task_update(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         evidence=f"task_id={task.id} next_step={next_step}",
         resource_key=str(task.id),
         state_delta={"task_status": status, "next_step": next_step, "current_step": current_step, "model_tier": model_tier},
-        metadata={"task_id": task.id, "chain_id": task.chain_id},
+        metadata=_task_metadata(
+            task,
+            tool_name="task.update",
+            log_summary=f"task.update id={task.id} status={status}",
+        ),
     )
 
 
@@ -426,7 +489,12 @@ async def task_fail(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         evidence=f"task_id={task.id} reason={reason}",
         resource_key=str(task.id),
         state_delta={"task_status": "failed", "reason": reason},
-        metadata={"task_id": task.id, "chain_id": task.chain_id},
+        metadata=_task_metadata(
+            task,
+            tool_name="task.fail",
+            log_summary=f"task.fail id={task.id}",
+            reason=reason,
+        ),
     )
 
 
@@ -468,7 +536,13 @@ async def task_wait(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         summary=f"任务 [{task.id}] 已进入 waiting: {wait_kind}{'/' + wait_key if wait_key else ''}",
         resource_key=str(task.id),
         state_delta={"task_status": "waiting", "wait_kind": wait_kind, "wait_key": wait_key},
-        metadata={"task_id": task.id, "chain_id": task.chain_id, "wait_kind": wait_kind, "wait_key": wait_key},
+        metadata=_task_metadata(
+            task,
+            tool_name="task.wait",
+            log_summary=f"task.wait id={task.id} kind={wait_kind}",
+            wait_kind=wait_kind,
+            wait_key=wait_key,
+        ),
     )
 
 
@@ -502,7 +576,12 @@ async def task_resume(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         summary=f"任务 [{task.id}] 已恢复: status={status}",
         resource_key=str(task.id),
         state_delta={"task_status": status, "current_step": current_step if current_step is not None else task.current_step, "next_step": next_step if next_step is not None else task.next_step},
-        metadata={"task_id": task.id, "chain_id": task.chain_id, "status": status},
+        metadata=_task_metadata(
+            task,
+            tool_name="task.resume",
+            log_summary=f"task.resume id={task.id} status={status}",
+            status=status,
+        ),
     )
 
 
@@ -533,5 +612,10 @@ async def task_steer(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         evidence=f"task_id={task.id} inbox_count={len(existing)}",
         resource_key=str(task.id),
         state_delta={"inbox_messages": len(existing)},
-        metadata={"task_id": task.id, "inbox_count": len(existing)},
+        metadata=_task_metadata(
+            task,
+            tool_name="task.steer",
+            log_summary=f"task.steer id={task.id} inbox={len(existing)}",
+            inbox_count=len(existing),
+        ),
     )

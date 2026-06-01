@@ -1,4 +1,4 @@
-"""tools/config_ops.py — config.get / config.set 工具（LLM 可自主调参）。
+"""tools/config.py — config.get / config.set 工具（LLM 可自主调参）。
 
 LLM 通过这些工具读取和修改自己的配置，无需人工编辑文件。
 修改后自动触发热重载（loop 检测 mtime 变化）。
@@ -11,7 +11,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool
+from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 CONFIG_PATH = Path("~/.lingzhou/lingzhou.json").expanduser()
 
@@ -201,7 +201,12 @@ async def config_get(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(
             summary=f"{key} = {json.dumps(value, ensure_ascii=False)}\n(source={config_path})",
             evidence=str(value),
-            metadata={"key": key, "value": value},
+            metadata=tool_metadata(
+                "config.get",
+                f"config.get key={key}",
+                key=key,
+                value=value,
+            ),
         )
     except Exception as e:
         return ToolResult(summary=f"读取失败: {e}", error="ConfigError")
@@ -283,7 +288,13 @@ async def config_set(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 f"\n(source={config_path})"
             ),
             evidence=f"{key}={value}",
-            metadata={"key": key, "old": old, "new": value},
+            metadata=tool_metadata(
+                "config.set",
+                f"config.set key={key}",
+                key=key,
+                old=old,
+                new=value,
+            ),
             state_delta={"config_changed": key},
         )
     except Exception as e:
@@ -379,7 +390,12 @@ async def config_list_keys(params: dict[str, Any], ctx: ToolContext) -> ToolResu
         return ToolResult(
             summary=f"共 {total} 个可调键（group={group or 'all'}）：\n{summary}",
             evidence=summary,
-            metadata={"total_keys": total, "group": group or "all"},
+            metadata=tool_metadata(
+                "config.keys",
+                f"config.keys total={total} group={group or 'all'}",
+                total_keys=total,
+                group=group or "all",
+            ),
         )
     except Exception as e:
         return ToolResult(summary=f"列举失败: {e}", error="ConfigError")

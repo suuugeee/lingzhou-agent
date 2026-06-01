@@ -96,7 +96,7 @@ def skills(
     from core.skill import SkillRegistry
 
     cfg = load_cfg(config)
-    skills_dir = Path(cfg.loop.workspace_dir).expanduser() / ("skills-disabled" if disabled else "skills")
+    skills_dir = cfg.workspace_dir / ("skills-disabled" if disabled else "skills")
     reg = SkillRegistry(skills_dir=skills_dir)
     items = [s for s in reg.all_skills() if getattr(s, "origin", "builtin") == "workspace"]
 

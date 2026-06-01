@@ -8,19 +8,23 @@ from typing import TYPE_CHECKING, Any, cast
 
 from store.task import RUNNABLE_TASK_STATUSES
 
-from ..context import (
-    _fmt_config_snapshot,
-    _fmt_evolution_breakers,
-    _fmt_interlocutor_continuity,
-    _fmt_memory_recall,
-    _fmt_memory_system,
-    _fmt_primary_skill,
-    _fmt_skill_catalog,
-    _fmt_skills,
-    _fmt_soul,
+from ..context.facts import (
     _load_context_facts_snapshot,
     _load_durable_failure_snapshot,
 )
+from ..context.sections import (
+    _fmt_config_snapshot,
+    _fmt_interlocutor_continuity,
+    _fmt_memory_recall,
+    _fmt_memory_system,
+    _fmt_soul,
+)
+from ..context.skills import (
+    _fmt_primary_skill,
+    _fmt_skill_catalog,
+    _fmt_skills,
+)
+from ..context.tasks import _fmt_evolution_breakers
 from .sections import (
     _build_context_memory_sections,
     _build_context_state_sections,
@@ -29,7 +33,7 @@ from .sections import (
 )
 
 if TYPE_CHECKING:
-    from core.judgment.runtime import CognitionFrame
+    from core.judgment.frame import CognitionFrame
     from core.perception import (
         CognitiveSignals,
         EmotionState,

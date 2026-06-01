@@ -1,42 +1,21 @@
-"""core/judgment/runtime.py — 判断层（JudgmentLayer 核心类）。
-
-职责：
-1. 组装 bundle（运行时状态 → 结构化 context）
-2. 填入 prompts/judgment.md 模板（{{variable}} 语法）
-3. 调用 LLM provider
-4. 解析 JSON 输出 → JudgmentOutput
-
-数据模型 / 工具常量 / 前置改写函数 → output.py
-解耦原则：此模块不知道工具如何执行，只负责"决定做什么"。
-"""
+"""core/judgment/runtime.py — JudgmentLayer 稳定入口（编排委托 decision.rounds）。"""
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from core.judgment.boundary import normalize_judgment_output as _normalize_judgment_output_fn
+
 from .assembler import JudgmentContextAssembler
-from .context import _clear_context_cache
+from .decision.rounds import (
+    JudgmentRoundDeps,
+    decide_initial,
+)
+from .decision.rounds import (
+    decide_continue as decide_continue_round,
+)
 from .executor import JudgmentExecutor
-from .output import (
-    JudgmentOutput,
-    ModelSelection,
-)
-from .parser import (
-    apply_memory_honesty_guard as _apply_memory_honesty_guard,
-)
-from .parser import (
-    coerce_reply_only_output as _coerce_reply_only_output_fn,
-)
-from .parser import (
-    normalize_reply_pseudo_tool as _normalize_reply_pseudo_tool,
-)
-from .parser import (
-    simulate_safe_output as _simulate_safe_output_fn,
-)
-
-_log = logging.getLogger("lingzhou.judgment")
-
+from .frame import CognitionFrame
+from .output import JudgmentOutput, ModelSelection
 
 if TYPE_CHECKING:
     from core.config import Config
@@ -55,22 +34,6 @@ if TYPE_CHECKING:
     from tools.registry import ToolRegistry
 
 
-# ── 认知基底（传入 decide/assemble_context 的感知+记忆层快照） ────────────────
-
-@dataclass(slots=True)
-class CognitionFrame:
-    """6 个认知基底字段的轻量容器，兼容旧调用点。"""
-
-    percept: Percept
-    wm: WorkingMemory
-    task_store: TaskStore
-    episodic: EpisodicMemory
-    semantic: SemanticMemory
-    emotion: EmotionState
-
-
-# ── 判断层 ─────────────────────────────────────────────────────────────────────
-
 class JudgmentLayer:
     def __init__(
         self,
@@ -81,6 +44,9 @@ class JudgmentLayer:
         self._cfg = cfg
         self._executor = JudgmentExecutor(provider, cfg)
         self._assembler = JudgmentContextAssembler(provider, registry, cfg, executor=self._executor)
+
+    def _round_deps(self) -> JudgmentRoundDeps:
+        return JudgmentRoundDeps(self._assembler, self._executor, self._cfg)
 
     def reload_skills(self) -> None:
         self._assembler.reload_skills()
@@ -115,30 +81,6 @@ class JudgmentLayer:
     def _last_call_meta(self, v: dict[str, Any]) -> None:
         self._executor._last_call_meta = v
 
-    def _finalize_continue_output(
-        self,
-        output: JudgmentOutput,
-        *,
-        reply_only: bool,
-        user_message: str,
-        active_task: Any | None,
-        tool_history: list[dict[str, Any]],
-        selection: ModelSelection,
-    ) -> JudgmentOutput:
-        if reply_only:
-            output = _coerce_reply_only_output_fn(output)
-        applied = ",".join(output.applied_skills) if output.applied_skills else "none"
-        if output.applied_skills:
-            self._assembler._last_applied_skill_names = list(output.applied_skills)
-
-        _log.info(
-            "[judgment.continue] round=%d phase=%s tier=%s model=%s thinking=%s applied_skills=%s decision=%s action=%s",
-            len(tool_history), selection.phase, selection.tier, selection.model_ref,
-            self._executor._last_call_meta["thinking"], applied,
-            output.decision, output.action_label(),
-        )
-        return output
-
     async def decide(
         self,
         frame_or_percept: CognitionFrame | Percept,
@@ -161,107 +103,28 @@ class JudgmentLayer:
         phase: str = "initial",
         registry_override: Any | None = None,
     ) -> JudgmentOutput:
-        """组装上下文，调用 LLM，返回决策。
-
-        thinking_override: 覆盖 cfg.thinking（如 chat 模式用 "low" 加速首轮判断）。
-        routing_overrides: 临时覆盖 tier→model 映射（由 loop.py 从 model_strategy 读取）。
-        registry_override: 临时覆盖本轮可见工具集（如子灵受限工具视图）。
-        """
-        percept, wm, task_store, episodic, semantic, emotion = self._assembler._coerce_frame_args(
+        return await decide_initial(
+            self._round_deps(),
             frame_or_percept,
             wm,
             task_store,
             episodic,
             semantic,
             emotion,
-        )
-        try:
-            # per-tick 清空静态缓存（静态 section 仅在本 tick 复用）
-            self._assembler._context_cache.clear()
-            _clear_context_cache()
-            context_text = await self._assembler._assemble_context(
-                percept, wm, task_store, episodic, semantic, emotion,
-                active_task=active_task,
-                user_message=user_message,
-                chat_id=chat_id,
-                ethos_state=ethos_state,
-                judgment_signals=judgment_signals,
-                hard_boundaries=hard_boundaries,
-                perception_replay=perception_replay,
-                cognitive_signals=cognitive_signals,
-                phase=phase,
-                current_action="",
-                tool_history=None,
-                effective_thinking=thinking_override or self._cfg.thinking,
-                routing_overrides=routing_overrides,
-                registry_override=registry_override,
-            )
-        except Exception as _ctx_exc:
-            _log.exception("[judgment] _assemble_context() 异常，返回 wait 兜底: %s", _ctx_exc)
-            return _simulate_safe_output_fn(
-                failure_count=0,
-                signals=judgment_signals,
-                hard_boundaries=hard_boundaries or [],
-                reason=f"上下文组装异常: {_ctx_exc}",
-            )
-        # 缓存给内层工具循环的续判请求用
-        self._assembler._last_context_text = context_text
-        messages = self._assembler._build_messages(context_text)
-
-        selected_provider, selection = self._executor._select_provider(
-            phase=phase,
+            active_task=active_task,
             user_message=user_message,
+            chat_id=chat_id,
+            ethos_state=ethos_state,
+            judgment_signals=judgment_signals,
+            hard_boundaries=hard_boundaries,
+            perception_replay=perception_replay,
+            cognitive_signals=cognitive_signals,
+            thinking_override=thinking_override,
             prefer_tier=prefer_tier,
-            thinking_override=thinking_override,
             routing_overrides=routing_overrides,
-        )
-        _primary = self._assembler._last_selected_skills[0] if self._assembler._last_selected_skills else None
-        raw, selection, llm_error = await self._executor._chat_with_retry(
-            selected_provider=selected_provider,
-            selection=selection,
-            messages=messages,
             phase=phase,
-            user_message=user_message,
-            thinking_override=thinking_override,
-            routing_overrides=routing_overrides,
-            log_prefix="[judgment]",
-                skills=(
-                    ",".join(skill.name for skill in self._assembler._last_selected_skills[:3])
-                    if self._assembler._last_selected_skills
-                    else "none"
-                ),
-            primary_skill_name=_primary.name if _primary else None,
-            primary_skill_guidance=bool(_primary and getattr(_primary, "guidance", None)),
+            registry_override=registry_override,
         )
-        if raw is None:
-            _err = str(llm_error) or repr(llm_error) if llm_error is not None else "unknown error"
-            return _simulate_safe_output_fn(
-                failure_count=0,
-                signals=judgment_signals,
-                hard_boundaries=hard_boundaries or [],
-                reason=_err,
-            )
-
-        output = JudgmentOutput.from_llm(raw)
-
-        # 解析失败时尝试一次修复，避免因为截断/格式噪声直接进入空转
-        output = await self._normalize_output(
-            output,
-            context_text=context_text,
-            raw=raw,
-            record_parse_failure=task_store.record_failure,
-        )
-        _applied = ",".join(output.applied_skills) if output.applied_skills else "none"
-        if output.applied_skills:
-            self._assembler._last_applied_skill_names = list(output.applied_skills)
-        _log.info(
-            "[judgment] phase=%s tier=%s model=%s thinking=%s applied_skills=%s decision=%s action=%s rationale=%s",
-            selection.phase, selection.tier, selection.model_ref, selection.thinking,
-            _applied,
-            output.decision, output.action_label(), output.rationale or "",
-        )
-
-        return output
 
     async def decide_continue(
         self,
@@ -277,79 +140,20 @@ class JudgmentLayer:
         action_result: Any | None = None,
         emotion_state: dict[str, Any] | None = None,
     ) -> JudgmentOutput:
-        """内层工具循环的续判请求。
-
-        不重践 perception 链路，直接在上次 decide() 缓存的全量上下文后面追加工具历史续判。
-        每次 HTTP 请求与普通请求相同，但输入 token 显著减少（不重发全量感知层）。
-
-        Args:
-            tool_history: [{"tool": str, "params": dict, "result": str}, ...]
-            user_message:  原始用户消息（不再次向 LLM 重复，仅用于选择 provider tier）
-            action_result: _ActionResultSummary 实例（口腔器官前语言消息，reply_only 时注入）
-            emotion_state: 当前情绪状态 dict（reply_only 时注入语气上下文）
-        """
-        if not self._assembler._last_context_text:
-            return JudgmentOutput.wait(reason="[inner-loop] no cached context for continuation")
-        continuation_context = self._assembler._build_continue_context(
+        return await decide_continue_round(
+            self._round_deps(),
             tool_history,
             user_message=user_message,
+            active_task=active_task,
+            prefer_tier=prefer_tier,
+            thinking_override=thinking_override,
+            routing_overrides=routing_overrides,
             reply_only=reply_only,
             wm_delta=wm_delta,
             speech_intent=speech_intent,
             action_result=action_result,
             emotion_state=emotion_state,
         )
-        messages = self._assembler._build_messages(continuation_context)
-
-        current_action = "" if reply_only else str(tool_history[-1].get("tool", "")) if tool_history else ""
-        phase = "reply" if reply_only else "continue"
-        forced_prefer_tier = "reasoner" if reply_only else prefer_tier
-        selected_provider, selection = self._executor._select_provider(
-            phase=phase,
-            user_message=user_message,
-            current_action=current_action,
-            tool_history=tool_history,
-            prefer_tier=forced_prefer_tier,
-            thinking_override=thinking_override,
-            routing_overrides=routing_overrides,
-        )
-        resolved_thinking = thinking_override
-        if resolved_thinking is None and selection.tier == "reasoner" and user_message:
-            resolved_thinking = "low"
-        raw, selection, llm_error = await self._executor._chat_with_retry(
-            selected_provider=selected_provider,
-            selection=selection,
-            messages=messages,
-            phase=phase,
-            user_message=user_message,
-            current_action=current_action,
-            tool_history=tool_history,
-            thinking_override=resolved_thinking,
-            routing_overrides=routing_overrides,
-            fallback_prefer_tier="reasoner" if reply_only else None,
-            log_prefix="[judgment.continue]",
-            skills=self._executor._last_call_meta.get("skills") or "none",
-        )
-        if raw is None:
-            if llm_error is not None:
-                return JudgmentOutput.wait(reason=f"[inner-loop] LLM 不可用: {llm_error!r}")
-            return JudgmentOutput.wait(reason="[inner-loop] LLM returned None")
-
-        output = JudgmentOutput.from_llm(raw)
-        output = await self._normalize_output(
-            output,
-            context_text=continuation_context,
-            raw=raw,
-        )
-        return self._finalize_continue_output(
-            output,
-            reply_only=reply_only,
-            user_message=user_message,
-            active_task=active_task,
-            tool_history=tool_history,
-            selection=selection,
-        )
-
 
     async def _normalize_output(
         self,
@@ -358,19 +162,18 @@ class JudgmentLayer:
         context_text: str,
         raw: str,
         record_parse_failure: Any | None = None,
+        registry: Any | None = None,
+        allow_delegate_tasks: bool = False,
     ) -> JudgmentOutput:
-        if output.rationale.startswith("LLM 输出解析失败"):
-            repaired = await self._executor._repair_output(context_text, raw)
-            if repaired is not None:
-                output = repaired
-            elif record_parse_failure is not None:
-                await record_parse_failure("judgment_parse", output.rationale)
+        return await _normalize_judgment_output_fn(
+            self._executor,
+            output,
+            context_text=context_text,
+            raw=raw,
+            record_parse_failure=record_parse_failure,
+            registry=registry,
+            allow_delegate_tasks=allow_delegate_tasks,
+        )
 
-        output = _normalize_reply_pseudo_tool(output)
-        if output.decision not in ("act", "pause", "wait"):
-            return JudgmentOutput.wait(reason=f"无效 decision: {output.decision!r}")
-        if output.decision == "act" and not output.chosen_action_id \
-                and not output.parallel_actions and not output.delegate_tasks:
-            return JudgmentOutput.wait(reason="act 决策缺少 chosen_action_id")
-        return _apply_memory_honesty_guard(output, context_text=context_text)
 
+__all__ = ["CognitionFrame", "JudgmentLayer", "ModelSelection"]
