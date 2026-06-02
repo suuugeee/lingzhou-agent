@@ -259,8 +259,10 @@ async def remember_speaker(
     merged_lines: list[str] = []
     if existing is not None and existing.body.strip():
         merged_lines.extend([line.strip() for line in existing.body.splitlines() if line.strip()])
+    # snippet 来自现有 body，内嵌换行后 splitlines 会指数展开 body —— 必须折叠并限长
+    _snippet_summary = normalize_text(speaker.snippet or "")[:150]
     additions = [
-        f"画像摘要: {speaker.snippet}" if speaker.snippet else "",
+        f"画像摘要: {_snippet_summary}" if _snippet_summary else "",
         f"识别判断: {speaker.relationship_note}" if speaker.relationship_note else "",
         *[f"识别依据: {item}" for item in speaker.evidence],
         *[f"偏好线索: {item}" for item in cues.get("preferences", [])],

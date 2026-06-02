@@ -25,7 +25,10 @@ def _fmt_memories(memories: list[dict[str, Any]]) -> str:
         score_part = ""
         if isinstance(score, (int, float)):
             score_part = f" (score={float(score):.3f})"
-        lines.append(f"- [{memory['kind']}] {memory['title']}{score_part}: {memory['body']}")
+        body_text = str(memory.get('body') or "")
+        if len(body_text) > 600:
+            body_text = body_text[:600].replace("\n", " ").rstrip() + " ..."
+        lines.append(f"- [{memory['kind']}] {memory['title']}{score_part}: {body_text}")
     return "\n".join(lines)
 
 

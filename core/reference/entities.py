@@ -116,5 +116,9 @@ def format_speaker_section(speaker: ResolvedSpeaker | None) -> str:
         lines.append(f"判断: {speaker.relationship_note}")
     lines.extend(f"- {item}" for item in speaker.evidence)
     if speaker.snippet:
-        lines.append(f"画像记忆: {speaker.snippet}")
+        # 截断防止 snippet（= 历史 body 全文）塞满 LLM prompt
+        snippet_display = speaker.snippet[:500].replace("\n", " ").strip()
+        if len(speaker.snippet) > 500:
+            snippet_display += " ..."
+        lines.append(f"画像记忆: {snippet_display}")
     return "\n".join(lines)

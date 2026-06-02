@@ -348,14 +348,24 @@ def record_run_outcome_memory(
         f"status={status}",
         f"tool={tool_name or 'unknown'}",
     ]
+    _RUN_BODY_FIELD_MAX = 4096
     if progress:
-        body_parts.append(f"progress={progress}")
+        body_parts.append(f"progress={progress[:_RUN_BODY_FIELD_MAX]}")
     if summary:
-        body_parts.append(f"summary={summary}")
+        _s = summary[:_RUN_BODY_FIELD_MAX]
+        if len(summary) > _RUN_BODY_FIELD_MAX:
+            _s += " ...(truncated)"
+        body_parts.append(f"summary={_s}")
     if error:
-        body_parts.append(f"error={error}")
+        _e = error[:_RUN_BODY_FIELD_MAX]
+        if len(error) > _RUN_BODY_FIELD_MAX:
+            _e += " ...(truncated)"
+        body_parts.append(f"error={_e}")
     if evidence:
-        body_parts.append(f"evidence={evidence}")
+        _ev = evidence[:_RUN_BODY_FIELD_MAX]
+        if len(evidence) > _RUN_BODY_FIELD_MAX:
+            _ev += " ...(truncated)"
+        body_parts.append(f"evidence={_ev}")
     activation, valence = run_result_memory_affect(
         memory_cfg,
         is_failure=is_failure,
