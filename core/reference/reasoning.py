@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import inspect
 import json
 import time
+from contextlib import suppress
 from typing import Any
 
 from .common import _REASON_SYSTEM, _SPEAKER_REASON_SYSTEM, normalize_text
@@ -10,6 +12,7 @@ from .common import _REASON_SYSTEM, _SPEAKER_REASON_SYSTEM, normalize_text
 _ENTITY_BODY_SNIPPET_LIMIT = 240
 _SPEAKER_BODY_SNIPPET_LIMIT = 240
 _LLM_REASON_PAYLOAD_SOFT_LIMIT = 12_000
+_REFERENCE_LLM_THINKING = "off"
 
 
 def _compact_prompt_text(text: str, limit: int) -> str:
@@ -18,6 +21,27 @@ def _compact_prompt_text(text: str, limit: int) -> str:
         return normalized
     keep = max(32, limit - 4)
     return normalized[:keep].rstrip() + " ..."
+
+
+def _provider_accepts_thinking_override(provider: Any) -> bool:
+    with suppress(Exception):
+        params = inspect.signature(provider.chat).parameters
+        return "thinking_override" in params
+    return True
+
+
+async def _call_reference_llm(
+    resolver: object,
+    messages: list[Any],
+) -> str:
+    provider = resolver._provider
+    if provider is None:
+        raise RuntimeError("reference provider unavailable")
+
+    kwargs: dict[str, Any] = {"temperature": resolver._reason_temperature}
+    if _provider_accepts_thinking_override(provider):
+        kwargs["thinking_override"] = _REFERENCE_LLM_THINKING
+    return await provider.chat(messages, **kwargs)
 
 
 def categorize_llm_error_code(err_text: str) -> str:
@@ -76,12 +100,12 @@ async def reason_about_candidates_with_llm(
         return []
 
     try:
-        raw = await resolver._provider.chat(
+        raw = await _call_reference_llm(
+            resolver,
             [
                 LLMMessage(role="system", content=_REASON_SYSTEM),
                 LLMMessage(role="user", content=user_content),
             ],
-            temperature=resolver._reason_temperature,
         )
     except Exception as exc:
         err_text = str(exc) or repr(exc)
@@ -218,12 +242,12 @@ async def reason_about_speaker_with_llm(
         return {}
 
     try:
-        raw = await resolver._provider.chat(
+        raw = await _call_reference_llm(
+            resolver,
             [
                 LLMMessage(role="system", content=_SPEAKER_REASON_SYSTEM),
                 LLMMessage(role="user", content=user_content),
             ],
-            temperature=resolver._reason_temperature,
         )
     except Exception as exc:
         err_text = str(exc) or repr(exc)

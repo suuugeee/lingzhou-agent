@@ -2,9 +2,51 @@ from __future__ import annotations
 
 from typing import Any
 
-from .common import chat_handle_tag, normalize_text
+from .common import chat_handle_tag, normalize_text, split_text_sentences
 from .extraction import extract_identity_cues
 from .models import ExtractedSignals
+
+
+_SPEAKER_CONTINUITY_MAX_QUERIES = 4
+_SPEAKER_CONTINUITY_MAX_CHARS = 96
+
+
+def _speaker_continuity_queries(
+    chat_continuity: str,
+    *,
+    chat_id: str = "",
+    source_hint: str = "",
+) -> list[str]:
+    text = normalize_text(chat_continuity)
+    if not text:
+        return []
+
+    queries: list[str] = []
+
+    def _add(query: str) -> None:
+        normalized = normalize_text(query)
+        if not normalized:
+            return
+        if len(normalized) > _SPEAKER_CONTINUITY_MAX_CHARS:
+            normalized = normalized[-_SPEAKER_CONTINUITY_MAX_CHARS :].strip()
+        if normalized and normalized not in queries:
+            queries.append(normalized)
+
+    continuity_cues = extract_identity_cues(text, chat_id=chat_id, source_hint=source_hint)
+    for query in [
+        *continuity_cues.get("names", []),
+        *continuity_cues.get("preferences", []),
+        *continuity_cues.get("explicit", []),
+    ]:
+        _add(query)
+        if len(queries) >= _SPEAKER_CONTINUITY_MAX_QUERIES:
+            return queries
+
+    for sentence in reversed(split_text_sentences(text)):
+        _add(sentence)
+        if len(queries) >= _SPEAKER_CONTINUITY_MAX_QUERIES:
+            break
+    return queries
 
 
 def retrieve_candidates(
@@ -98,7 +140,20 @@ def retrieve_speaker_candidates(
         _add(_retrieve_profiles(chat_id, top_k=2), "handle_text")
 
     if chat_continuity.strip():
-        _add(_retrieve_profiles(chat_continuity, top_k=2), "chat_continuity")
+        continuity_queries = _speaker_continuity_queries(
+            chat_continuity,
+            chat_id=chat_id,
+            source_hint=source_hint,
+        )
+        log = getattr(resolver, "_log", None)
+        if log is not None:
+            log.info(
+                "[reference.speaker] continuity_queries=%d chat_continuity_chars=%d",
+                len(continuity_queries),
+                len(chat_continuity),
+            )
+        for query in continuity_queries:
+            _add(_retrieve_profiles(query, top_k=1), "chat_continuity")
 
     for trait in cues.get("source_traits", []):
         _add(_retrieve_profiles(trait, top_k=1), "source_trait")

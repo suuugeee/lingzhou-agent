@@ -407,6 +407,72 @@ async def test_reference_resolver_llm_reason_compacts_large_candidate_body():
     assert '"created_at":"2026-05-22T08:00:00+00:00"' in captured[0]
 
 
+@pytest.mark.asyncio
+async def test_reference_resolver_llm_reason_forces_thinking_off_when_supported():
+    from core.reference import ReferenceResolver
+
+    captured_thinking: list[str | None] = []
+
+    class ProviderStub:
+        async def chat(self, messages, temperature=None, thinking_override=None):
+            captured_thinking.append(thinking_override)
+            return "[]"
+
+    resolver = ReferenceResolver(provider=cast("Any", ProviderStub()))
+    await resolver._reason_about_candidates_with_llm(
+        "昨天那个方案",
+        {
+            "node-1": {
+                "id": "node-1",
+                "kind": "plan",
+                "title": "方案A",
+                "body": "继续方案A",
+                "created_at": "2026-05-22T08:00:00+00:00",
+            }
+        },
+    )
+
+    assert captured_thinking == ["off"]
+
+
+def test_reference_resolver_speaker_candidates_do_not_query_full_chat_continuity():
+    from core.reference import ReferenceResolver
+
+    queried: list[str] = []
+
+    class SemanticStub:
+        def get(self, node_id):
+            return None
+
+        def retrieve(self, query, top_k=5, kind=None, tag=None):
+            queried.append(str(query))
+            return []
+
+    resolver = ReferenceResolver()
+    chat_continuity = (
+        "请叫我小懒。以后叫我小懒。记住我是 lingzhou-story 的维护者。\n" +
+        "这是一些无关背景。" * 400
+    )
+
+    resolver._retrieve_speaker_candidates(
+        "你好，小懒。",
+        cast("Any", SemanticStub()),
+        chat_id="wechat:o9cq809oa2SPg0JzMRyhRqH0EAWo@im.wechat",
+        recent_turns=[
+            {"role": "user", "content": "请叫我小懒"},
+            {"role": "assistant_reply", "content": "好的，小懒"},
+            {"role": "user", "content": "记住我是 lingzhou-story 的维护者"},
+        ],
+        chat_continuity=chat_continuity,
+        cached_profile_id="interlocutor-profile-08d33d65b799",
+        source_hint="gateway webhook agent",
+    )
+
+    assert queried
+    assert chat_continuity not in queried
+    assert max(len(item) for item in queried) < 200
+
+
 def test_compute_judgment_signals_uses_configured_thresholds():
     from core.perception.signals import compute_judgment_signals
 
