@@ -470,6 +470,7 @@ def test_reference_resolver_speaker_candidates_do_not_query_full_chat_continuity
 
     assert queried
     assert chat_continuity not in queried
+    assert "wechat:o9cq809oa2SPg0JzMRyhRqH0EAWo@im.wechat" not in queried
     assert max(len(item) for item in queried) < 200
 
 

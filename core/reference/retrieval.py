@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .common import chat_handle_tag, normalize_text, split_text_sentences
@@ -47,6 +48,29 @@ def _speaker_continuity_queries(
         if len(queries) >= _SPEAKER_CONTINUITY_MAX_QUERIES:
             break
     return queries
+
+
+def _retrieve_profiles_by_exact_tag(
+    semantic: Any,
+    tag: str,
+    *,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    normalized_tag = str(tag or "").strip()
+    if not normalized_tag:
+        return []
+
+    db_session = getattr(semantic, "_db_session", None)
+    load_filtered = getattr(semantic, "_load_filtered", None)
+    if callable(db_session) and callable(load_filtered):
+        try:
+            with db_session():
+                nodes = load_filtered(kind="interlocutor", tag=normalized_tag, limit=top_k)
+            return [node.to_dict() for node in nodes]
+        except Exception:
+            pass
+
+    return list(semantic.retrieve(normalized_tag, top_k=top_k, kind="interlocutor", tag=normalized_tag))
 
 
 def retrieve_candidates(
@@ -98,6 +122,7 @@ def retrieve_speaker_candidates(
 ) -> tuple[dict[str, dict[str, Any]], dict[str, list[str]]]:
     cues = extract_identity_cues(message, chat_id=chat_id, source_hint=source_hint)
     candidates: dict[str, dict[str, Any]] = {}
+    log = getattr(resolver, "_log", None)
 
     def _retrieve_profiles(query: str, *, top_k: int, tag: str | None = None) -> list[dict[str, Any]]:
         normalized = query.strip()
@@ -136,8 +161,16 @@ def retrieve_speaker_candidates(
 
     if chat_id:
         handle_tag = chat_handle_tag(chat_id)
-        _add(_retrieve_profiles(chat_id, top_k=2, tag=handle_tag), "handle_tag")
-        _add(_retrieve_profiles(chat_id, top_k=2), "handle_text")
+        handle_t0 = time.perf_counter()
+        handle_nodes = _retrieve_profiles_by_exact_tag(semantic, handle_tag, top_k=2)
+        if log is not None:
+            log.info(
+                "[reference.speaker] handle_lookup dt=%.3fs candidates=%d chat_id_chars=%d",
+                time.perf_counter() - handle_t0,
+                len(handle_nodes),
+                len(chat_id),
+            )
+        _add(handle_nodes, "handle_tag")
 
     if chat_continuity.strip():
         continuity_queries = _speaker_continuity_queries(
@@ -145,7 +178,6 @@ def retrieve_speaker_candidates(
             chat_id=chat_id,
             source_hint=source_hint,
         )
-        log = getattr(resolver, "_log", None)
         if log is not None:
             log.info(
                 "[reference.speaker] continuity_queries=%d chat_continuity_chars=%d",
