@@ -139,7 +139,10 @@ class MemoryNode:
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)  # type: ignore[return-value]
+        d: dict[str, Any] = asdict(self)  # type: ignore[return-value]
+        body = d.get("body") or ""
+        d["body_preview"] = body[:300].replace("\n", " ").strip() if len(body) > 300 else body
+        return d
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> MemoryNode:

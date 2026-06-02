@@ -9,8 +9,6 @@ from typing import Any
 from .common import _REASON_SYSTEM, _SPEAKER_REASON_SYSTEM, normalize_text
 
 
-_ENTITY_BODY_SNIPPET_LIMIT = 240
-_SPEAKER_BODY_SNIPPET_LIMIT = 240
 _LLM_REASON_PAYLOAD_SOFT_LIMIT = 12_000
 _REFERENCE_LLM_THINKING = "off"
 
@@ -74,7 +72,7 @@ async def reason_about_candidates_with_llm(
 
     cand_lines: list[str] = []
     for nid, nd in candidates.items():
-        body_snippet = _compact_prompt_text(str(nd.get("body", "")), _ENTITY_BODY_SNIPPET_LIMIT)
+        body_snippet = str(nd.get("body_preview") or "")
         created_at = str(nd.get("created_at", ""))
         cand_lines.append(
             f'  {{"id":"{nid}","kind":"{nd.get("kind","")}","title":"{nd.get("title","")}","created_at":"{created_at}","body":"{body_snippet}"}}'
@@ -154,7 +152,7 @@ async def reason_about_speaker_with_llm(
     cues = cues or {"names": [], "preferences": [], "explicit": []}
     candidate_lines: list[str] = []
     for node_id, node in candidates.items():
-        body_snippet = _compact_prompt_text(str(node.get("body") or ""), _SPEAKER_BODY_SNIPPET_LIMIT)
+        body_snippet = str(node.get("body_preview") or "")
         candidate_lines.append(
             json.dumps(
                 {

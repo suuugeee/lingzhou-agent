@@ -50,7 +50,7 @@ def resolve_speaker_locally(
         node_id=str(node.get("id") or ""),
         title=str(node.get("title") or default_interlocutor_title(chat_id)),
         confidence=round(confidence, 2),
-        snippet=str(node.get("body") or ""),
+        snippet=str(node.get("body_preview") or node.get("body") or ""),
         evidence=[f"本地多线索命中：{', '.join(node.get('_sig', []))}"] if node.get("_sig") else [],
         relationship_note="多线索画像匹配",
         signal_types=list(node.get("_sig") or []),
@@ -173,7 +173,7 @@ async def resolve_current_speaker(
                 node_id=node_id,
                 title=title,
                 confidence=confidence,
-                snippet=str(node.get("body") or ""),
+                snippet=str(node.get("body_preview") or node.get("body") or ""),
                 evidence=evidence,
                 relationship_note=note,
                 signal_types=list(node.get("_sig") or []),
@@ -259,10 +259,7 @@ async def remember_speaker(
     merged_lines: list[str] = []
     if existing is not None and existing.body.strip():
         merged_lines.extend([line.strip() for line in existing.body.splitlines() if line.strip()])
-    # snippet 来自现有 body，内嵌换行后 splitlines 会指数展开 body —— 必须折叠并限长
-    _snippet_summary = normalize_text(speaker.snippet or "")[:150]
     additions = [
-        f"画像摘要: {_snippet_summary}" if _snippet_summary else "",
         f"识别判断: {speaker.relationship_note}" if speaker.relationship_note else "",
         *[f"识别依据: {item}" for item in speaker.evidence],
         *[f"偏好线索: {item}" for item in cues.get("preferences", [])],
