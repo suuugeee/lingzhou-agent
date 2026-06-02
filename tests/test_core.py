@@ -474,6 +474,38 @@ def test_reference_resolver_speaker_candidates_do_not_query_full_chat_continuity
     assert max(len(item) for item in queried) < 200
 
 
+def test_reference_resolver_speaker_candidates_skip_raw_message_and_recent_turn_fulltext_queries():
+    from core.reference import ReferenceResolver
+
+    queried: list[str] = []
+
+    class SemanticStub:
+        def get(self, node_id):
+            return None
+
+        def retrieve(self, query, top_k=5, kind=None, tag=None):
+            queried.append(str(query))
+            return []
+
+    resolver = ReferenceResolver()
+    message = "这是一个很长的普通问题，只是在继续讨论部署和接口细节，没有任何自我介绍或记忆要求。"
+    recent_turn = "上一轮也只是继续讨论部署步骤和报错现象，没有请叫我、记住、以后用这类身份线索。"
+
+    resolver._retrieve_speaker_candidates(
+        message,
+        cast("Any", SemanticStub()),
+        chat_id="wechat:chat-1",
+        recent_turns=[
+            {"role": "user", "content": recent_turn},
+            {"role": "assistant_reply", "content": "好的，我继续分析部署报错。"},
+        ],
+        source_hint="gateway webhook agent",
+    )
+
+    assert message not in queried
+    assert recent_turn not in queried
+
+
 def test_compute_judgment_signals_uses_configured_thresholds():
     from core.perception.signals import compute_judgment_signals
 

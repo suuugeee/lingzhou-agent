@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
 from .common import chat_handle_tag, normalize_text, split_text_sentences
 from .extraction import extract_identity_cues
@@ -10,6 +10,37 @@ from .models import ExtractedSignals
 
 _SPEAKER_CONTINUITY_MAX_QUERIES = 4
 _SPEAKER_CONTINUITY_MAX_CHARS = 96
+_SPEAKER_LOG_QUERY_PREVIEW_CHARS = 48
+
+
+def _speaker_identity_queries_from_cues(cues: dict[str, list[str]], *, max_queries: int = _SPEAKER_CONTINUITY_MAX_QUERIES) -> list[str]:
+    queries: list[str] = []
+
+    def _add(query: str) -> None:
+        normalized = normalize_text(query)
+        if not normalized:
+            return
+        if len(normalized) > _SPEAKER_CONTINUITY_MAX_CHARS:
+            normalized = normalized[-_SPEAKER_CONTINUITY_MAX_CHARS :].strip()
+        if normalized and normalized not in queries:
+            queries.append(normalized)
+
+    for query in [
+        *cues.get("names", []),
+        *cues.get("preferences", []),
+        *cues.get("explicit", []),
+    ]:
+        _add(query)
+        if len(queries) >= max_queries:
+            break
+    return queries
+
+
+def _speaker_query_preview(query: str) -> str:
+    normalized = normalize_text(query)
+    if len(normalized) <= _SPEAKER_LOG_QUERY_PREVIEW_CHARS:
+        return normalized
+    return normalized[:_SPEAKER_LOG_QUERY_PREVIEW_CHARS].rstrip() + " ..."
 
 
 def _speaker_continuity_queries(
@@ -22,7 +53,10 @@ def _speaker_continuity_queries(
     if not text:
         return []
 
-    queries: list[str] = []
+    continuity_cues = extract_identity_cues(text, chat_id=chat_id, source_hint=source_hint)
+    queries = _speaker_identity_queries_from_cues(continuity_cues)
+    if len(queries) >= _SPEAKER_CONTINUITY_MAX_QUERIES:
+        return queries
 
     def _add(query: str) -> None:
         normalized = normalize_text(query)
@@ -32,16 +66,6 @@ def _speaker_continuity_queries(
             normalized = normalized[-_SPEAKER_CONTINUITY_MAX_CHARS :].strip()
         if normalized and normalized not in queries:
             queries.append(normalized)
-
-    continuity_cues = extract_identity_cues(text, chat_id=chat_id, source_hint=source_hint)
-    for query in [
-        *continuity_cues.get("names", []),
-        *continuity_cues.get("preferences", []),
-        *continuity_cues.get("explicit", []),
-    ]:
-        _add(query)
-        if len(queries) >= _SPEAKER_CONTINUITY_MAX_QUERIES:
-            return queries
 
     for sentence in reversed(split_text_sentences(text)):
         _add(sentence)
@@ -60,17 +84,32 @@ def _retrieve_profiles_by_exact_tag(
     if not normalized_tag:
         return []
 
-    db_session = getattr(semantic, "_db_session", None)
-    load_filtered = getattr(semantic, "_load_filtered", None)
+    db_session = cast(Any, getattr(semantic, "_db_session", None))
+    load_filtered = cast(Any, getattr(semantic, "_load_filtered", None))
     if callable(db_session) and callable(load_filtered):
         try:
-            with db_session():
-                nodes = load_filtered(kind="interlocutor", tag=normalized_tag, limit=top_k)
-            return [node.to_dict() for node in nodes]
+            with cast(Any, db_session)():
+                nodes = cast(list[Any], load_filtered(kind="interlocutor", tag=normalized_tag, limit=top_k))
+            return [cast(Any, node).to_dict() for node in nodes]
         except Exception:
             pass
 
     return list(semantic.retrieve(normalized_tag, top_k=top_k, kind="interlocutor", tag=normalized_tag))
+
+
+def _retrieve_profiles_by_name(
+    semantic: Any,
+    name: str,
+    *,
+    top_k: int,
+) -> list[dict[str, Any]]:
+    normalized = normalize_text(name)
+    if not normalized:
+        return []
+    nodes = _retrieve_profiles_by_exact_tag(semantic, f"alias:{normalized}", top_k=top_k)
+    if nodes:
+        return nodes
+    return list(semantic.retrieve(normalized, top_k=top_k, kind="interlocutor"))
 
 
 def retrieve_candidates(
@@ -132,6 +171,54 @@ def retrieve_speaker_candidates(
         nodes.extend(semantic.retrieve(normalized, top_k=top_k, kind="interlocutor", tag=tag))
         return nodes
 
+    def _lookup_query(
+        query: str,
+        *,
+        top_k: int,
+        signal: str,
+        tag: str | None = None,
+    ) -> list[dict[str, Any]]:
+        lookup_t0 = time.perf_counter()
+        nodes = _retrieve_profiles(query, top_k=top_k, tag=tag)
+        if log is not None:
+            log.info(
+                "[reference.speaker] lookup signal=%s dt=%.3fs candidates=%d chars=%d preview=%s",
+                signal,
+                time.perf_counter() - lookup_t0,
+                len(nodes),
+                len(query),
+                _speaker_query_preview(query),
+            )
+        return nodes
+
+    def _lookup_name(name: str, *, top_k: int, signal: str) -> list[dict[str, Any]]:
+        lookup_t0 = time.perf_counter()
+        nodes = _retrieve_profiles_by_name(semantic, name, top_k=top_k)
+        if log is not None:
+            log.info(
+                "[reference.speaker] lookup signal=%s dt=%.3fs candidates=%d chars=%d preview=%s",
+                signal,
+                time.perf_counter() - lookup_t0,
+                len(nodes),
+                len(name),
+                _speaker_query_preview(name),
+            )
+        return nodes
+
+    def _lookup_exact_tag(tag: str, *, top_k: int, signal: str) -> list[dict[str, Any]]:
+        lookup_t0 = time.perf_counter()
+        nodes = _retrieve_profiles_by_exact_tag(semantic, tag, top_k=top_k)
+        if log is not None:
+            log.info(
+                "[reference.speaker] lookup signal=%s dt=%.3fs candidates=%d chars=%d preview=%s",
+                signal,
+                time.perf_counter() - lookup_t0,
+                len(nodes),
+                len(tag),
+                _speaker_query_preview(tag),
+            )
+        return nodes
+
     def _add(nodes: list[dict[str, Any]], signal: str) -> None:
         for raw in nodes:
             node_id = str(raw.get("id") or "").strip()
@@ -153,11 +240,11 @@ def retrieve_speaker_candidates(
         if cached is not None and cached.kind == "interlocutor":
             _add([cached.to_dict()], "cached")
 
-    if message.strip():
-        _add(_retrieve_profiles(message, top_k=3), "message")
-
     for name in cues["names"]:
-        _add(_retrieve_profiles(name, top_k=3), "self_name")
+        _add(_lookup_name(name, top_k=3, signal="self_name"), "self_name")
+
+    for query in [*cues.get("preferences", []), *cues.get("explicit", [])]:
+        _add(_lookup_query(query, top_k=1, signal="message_identity"), "message_identity")
 
     if chat_id:
         handle_tag = chat_handle_tag(chat_id)
@@ -185,15 +272,22 @@ def retrieve_speaker_candidates(
                 len(chat_continuity),
             )
         for query in continuity_queries:
-            _add(_retrieve_profiles(query, top_k=1), "chat_continuity")
+            if query in cues.get("names", []):
+                _add(_lookup_name(query, top_k=1, signal="chat_continuity"), "chat_continuity")
+            else:
+                _add(_lookup_query(query, top_k=1, signal="chat_continuity"), "chat_continuity")
 
     for trait in cues.get("source_traits", []):
-        _add(_retrieve_profiles(trait, top_k=1), "source_trait")
+        _add(_lookup_exact_tag(trait, top_k=1, signal="source_trait"), "source_trait")
 
     for turn in (recent_turns or [])[-4:]:
         content = normalize_text(str(turn.get("content") or ""))
         if not content:
             continue
-        _add(_retrieve_profiles(content, top_k=1), "recent_turn")
+        turn_cues = extract_identity_cues(content, chat_id=chat_id, source_hint=source_hint)
+        for name in turn_cues.get("names", []):
+            _add(_lookup_name(name, top_k=1, signal="recent_turn"), "recent_turn")
+        for query in [*turn_cues.get("preferences", []), *turn_cues.get("explicit", [])]:
+            _add(_lookup_query(query, top_k=1, signal="recent_turn"), "recent_turn")
 
     return dict(candidates), cues
