@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from .models import ResolvedEntity, ResolvedSpeaker
@@ -15,14 +16,33 @@ async def resolve_entities(
     if not message or not message.strip():
         return []
 
+    log = getattr(resolver, "_log", None)
+    total_t0 = time.perf_counter()
     sigs = resolver.extract_signals(message)
+    candidates_t0 = time.perf_counter()
     candidates = resolver._retrieve_candidates(message, sigs, semantic, episodic)
+    if log is not None:
+        log.info(
+            "[reference.entities] candidates_ready dt=%.3fs candidates=%d topic_anchors=%d",
+            time.perf_counter() - candidates_t0,
+            len(candidates),
+            len(getattr(sigs, "topic_anchors", []) or []),
+        )
     if not candidates:
+        if log is not None:
+            log.info("[reference.entities] no_candidates total_dt=%.3fs", time.perf_counter() - total_t0)
         return []
 
     llm_results: list[dict[str, Any]] = []
     if resolver._provider is not None:
+        llm_t0 = time.perf_counter()
         llm_results = await reason_about_candidates_with_llm(resolver, message, candidates)
+        if log is not None:
+            log.info(
+                "[reference.entities] llm_reason_done dt=%.3fs results=%d",
+                time.perf_counter() - llm_t0,
+                len(llm_results),
+            )
 
     entities: list[ResolvedEntity] = []
 
@@ -65,6 +85,13 @@ async def resolve_entities(
             )
 
     entities.sort(key=lambda e: e.confidence, reverse=True)
+    if log is not None:
+        log.info(
+            "[reference.entities] resolved total_dt=%.3fs entities=%d mode=%s",
+            time.perf_counter() - total_t0,
+            len(entities),
+            "llm" if llm_results else "local",
+        )
     return entities
 
 

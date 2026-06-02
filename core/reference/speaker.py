@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from core.metabolic import StateProposal
@@ -111,6 +112,9 @@ async def resolve_current_speaker(
     if not normalize_text(message):
         return None
 
+    log = getattr(resolver, "_log", None)
+    total_t0 = time.perf_counter()
+    candidates_t0 = time.perf_counter()
     candidates, cues = retrieve_speaker_candidates(
         resolver,
         message,
@@ -121,9 +125,23 @@ async def resolve_current_speaker(
         source_hint=source_hint,
         cached_profile_id=cached_profile_id,
     )
+    if log is not None:
+        log.info(
+            "[reference.speaker] candidates_ready dt=%.3fs candidates=%d names=%d preferences=%d explicit=%d source_traits=%d recent_turns=%d chat_continuity_chars=%d cached_profile=%s",
+            time.perf_counter() - candidates_t0,
+            len(candidates),
+            len(cues.get("names", [])),
+            len(cues.get("preferences", [])),
+            len(cues.get("explicit", [])),
+            len(cues.get("source_traits", [])),
+            len((recent_turns or [])[-4:]),
+            len(chat_continuity),
+            cached_profile_id or "",
+        )
 
     llm_result: dict[str, Any] = {}
     if resolver._provider is not None and (candidates or any(cues.values()) or chat_continuity.strip() or interlocutor_continuity.strip()):
+        llm_t0 = time.perf_counter()
         llm_result = await reason_about_speaker_with_llm(
             resolver,
             message,
@@ -135,6 +153,12 @@ async def resolve_current_speaker(
             source_hint=source_hint,
             cues=cues,
         )
+        if log is not None:
+            log.info(
+                "[reference.speaker] llm_reason_done dt=%.3fs result_keys=%s",
+                time.perf_counter() - llm_t0,
+                sorted(llm_result.keys()),
+            )
 
     if llm_result:
         node_id = str(llm_result.get("node_id") or "").strip()
@@ -170,8 +194,17 @@ async def resolve_current_speaker(
                     provisional.evidence = evidence
                 if note:
                     provisional.relationship_note = note
+                if log is not None:
+                    log.info(
+                        "[reference.speaker] resolved total_dt=%.3fs mode=llm_new node=%s confidence=%.2f",
+                        time.perf_counter() - total_t0,
+                        provisional.node_id,
+                        provisional.confidence,
+                    )
             return provisional
         if node_id == "UNKNOWN":
+            if log is not None:
+                log.info("[reference.speaker] resolved total_dt=%.3fs mode=llm_unknown", time.perf_counter() - total_t0)
             return None
 
     resolved = resolve_speaker_locally(
@@ -182,8 +215,24 @@ async def resolve_current_speaker(
         cached_profile_id=cached_profile_id,
     )
     if resolved is not None:
+        if log is not None:
+            log.info(
+                "[reference.speaker] resolved total_dt=%.3fs mode=local node=%s confidence=%.2f",
+                time.perf_counter() - total_t0,
+                resolved.node_id,
+                resolved.confidence,
+            )
         return resolved
-    return build_provisional_speaker(message, cues=cues, chat_id=chat_id)
+    provisional = build_provisional_speaker(message, cues=cues, chat_id=chat_id)
+    if log is not None:
+        log.info(
+            "[reference.speaker] resolved total_dt=%.3fs mode=%s node=%s confidence=%.2f",
+            time.perf_counter() - total_t0,
+            "provisional" if provisional is not None else "none",
+            getattr(provisional, "node_id", "") if provisional is not None else "",
+            float(getattr(provisional, "confidence", 0.0) or 0.0),
+        )
+    return provisional
 
 
 async def remember_speaker(

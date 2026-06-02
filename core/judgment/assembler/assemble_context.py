@@ -4,6 +4,7 @@ import asyncio
 import functools
 import json
 import logging
+import time
 from typing import TYPE_CHECKING, Any, cast
 
 from store.task import RUNNABLE_TASK_STATUSES
@@ -145,6 +146,7 @@ async def _load_context_artifacts(
 ) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
     task_id_str = str(task.id) if task else None
+    gather_t0 = time.perf_counter()
     futures: list[tuple[str, Any]] = [
         ("episodic_text", loop.run_in_executor(None, episodic.load_for_context, task_id_str, assembler._cfg.memory.episodic_n_recent)),
         ("chat_continuity", loop.run_in_executor(None, episodic.load_for_chat_context, resolved_chat_id, assembler._cfg.memory.episodic_n_recent) if resolved_chat_id else None),
@@ -185,6 +187,16 @@ async def _load_context_artifacts(
         raise error
     if data.get("chat_continuity", "").strip() == data.get("episodic_text", "").strip():
         data["chat_continuity"] = ""
+    _log.info(
+        "[context] base_artifacts_ready dt=%.3fs task=%s chat=%s episodic_chars=%d chat_continuity_chars=%d recent_turns=%d chat_memories=%d",
+        time.perf_counter() - gather_t0,
+        task_id_str or "",
+        resolved_chat_id or "",
+        len(str(data.get("episodic_text") or "")),
+        len(str(data.get("chat_continuity") or "")),
+        len(data.get("recent_turns") or []),
+        len(data.get("chat_memories") or []),
+    )
     similar_tasks: list[Any] = []
     if include_open_task_overview and str(search_query or "").strip():
         finder: Any = getattr(task_store, "find_similar_open_tasks", None)
@@ -199,8 +211,15 @@ async def _load_context_artifacts(
                 allowed_sources=("self_drive",) if active_source == "self_drive" else None,
                 excluded_sources=None if active_source == "self_drive" else ("self_drive",),
             )
+    cross_task_t0 = time.perf_counter()
     cross_task_episodic_text = await loop.run_in_executor(None, episodic.search, search_query, 4000, task_id_str) if task_id_str and search_query else ""
-    _log.info("[context] episodic search=%r cross_task_hit=%s", (search_query or ""), bool(cross_task_episodic_text))
+    _log.info(
+        "[context] episodic search=%r cross_task_hit=%s cross_task_chars=%d dt=%.3fs",
+        (search_query or ""),
+        bool(cross_task_episodic_text),
+        len(cross_task_episodic_text),
+        time.perf_counter() - cross_task_t0,
+    )
     return {"data": data, "similar_tasks": similar_tasks, "cross_task_episodic_text": cross_task_episodic_text}
 
 
@@ -216,26 +235,54 @@ async def _resolve_context_references(
     data: dict[str, Any],
 ) -> dict[str, Any]:
     loop = asyncio.get_running_loop()
+    refs_t0 = time.perf_counter()
+    recent_turns = data.get("recent_turns", []) or []
+    chat_continuity_text = str(data.get("chat_continuity", "") or "")
+    _log.info(
+        "[context.refs] start task=%s chat=%s user_chars=%d recent_turns=%d chat_continuity_chars=%d",
+        str(task.id) if task else "",
+        resolved_chat_id or "",
+        len(user_message or ""),
+        len(recent_turns),
+        len(chat_continuity_text),
+    )
+    entities_t0 = time.perf_counter()
     resolved_entities = await assembler._ref_resolver.resolve(user_message, semantic, episodic) if user_message else []
+    _log.info("[context.refs] entities_done dt=%.3fs count=%d", time.perf_counter() - entities_t0, len(resolved_entities))
     speaker_hint = data.get("speaker_hint", ("", False))
     cached_speaker_id = str(speaker_hint[0] or "").strip() if isinstance(speaker_hint, tuple) and len(speaker_hint) >= 2 and speaker_hint[1] else ""
     # 说话人识别是 recognition（认人）而非 recall（读史）。
     # Tulving (1983)：识别激活的是最近 N 条事件，不是全部历史。
     # Cowan (2001)：工作记忆有效单元约 4 个 chunk；5 条事件实用上已足够。
+    speaker_context_t0 = time.perf_counter()
     interlocutor_continuity_text = await loop.run_in_executor(
         None, episodic.load_for_speaker_recognition, cached_speaker_id
     ) if cached_speaker_id else ""
+    _log.info(
+        "[context.refs] speaker_context_done dt=%.3fs cached_speaker=%s continuity_chars=%d",
+        time.perf_counter() - speaker_context_t0,
+        cached_speaker_id or "",
+        len(interlocutor_continuity_text),
+    )
+    speaker_t0 = time.perf_counter()
     resolved_speaker = await assembler._ref_resolver.resolve_current_speaker(
         user_message,
         semantic,
         chat_id=resolved_chat_id or "",
-        recent_turns=data.get("recent_turns", []),
-        chat_continuity=data.get("chat_continuity", ""),
+        recent_turns=recent_turns,
+        chat_continuity=chat_continuity_text,
         interlocutor_continuity=interlocutor_continuity_text,
         cached_profile_id=cached_speaker_id,
         source_hint=str(getattr(task, "source", "") or "") if task else "",
     ) if user_message else None
+    _log.info(
+        "[context.refs] speaker_done dt=%.3fs resolved=%s confidence=%.2f",
+        time.perf_counter() - speaker_t0,
+        getattr(resolved_speaker, "node_id", "") if resolved_speaker is not None else "",
+        float(getattr(resolved_speaker, "confidence", 0.0) or 0.0),
+    )
     if resolved_speaker is not None:
+        remember_t0 = time.perf_counter()
         await assembler._ref_resolver.remember_speaker(
             resolved_speaker,
             semantic,
@@ -245,8 +292,27 @@ async def _resolve_context_references(
             task_id=task.id if task else None,
             source_hint=str(getattr(task, "source", "") or "") if task else "",
         )
+        _log.info(
+            "[context.refs] speaker_remembered dt=%.3fs node=%s",
+            time.perf_counter() - remember_t0,
+            resolved_speaker.node_id,
+        )
         if resolved_speaker.node_id != cached_speaker_id or not interlocutor_continuity_text:
+            refresh_t0 = time.perf_counter()
             interlocutor_continuity_text = await loop.run_in_executor(None, episodic.load_for_interlocutor_context, resolved_speaker.node_id, assembler._cfg.memory.episodic_n_recent)
+            _log.info(
+                "[context.refs] interlocutor_refresh_done dt=%.3fs node=%s continuity_chars=%d",
+                time.perf_counter() - refresh_t0,
+                resolved_speaker.node_id,
+                len(interlocutor_continuity_text),
+            )
+    _log.info(
+        "[context.refs] done dt=%.3fs entities=%d speaker=%s interlocutor_chars=%d",
+        time.perf_counter() - refs_t0,
+        len(resolved_entities),
+        getattr(resolved_speaker, "node_id", "") if resolved_speaker is not None else "",
+        len(interlocutor_continuity_text),
+    )
     return {
         "resolved_entities": resolved_entities,
         "resolved_speaker": resolved_speaker,
@@ -324,15 +390,39 @@ async def _assemble_context(
     recent_turns = loaded["data"].get("recent_turns", [])
     similar_tasks = loaded["similar_tasks"]
     cross_task_episodic_text = loaded["cross_task_episodic_text"]
+    anchors = _build_context_anchors(assembler, task, user_message, resolved_chat_id, refs["resolved_speaker"], failures)
+    memories_t0 = time.perf_counter()
+    _log.info(
+        "[context.stage] semantic_multi_anchor_start task=%s chat=%s anchors=%d",
+        task_id_str or "",
+        resolved_chat_id or "",
+        len(anchors),
+    )
     memories = await asyncio.get_running_loop().run_in_executor(
         None,
         semantic.retrieve_multi_anchor,
-        _build_context_anchors(assembler, task, user_message, resolved_chat_id, refs["resolved_speaker"], failures),
+        anchors,
         assembler._cfg.memory.semantic_top_k,
     )
     semantic_top_score = max((float(item.get("score") or 0.0) for item in memories if isinstance(item.get("score"), (int, float))), default=0.0)
+    _log.info(
+        "[context.stage] semantic_multi_anchor_done dt=%.3fs hits=%d top_score=%.4f",
+        time.perf_counter() - memories_t0,
+        len(memories),
+        semantic_top_score,
+    )
     should_use_daily_fallback = bool(search_query) and not cross_task_episodic_text and (not memories or semantic_top_score < assembler._cfg.memory.daily_recall_semantic_score_threshold)
-    daily_continuity_text = await asyncio.get_running_loop().run_in_executor(None, episodic.search_recent_daily, search_query, assembler._cfg.memory.daily_recall_days, assembler._cfg.memory.daily_recall_max_chars) if should_use_daily_fallback else "（长期记忆或情节命中充分，本轮不额外注入 daily 补短）"
+    if should_use_daily_fallback:
+        daily_t0 = time.perf_counter()
+        daily_continuity_text = await asyncio.get_running_loop().run_in_executor(None, episodic.search_recent_daily, search_query, assembler._cfg.memory.daily_recall_days, assembler._cfg.memory.daily_recall_max_chars)
+        _log.info(
+            "[context.stage] daily_fallback_done dt=%.3fs chars=%d days=%d",
+            time.perf_counter() - daily_t0,
+            len(daily_continuity_text),
+            assembler._cfg.memory.daily_recall_days,
+        )
+    else:
+        daily_continuity_text = "（长期记忆或情节命中充分，本轮不额外注入 daily 补短）"
     recall_mode = "long_term_primary" if memories and semantic_top_score >= assembler._cfg.memory.daily_recall_semantic_score_threshold else ("episodic_cross_task" if cross_task_episodic_text else ("daily_gap_fill" if should_use_daily_fallback and daily_continuity_text and "不额外注入" not in daily_continuity_text else "no_relevant_memory"))
     breaker_facts = await task_store.list_facts(prefix="evolution:breaker:", limit=20)
     config_with_breaker = _fmt_config_snapshot(assembler._cfg) + "\n\n## 进化熔断运行时状态（runtime）\n" + _fmt_evolution_breakers(breaker_facts)
@@ -364,7 +454,7 @@ async def _assemble_context(
     )
     memory_recall_section = _fmt_memory_recall(
         query=search_query or "",
-        anchors=_build_context_anchors(assembler, task, user_message, resolved_chat_id, refs["resolved_speaker"], failures),
+        anchors=anchors,
         chat_id=resolved_chat_id or "",
         chat_memory_hits=len(chat_memories),
         memories=memories,

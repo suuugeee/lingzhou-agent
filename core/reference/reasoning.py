@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from .common import _REASON_SYSTEM, _SPEAKER_REASON_SYSTEM, normalize_text
@@ -44,6 +45,15 @@ async def reason_about_candidates_with_llm(
     cand_block = "[\n" + ",\n".join(cand_lines) + "\n]"
 
     user_content = f'用户消息："{message}"\n\n候选节点：\n{cand_block}'
+    log = getattr(resolver, "_log", None)
+    request_t0 = time.perf_counter()
+    if log is not None:
+        log.info(
+            "[reference.llm] entities_start message_chars=%d candidates=%d payload_chars=%d",
+            len(message),
+            len(candidates),
+            len(user_content),
+        )
 
     try:
         raw = await resolver._provider.chat(
@@ -57,10 +67,16 @@ async def reason_about_candidates_with_llm(
         err_text = str(exc) or repr(exc)
         resolver._last_llm_error = err_text
         resolver._last_llm_error_code = categorize_llm_error_code(err_text)
-        resolver._log.warning("[reference] LLM 推理失败，降级为本地评分: %s", exc)
+        resolver._log.warning("[reference] LLM 推理失败，降级为本地评分 dt=%.3fs: %s", time.perf_counter() - request_t0, exc)
         return []
     resolver._last_llm_error = ""
     resolver._last_llm_error_code = ""
+    if log is not None:
+        log.info(
+            "[reference.llm] entities_done dt=%.3fs raw_chars=%d",
+            time.perf_counter() - request_t0,
+            len(raw or ""),
+        )
 
     raw = raw.strip()
     start = raw.find("[")
@@ -135,6 +151,18 @@ async def reason_about_speaker_with_llm(
             "[\n" + ",\n".join(candidate_lines) + "\n]" if candidate_lines else "[]",
         ]
     )
+    log = getattr(resolver, "_log", None)
+    request_t0 = time.perf_counter()
+    if log is not None:
+        log.info(
+            "[reference.llm] speaker_start message_chars=%d candidates=%d recent_turns=%d chat_continuity_chars=%d interlocutor_continuity_chars=%d payload_chars=%d",
+            len(message),
+            len(candidates),
+            len((recent_turns or [])[-4:]),
+            len(chat_continuity),
+            len(interlocutor_continuity),
+            len(user_content),
+        )
 
     try:
         raw = await resolver._provider.chat(
@@ -148,11 +176,17 @@ async def reason_about_speaker_with_llm(
         err_text = str(exc) or repr(exc)
         resolver._last_llm_error = err_text
         resolver._last_llm_error_code = categorize_llm_error_code(err_text)
-        resolver._log.warning("[reference] 当前说话人识别失败，降级为本地评分: %s", exc)
+        resolver._log.warning("[reference] 当前说话人识别失败，降级为本地评分 dt=%.3fs: %s", time.perf_counter() - request_t0, exc)
         return {}
 
     resolver._last_llm_error = ""
     resolver._last_llm_error_code = ""
+    if log is not None:
+        log.info(
+            "[reference.llm] speaker_done dt=%.3fs raw_chars=%d",
+            time.perf_counter() - request_t0,
+            len(raw or ""),
+        )
     raw = raw.strip()
     start = raw.find("{")
     end = raw.rfind("}")

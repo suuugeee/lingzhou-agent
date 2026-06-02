@@ -250,11 +250,19 @@ def retrieve_multi_anchor(
     self, anchors: list[str], top_k: int = 5, convergence_bonus: float = 0.15, source: str | None = None
 ) -> list[dict[str, Any]]:
     with self._db_session():
+        start_t0 = time.perf_counter()
         valid_anchors = [a for a in anchors if a and a.strip()]
         if not valid_anchors:
             return []
+        _log.info(
+            "[semantic.multi_anchor] start anchors=%d top_k=%d source=%s",
+            len(valid_anchors),
+            top_k,
+            str(source or ""),
+        )
         all_ids: list[str] = []
         seen: set[str] = set()
+        retrieval_route = "fts"
         for anchor in valid_anchors:
             for nid in self._fts_candidates(anchor, limit=30):
                 if nid not in seen:
@@ -267,6 +275,7 @@ def retrieve_multi_anchor(
         else:
             # FTS5 对所有 anchor 均无命中 → 向量预筛兜底（按各 anchor 余弦取并集）
             seen_ids: set[str] = set()
+            retrieval_route = "vec_scan"
             for anchor in valid_anchors:
                 anchor_vec: list[float] | None = None
                 if self._embed_fn is not None:
@@ -280,9 +289,15 @@ def retrieve_multi_anchor(
                 if source:
                     nodes = [n for n in nodes if getattr(n, "source", "") == source]
             else:
+                retrieval_route = "filtered_fallback"
                 _fb = self._load_filtered(source=source, limit=200)
                 nodes = self._load_by_ids([n.id for n in _fb]) if _fb else []
         if not nodes:
+            _log.info(
+                "[semantic.multi_anchor] done dt=%.3fs route=%s nodes=0 hits=0",
+                time.perf_counter() - start_t0,
+                retrieval_route,
+            )
             return []
 
         best_score: dict[str, float] = {}
@@ -315,6 +330,14 @@ def retrieve_multi_anchor(
             item = node.to_dict()
             item["score"] = round(float(score), 4)
             retrieved.append(item)
+
+        _log.info(
+            "[semantic.multi_anchor] done dt=%.3fs route=%s nodes=%d hits=%d",
+            time.perf_counter() - start_t0,
+            retrieval_route,
+            len(nodes),
+            len(retrieved),
+        )
 
         if _log.isEnabledFor(_log_sem.DEBUG):
             combined_query = " ".join(valid_anchors)
