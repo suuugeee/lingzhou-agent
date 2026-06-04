@@ -234,6 +234,42 @@ def test_semantic_sync_from_files_skips_reading_existing_node_json(monkeypatch):
             semantic._sync_from_files(max_seconds=1.0)
 
 
+def test_semantic_deferred_maintenance_imports_nodes_after_light_startup(monkeypatch):
+    from store.semantic import SemanticMemory
+
+    monkeypatch.setattr(SemanticMemory, "_start_deferred_maintenance", lambda self: None)
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        nodes_dir = root / "nodes"
+        nodes_dir.mkdir(parents=True, exist_ok=True)
+        for idx in range(3):
+            (nodes_dir / f"node-{idx}.json").write_text(
+                json.dumps({
+                    "id": f"node-{idx}",
+                    "kind": "fact",
+                    "title": f"灵舟记忆 {idx}",
+                    "body": f"这是后台恢复测试节点 {idx}",
+                    "activation": 0.8,
+                    "valence": 0.5,
+                    "importance": 0.5,
+                    "tags": [],
+                    "source": "pytest",
+                    "created_at": datetime.now(UTC).isoformat(),
+                }, ensure_ascii=False),
+                encoding="utf-8",
+            )
+
+        semantic = SemanticMemory(root, decay_lambda=0.0, startup_maintenance_seconds=0.000001)
+        assert semantic._maintenance_deferred is True
+
+        semantic._run_deferred_maintenance()
+
+        assert semantic._maintenance_deferred is False
+        results = semantic.retrieve("后台恢复测试节点", top_k=3)
+        assert {item["id"] for item in results} == {"node-0", "node-1", "node-2"}
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # EpisodicMemory — events.jsonl 轮转
 # ══════════════════════════════════════════════════════════════════════════════

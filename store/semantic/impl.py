@@ -24,6 +24,7 @@ def bind_semantic_memory(cls: type[SemanticMemory]) -> None:
     cls._connect = db._connect
     cls._sync_from_files = db._sync_from_files
     cls._validate_and_repair_index = db._validate_and_repair_index
+    cls._run_deferred_maintenance = db._run_deferred_maintenance
     cls.rebuild_index = db.rebuild_index
     cls._db_upsert = db._db_upsert
     cls._sync_node_fts = db._sync_node_fts

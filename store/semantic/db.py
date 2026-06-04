@@ -72,6 +72,7 @@ def _migrate_interlocutor_profiles(self, max_seconds: float | None = None) -> No
     for path in self._dir.glob("*.json"):
         scanned += 1
         if max_seconds is not None and max_seconds > 0 and time.monotonic() - started >= max_seconds:
+            self._maintenance_deferred = True
             _log.info(
                 "[semantic] 旧画像迁移超过启动预算 %.1fs，已延期 scanned=%d migrated=%d",
                 max_seconds,
@@ -278,6 +279,7 @@ def _sync_from_files(self, max_seconds: float | None = None) -> None:
         for p in self._dir.glob("*.json"):
             scanned += 1
             if max_seconds is not None and max_seconds > 0 and time.monotonic() - started >= max_seconds:
+                self._maintenance_deferred = True
                 _log.info(
                     "[semantic] JSON→索引同步超过启动预算 %.1fs，已延期 scanned=%d imported=%d",
                     max_seconds,
@@ -304,6 +306,7 @@ def _validate_and_repair_index(self) -> None:
         db_count = self._conn.execute("SELECT COUNT(*) FROM nodes").fetchone()[0]
         has_json = next(self._dir.glob("*.json"), None) is not None
         if has_json and (db_count == 0 or not self._fts5_ok):
+            self._maintenance_deferred = True
             _log.warning(
                 "[semantic] 索引为空或 FTS5 异常 (has_json=%s, db=%d, fts5=%s)，"
                 "启动期跳过全量重建；运行可继续，必要时手动 rebuild_index",
@@ -313,6 +316,21 @@ def _validate_and_repair_index(self) -> None:
             )
     except Exception as exc:
         _log.warning("[semantic] 索引校验失败，跳过自动重建: %s", exc)
+
+
+def _run_deferred_maintenance(self) -> None:
+    started = time.monotonic()
+    _log.info("[semantic] 后台索引恢复启动")
+    with self._db_session():
+        stage_started = time.monotonic()
+        self._sync_from_files(max_seconds=None)
+        _log.info("[semantic] 后台 JSON→索引同步完成 dt=%.3fs", time.monotonic() - stage_started)
+    with self._db_session():
+        stage_started = time.monotonic()
+        self._migrate_embeddings(batch_limit=5000)
+        _log.info("[semantic] 后台旧 embedding 迁移完成 dt=%.3fs", time.monotonic() - stage_started)
+    self._maintenance_deferred = False
+    _log.info("[semantic] 后台索引恢复完成 dt=%.3fs", time.monotonic() - started)
 
 
 def rebuild_index(self) -> None:
