@@ -676,6 +676,49 @@ def test_ingress_store_unifies_external_chat_and_task_writes():
     asyncio.run(_ingress_store_unifies_external_chat_and_task_writes())
 
 
+def test_wechat_reply_continues_when_local_poll_is_disabled(monkeypatch):
+    asyncio.run(_wechat_reply_continues_when_local_poll_is_disabled(monkeypatch))
+
+
+async def _wechat_reply_continues_when_local_poll_is_disabled(monkeypatch):
+    from channels import wechat as wechat_mod
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "wechat.db"
+        store = TaskStore(db_path)
+        await store.open()
+        assistant_id = await store.add_chat_message("assistant", "已收到", chat_id="wechat:user-1")
+        await store.set_fact("wechat:ctx:user-1", "ctx-1")
+        await store.close()
+
+        sent: list[tuple[str, str, str, str, str | None]] = []
+        monkeypatch.setattr(
+            wechat_mod,
+            "send_text",
+            lambda base_url, token, to_user, text, ctx=None: sent.append((base_url, token, to_user, text, ctx)) or {"ok": True},
+        )
+
+        channel = wechat_mod.WechatChannel(
+            wechat_mod.WechatConfig(
+                base_url="https://send.example",
+                poll_base_url="",
+                token="token-1",
+                reply_poll_sec=1,
+            ),
+            db_path,
+        )
+
+        channel.run_poll()
+        assert not channel._stop.is_set()
+
+        channel._check_and_reply()
+
+        assert sent == [("https://send.example", "token-1", "user-1", "已收到", "ctx-1")]
+        assert assistant_id in channel._replied
+        assert channel._ingress.list_pending_assistant_messages(chat_prefix="wechat:", limit=10) == []
+
+
 def test_ingress_store_retries_when_database_is_locked():
     from store.task.ingress import IngressStore
 
