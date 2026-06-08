@@ -424,6 +424,36 @@ def test_episodic_search_recent_daily_returns_only_relevant_recent_blocks():
         assert "无关的日志目录" not in result
 
 
+def test_episodic_search_recent_daily_zero_max_still_returns_evidence_excerpts():
+    from store.episodic import EpisodicMemory
+
+    with tempfile.TemporaryDirectory() as d:
+        ep = EpisodicMemory(Path(d), max_events=0)
+        ep.record("user", "github " + "a" * 5000, task_id="task-github-1")
+        ep.record("assistant", "github " + "b" * 5000, task_id="task-github-2")
+
+        result = ep.search_recent_daily("github", days=2, max_chars=0)
+
+        assert result
+        assert len(result) <= 2600
+        assert "a" * 2000 not in result
+        assert "b" * 2000 not in result
+
+
+def test_episodic_search_recent_daily_respects_small_context_budget():
+    from store.episodic import EpisodicMemory
+
+    with tempfile.TemporaryDirectory() as d:
+        ep = EpisodicMemory(Path(d), max_events=0)
+        ep.record("user", "github " + "a" * 5000, task_id="task-github")
+
+        result = ep.search_recent_daily("github", days=2, max_chars=120)
+
+        assert result
+        assert len(result) <= 140
+        assert "a" * 1000 not in result
+
+
 def test_episodic_search_short_ascii_not_overmatching():
     """短 ASCII 词（如 'core'）不应导致 OR 查询泛滥命中不相关条目。
 

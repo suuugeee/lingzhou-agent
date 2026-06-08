@@ -1756,6 +1756,93 @@ async def _judgment_executor_retries_with_trimmed_prompt_on_limit_error():
     assert resolve_context_window("adaptive-mini", None) == 128000
 
 
+def test_chat_with_retry_trims_before_first_call_when_budget_exceeded():
+    asyncio.run(_chat_with_retry_trims_before_first_call_when_budget_exceeded())
+
+
+async def _chat_with_retry_trims_before_first_call_when_budget_exceeded():
+    from core.config import Config
+    from core.judgment.executor import JudgmentExecutor
+    from core.judgment.output import ModelSelection
+    from provider.base import Message
+
+    from provider.catalog import resolve_context_window
+
+    class _Provider:
+        model_ref = "copilot/adaptive-mini"
+
+        def __init__(self) -> None:
+            self.calls = 0
+            self.total_lengths: list[int] = []
+
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            self.calls += 1
+            self.total_lengths.append(sum(len(str(message.content)) for message in messages))
+            return '{"decision":"wait","rationale":"ok"}'
+
+        async def close(self):
+            return None
+
+        async def ping(self, timeout: float = 8.0):
+            return True, 1, None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "base_url": "https://api.individual.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            }
+        },
+        "model": "copilot/adaptive-mini",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+    provider = _Provider()
+    executor = JudgmentExecutor(provider, cfg)
+
+    huge_user = "a" * 520000
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content=huge_user),
+    ]
+    selection = ModelSelection(phase="initial", tier="reasoner", model_ref="copilot/adaptive-mini", thinking="high")
+
+    original_len = len(huge_user) + 3
+    trim_calls: list[int] = []
+
+    def _fake_trim(messages, prompt_limit, *, prompt_count=None):
+        trim_calls.append(1)
+        return [
+            Message(role="system", content="sys"),
+            Message(role="user", content="trimmed"),
+        ]
+
+    from unittest.mock import patch
+
+    # 用 monkeypatch 记录是否触发了前置裁剪分支。
+    with patch.object(executor, "_trim_messages_for_prompt_limit", _fake_trim):
+        _, final_selection, last_error = await executor._chat_with_retry(
+            selected_provider=provider,
+            selection=selection,
+            messages=messages,
+            phase="initial",
+            user_message="hi",
+            thinking_override="high",
+            routing_overrides=None,
+            log_prefix="[test]",
+            fallback_prefer_tier="reasoner",
+            skills="none",
+        )
+
+    assert last_error is None
+    assert final_selection.model_ref == "copilot/adaptive-mini"
+    assert provider.calls == 1
+    assert trim_calls == [1]
+    assert provider.total_lengths[0] < original_len
+    assert resolve_context_window("adaptive-mini", None) == 128000
+
+
 def test_chat_with_retry_trims_largest_message_even_when_system_is_overlong():
     asyncio.run(_chat_with_retry_trims_largest_message_even_when_system_is_overlong())
 
@@ -3168,7 +3255,7 @@ def test_catalog_explicit_path_isolated_from_global_runtime_path(tmp_path):
 
 
 def test_catalog_budget_auto_lookup():
-    """Config 不填 context_window_tokens 时，目录自动推断预算。"""
+    """Config 不填 context_window_tokens 时，目录自动推断自适应工作集预算。"""
     from core.config import Config
 
     cfg = Config.model_validate({
@@ -3183,8 +3270,22 @@ def test_catalog_budget_auto_lookup():
         "temperature": 0.7,
         "timeout": 60.0,
     })
-    # budget = 131072 - max(1024, 131072//4) = 131072 - 32768 = 98304
-    assert cfg.judgment_input_token_budget() == 98304
+    assert cfg.judgment_input_token_budget() == 32768
+
+    capped_budget = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.5-plus",  # 目录里 context_window=131072
+        "temperature": 0.7,
+        "timeout": 60.0,
+        "max_judgment_input_tokens": 16000,
+    })
+    assert capped_budget.judgment_input_token_budget() == 16000
 
 
 def test_judgment_budget_is_derived_from_model_window():
@@ -3559,6 +3660,31 @@ async def _shell_run_uses_bash_compatible_syntax():
     res = await shell_run({"command": "x=1; ((x++)); echo $x"}, ctx)
     assert res.error is None
     assert "2" in res.summary
+
+
+def test_shell_run_summary_keeps_output_preview_only():
+    asyncio.run(_shell_run_summary_keeps_output_preview_only())
+
+
+async def _shell_run_summary_keeps_output_preview_only():
+    import json
+
+    from tools.shell import shell_run
+
+    ctx = _tool_ctx()
+    payload_cmd = (
+        "python3 - <<'PY'\n"
+        "import sys\n"
+        "sys.stdout.write('A' * 5000)\n"
+        "sys.stdout.write('\\n' + 'B' * 5000)\n"
+        "PY"
+    )
+    res = await shell_run({"command": payload_cmd}, ctx)
+
+    assert res.error is None
+    assert len(res.summary) < 5000
+    assert "omitted" in json.loads(res.evidence)["output_preview"]
+    assert "output_chars" in json.loads(res.evidence)
 
 
 def test_execution_durable_failure_sensing():

@@ -93,7 +93,7 @@ class ConcurrentTickDispatcher:
                 async with self._semaphore:
                     self._running_count += 1
                     try:
-                        await self._loop._run_dispatched_tick(job)
+                        await self._run_job_with_guard(job)
                     except Exception:
                         _log.exception(
                             "[tick-dispatch] chain=%s cycle=%s failed",
@@ -104,3 +104,41 @@ class ConcurrentTickDispatcher:
                         self._running_count = max(0, self._running_count - 1)
         finally:
             self._workers.pop(chain_key, None)
+
+    async def _run_job_with_guard(self, job: TickJob) -> None:
+        """运行单个 tick，失败和超时都要有明确告警并保证不阻塞运行计数。"""
+        guard = _tick_job_guard_seconds(getattr(self._loop, "_cfg", None))
+
+        if guard is None:
+            await self._loop._run_dispatched_tick(job)
+            return
+        try:
+            await asyncio.wait_for(self._loop._run_dispatched_tick(job), timeout=guard)
+        except TimeoutError as exc:
+            _log.error(
+                "[tick-dispatch] chain=%s cycle=%s job_timeout=%ss",
+                job.chain_key,
+                getattr(job, "cycle", 0),
+                f"{guard:.1f}",
+            )
+            raise RuntimeError(
+                f"tick job timeout: chain={job.chain_key} cycle={job.cycle}"
+            ) from exc
+
+
+def _tick_job_guard_seconds(cfg: Any | None) -> float | None:
+    """Return explicit dispatcher timeout, or None to let inner timeouts own cancellation."""
+    explicit = None
+    try:
+        loop_cfg = getattr(cfg, "loop", None)
+        explicit = getattr(loop_cfg, "tick_job_timeout", None) if loop_cfg is not None else None
+    except Exception:
+        explicit = None
+    if explicit is not None:
+        try:
+            value = float(explicit)
+            if value > 0:
+                return value
+        except Exception:
+            pass
+    return None

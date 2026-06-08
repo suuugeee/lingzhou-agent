@@ -61,6 +61,8 @@ class JudgmentContextAssembler:
         self._skills = SkillRegistry(skills_dir=_skills_dir)
         self._ref_resolver = ReferenceResolver(provider=provider, thresholds=cfg.thresholds, reason_temperature=cfg.temperature)
         self._last_context_text: str = ""
+        self._last_context_sections: dict[str, Any] = {}
+        self._last_context_budget: int = 0
         self._context_cache: dict[str, str] = {}
         self._probe_manager: Any = None
         self._last_selected_skills: list[Skill] = []

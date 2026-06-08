@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
-from core.loop.cycle.dispatcher import ConcurrentTickDispatcher, TickJob
+from core.loop.cycle.dispatcher import ConcurrentTickDispatcher, TickJob, _tick_job_guard_seconds
 
 
 class _FakeLoop:
@@ -69,3 +70,15 @@ async def test_dispatcher_rejects_when_queue_is_full():
 
     assert await dispatcher.enqueue(TickJob(cycle=1, chain_key="chain:a")) is True
     assert await dispatcher.enqueue(TickJob(cycle=2, chain_key="chain:b")) is False
+
+
+def test_tick_job_guard_defaults_to_no_outer_timeout():
+    cfg = SimpleNamespace(timeout=60.0, loop=SimpleNamespace(tick_job_timeout=None))
+
+    assert _tick_job_guard_seconds(cfg) is None
+
+
+def test_tick_job_guard_uses_explicit_loop_override():
+    cfg = SimpleNamespace(timeout=60.0, loop=SimpleNamespace(tick_job_timeout=180.0))
+
+    assert _tick_job_guard_seconds(cfg) == 180.0

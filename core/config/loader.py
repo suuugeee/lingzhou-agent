@@ -23,6 +23,7 @@ from ..config_models import (
     SoulConfig,
     ThresholdsConfig,
 )
+from .budget import adaptive_judgment_input_budget, context_window_input_hard_budget
 
 
 class Config(BaseModel):
@@ -39,7 +40,14 @@ class Config(BaseModel):
         )
     )
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    timeout: float = Field(default=300.0, gt=0, description="LLM 请求超时（秒）。thinking 模型单次生成通常需要 60-180s，建议设置为 300 或更大")
+    timeout: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "LLM 本地请求超时（秒）。默认 None = Lingzhou 不主动限制 LLM，"
+            "由供应商/网关自然超时；设为正数时才启用本地 LLM 超时。"
+        ),
+    )
     thinking: Literal["off", "minimal", "low", "medium", "high"] = Field(
         default="off",
         description=(
@@ -59,9 +67,9 @@ class Config(BaseModel):
     max_judgment_input_tokens: int | None = Field(
         default=None, ge=256,
         description=(
-            "按 token 计费优化：强制限制每次 LLM 调用的输入 token 上限。"
-            "低于模型上下文窗口自动推断值时生效，超过则忽略（不会扩大预算）。"
-            "建议范围：4000–16000。默认 None = 由模型窗口自动推断。"
+            "判断层工作集输入 token 上限覆盖值。默认 None = 根据模型 context window 自适应计算。"
+            "设为整数时作为人工上限，低于模型窗口自动推断值时生效，超过则忽略（不会扩大预算）。"
+            "建议覆盖范围：8000–64000。"
         ),
     )
     routing: dict[str, str] = Field(
@@ -220,13 +228,10 @@ class Config(BaseModel):
                 "请在 lingzhou.json 的 context_window_tokens 显式指定上下文窗口大小。"
             )
 
-        # 不把输出预留暴露成配置项：不同模型窗口差异大，输入预算用固定比例更稳定。
-        output_reserve = max(1024, context_window // 4)
-        budget = context_window - output_reserve
-        # 按 token 计费优化：若显式设置了上限，取两者较小值（不允许超出模型窗口）
+        hard_budget = context_window_input_hard_budget(context_window)
         if self.max_judgment_input_tokens is not None:
-            budget = min(budget, self.max_judgment_input_tokens)
-        return budget
+            return min(hard_budget, self.max_judgment_input_tokens)
+        return adaptive_judgment_input_budget(context_window)
 
     def effective_wm_token_budget(self) -> int:
         """WM token 预算 = judgment 输入预算 × wm_token_budget_ratio。

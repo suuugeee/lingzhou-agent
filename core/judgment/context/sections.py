@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, cast
 
 from .utils import _cache_put, _context_fmt_cache, _estimate_tokens
+from .utils import _clip_for_context
 
 if TYPE_CHECKING:
     from core.config import Config
@@ -25,9 +26,14 @@ def _fmt_memories(memories: list[dict[str, Any]]) -> str:
         score_part = ""
         if isinstance(score, (int, float)):
             score_part = f" (score={float(score):.3f})"
-        body_text = str(memory.get("body_preview") or memory.get("body") or "")
+        body_text = _clip_for_context(str(memory.get("body_preview") or memory.get("body") or ""), 320)
         lines.append(f"- [{memory['kind']}] {memory['title']}{score_part}: {body_text}")
     return "\n".join(lines)
+
+
+def _fmt_episodic(text: str) -> str:
+    normalized = str(text or "").strip()
+    return _clip_for_context(normalized, 1600) if normalized else "（暂无情节记忆）"
 
 
 def _fmt_wm(
@@ -441,7 +447,7 @@ def _fmt_chat_continuity(text: str) -> str:
     if cache_key in _context_fmt_cache:
         return _context_fmt_cache[cache_key]
     normalized = str(text or "").strip()
-    result = normalized if normalized else "（暂无当前 chat 的连续性记忆）"
+    result = _clip_for_context(normalized, 1200) if normalized else "（暂无当前 chat 的连续性记忆）"
     _cache_put(cache_key, result)
     return result
 
@@ -451,7 +457,7 @@ def _fmt_cross_task_episodic(text: str) -> str:
     if cache_key in _context_fmt_cache:
         return _context_fmt_cache[cache_key]
     normalized = str(text or "").strip()
-    result = normalized if normalized else "（暂无直接相关的跨任务情节线索）"
+    result = _clip_for_context(normalized, 1600) if normalized else "（暂无直接相关的跨任务情节线索）"
     _cache_put(cache_key, result)
     return result
 
@@ -461,7 +467,7 @@ def _fmt_interlocutor_continuity(text: str) -> str:
     if cache_key in _context_fmt_cache:
         return _context_fmt_cache[cache_key]
     normalized = str(text or "").strip()
-    result = normalized if normalized else "（暂无当前交互对象的跨 chat 互动连续性记忆）"
+    result = _clip_for_context(normalized, 1200) if normalized else "（暂无当前交互对象的跨 chat 互动连续性记忆）"
     _cache_put(cache_key, result)
     return result
 
@@ -474,6 +480,6 @@ def _fmt_chat_memories(memories: list[dict[str, Any]]) -> str:
         result = "（暂无当前 chat 的长期结晶）"
         _cache_put(cache_key, result)
         return result
-    result = _fmt_memories(memories)
+    result = _clip_for_context(_fmt_memories(memories), 1200)
     _cache_put(cache_key, result)
     return result

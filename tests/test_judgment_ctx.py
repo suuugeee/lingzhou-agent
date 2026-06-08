@@ -518,6 +518,34 @@ def test_recent_runs_summary_prefers_output_and_progress():
     assert "summary=index.ts package.json SKILL.md" in text
 
 
+def test_recent_runs_summary_preview_keeps_token_budget():
+    from core.judgment.context.tasks import _fmt_recent_runs
+    from store.task import Run
+
+    runs = [
+        Run(
+            id=77,
+            task_id=9,
+            run_type="tool_chain",
+            worker_type="tool-chain-worker",
+            status="done",
+            created_at="2026-05-15T14:00:00+00:00",
+            tool_name="shell.run",
+            model_tier="reasoner",
+            progress="x" * 500,
+            output_json={"summary": "A" * 5000 + " mid " + "B" * 5000},
+        )
+    ]
+
+    text = _fmt_recent_runs(runs)
+    assert "run#77 [done]" in text
+    assert "summary=" in text
+    assert "omitted" in text
+    assert "A" in text
+    assert "B" in text
+    assert len(text) < 400
+
+
 def test_waiting_tasks_section_exposes_wait_reason_and_next_step():
     from core.judgment.context.tasks import _fmt_waiting_tasks
     from store.task import Task
@@ -1836,6 +1864,26 @@ def test_model_routing_section_exposes_tool_history_compaction_policy():
     assert "tool_history_will_compact_next=true" in payload["delegation_guide"]
 
 
+def test_compact_history_line_keeps_summary_preview_not_full_blob():
+    from core.loop.shared.continue_phase import _compact_history_line
+
+    entry = {
+        "tool": "shell.run",
+        "status": "ok",
+        "result": "A" * 5000,
+        "metadata": {"log_summary": "B" * 5000},
+        "state_delta": {"details": "C" * 5000},
+        "artifact_paths": ["/tmp/out.log"],
+        "fingerprint": "abc",
+    }
+
+    compacted = _compact_history_line(entry)
+    assert "summary" in compacted
+    assert "omitted" in compacted
+    assert "A" * 5000 not in compacted
+    assert "B" * 100 not in compacted
+
+
 def test_fmt_durable_failures_exposes_policy_and_muted_actions():
     from core.judgment.context.tasks import _fmt_durable_failures
 
@@ -2476,6 +2524,48 @@ async def test_decide_continue_surfaces_missing_chosen_action_id_without_runtime
     assert provider.calls == 1
 
 
+async def test_decide_continue_defaults_to_provider_natural_timeout(monkeypatch):
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait","rationale":"ok"}'
+
+        async def close(self):
+            return None
+
+    async def _fail_wait_for(*args, **kwargs):
+        raise AssertionError("LLM chat should not be wrapped by local wait_for when timeout=None")
+
+    import core.judgment.decision.helpers as helpers
+
+    monkeypatch.setattr(helpers.asyncio, "wait_for", _fail_wait_for)
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+    })
+
+    layer = JudgmentLayer(_DummyProvider(), _tool_registry(), cfg)
+    layer._assembler._last_context_text = "cached context"
+
+    out = await layer.decide_continue(
+        [{"tool": "task.list", "params": {"status": "all"}, "result": "命中 3 条任务"}],
+        user_message="继续",
+        prefer_tier="reasoner",
+    )
+
+    assert out.decision == "wait"
+
+
 async def test_judgment_normalizes_whitespace_tool_name_to_wait():
     from core.config import Config
     from core.judgment import JudgmentLayer
@@ -2689,6 +2779,124 @@ async def test_decide_continue_includes_structured_tool_history_window():
     assert "结构化最近工具结果(JSON)" in provider.last_messages[1].content
     assert '"status": "ok"' in provider.last_messages[1].content
     assert '"state_delta": {' in provider.last_messages[1].content
+
+
+def test_continue_context_rebuilds_budgeted_working_set_not_raw_prompt():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    layer = JudgmentLayer(_DummyProvider(), ToolRegistry(), cfg)
+    asm = layer._assembler
+    asm._judgment_template = "{{user_message}}\n{{wm_section}}\n{{tools_section}}"
+    asm._last_context_text = "RAW_PREVIOUS_PROMPT" * 1000
+    asm._last_context_sections = {
+        "user_message": "继续",
+        "wm_section": "WM_FACT",
+        "tools_section": "TOOL_CATALOG",
+    }
+    asm._last_context_budget = 6000
+
+    text = asm._build_continue_context(
+        [{"tool": "memory.search", "params": {"query": "x"}, "result": "命中 1 条"}],
+        user_message="继续",
+        reply_only=False,
+        wm_delta=None,
+    )
+
+    assert "RAW_PREVIOUS_PROMPT" not in text
+    assert "WM_FACT" in text
+    assert "TOOL_CATALOG" in text
+    assert "结构化最近工具结果(JSON)" in text
+
+
+def test_reply_only_context_omits_tool_catalog_from_working_set():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    layer = JudgmentLayer(_DummyProvider(), ToolRegistry(), cfg)
+    asm = layer._assembler
+    asm._judgment_template = "{{user_message}}\n{{wm_section}}\n{{tools_section}}"
+    asm._last_context_sections = {
+        "user_message": "继续",
+        "wm_section": "WM_FACT",
+        "tools_section": "TOOL_CATALOG",
+    }
+    asm._last_context_budget = 6000
+
+    text = asm._build_continue_context(
+        [{"tool": "memory.search", "params": {"query": "x"}, "result": "命中 1 条"}],
+        user_message="继续",
+        reply_only=True,
+        wm_delta=None,
+    )
+
+    assert "WM_FACT" in text
+    assert "TOOL_CATALOG" not in text
+    assert "禁止再调用任何工具" in text
+
+
+def test_structured_tool_history_window_clips_huge_summary_and_state_delta():
+    from core.judgment.output import _structured_tool_history_window
+
+    tool_history = [
+        {
+            "tool": "shell.run",
+            "params": {"command": "ls -la"},
+            "status": "ok",
+            "summary": "A" * 5000,
+            "result": "A" * 5000,
+            "state_delta": {"blob": "B" * 5000, "count": 1},
+        },
+    ]
+
+    json_block, text_block = _structured_tool_history_window(tool_history)
+    assert "summary=" in text_block
+    assert "omitted" in text_block
+    assert json.loads(json_block)
+    assert len(json_block) < 2000
+    assert len(text_block) < 1200
 
 
 async def test_decide_continue_keeps_complex_act_without_runtime_rewrite():
@@ -3603,6 +3811,10 @@ def test_assemble_context_includes_recent_daily_continuity():
     asyncio.run(_assemble_context_includes_recent_daily_continuity())
 
 
+def test_assemble_context_daily_zero_budget_uses_evidence_excerpts():
+    asyncio.run(_assemble_context_daily_zero_budget_uses_evidence_excerpts())
+
+
 def test_assemble_context_skips_daily_when_long_term_memory_is_strong():
     asyncio.run(_assemble_context_skips_daily_when_long_term_memory_is_strong())
 
@@ -3766,6 +3978,73 @@ async def _assemble_context_includes_recent_daily_continuity():
             assert "recall_mode: daily_gap_fill" in text
             assert "daily_fallback_used: yes" in text
             assert "爸爸今天刚发来 bat 文件" in text
+        finally:
+            await store.close()
+
+
+async def _assemble_context_daily_zero_budget_uses_evidence_excerpts():
+    from core.config import Config
+    from core.judgment import CognitionFrame, JudgmentLayer
+    from core.perception import EmotionState
+    from memory.working import WorkingMemory
+    from store.episodic import EpisodicMemory
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "mode": "copilot",
+                "base_url": "https://api.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            },
+        },
+        "model": "copilot/gpt-5.4",
+        "thinking": "low",
+        "temperature": 0.7,
+        "timeout": 60.0,
+        "memory": {
+            "daily_recall_max_chars": 0,
+            "daily_recall_semantic_score_threshold": 0.9,
+        },
+    })
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "ctx.db")
+        await store.open()
+        try:
+            episodic = EpisodicMemory(Path(d) / "memory")
+            episodic.record("user", "github " + "a" * 6000, task_id="task-github-a")
+            episodic.record("assistant", "github " + "b" * 6000, task_id="task-github-b")
+
+            layer = JudgmentLayer(_DummyProvider(), ToolRegistry(), cfg)
+            text = await layer._assembler._assemble_context(
+                CognitionFrame(
+                    percept=cast("Any", SimpleNamespace(prediction_error=0.0, workspace_dirty=False)),
+                    wm=WorkingMemory(capacity=20),
+                    task_store=store,
+                    episodic=episodic,
+                    semantic=SemanticMemory(Path(d) / "memory", decay_lambda=0.0),
+                    emotion=EmotionState.from_config(cfg),
+                ),
+                active_task=None,
+                user_message="继续看 github",
+            )
+
+            assert "recall_mode: daily_gap_fill" in text
+            assert "daily_fallback_used: yes" in text
+            assert "a" * 2000 not in text
+            assert "b" * 2000 not in text
+            assert len(text) < 120000
         finally:
             await store.close()
 

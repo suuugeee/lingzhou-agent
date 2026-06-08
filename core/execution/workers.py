@@ -65,6 +65,10 @@ async def _call_handler(entry: ToolEntry, params: dict[str, Any], ctx: ToolConte
     if asyncio.iscoroutine(raw):
         raw = await raw
     if isinstance(raw, dict):
+        # 防御性清洗：过滤非 ToolResult 字段（如旧工具遗留的 success），并补全必填 summary
+        valid = ToolResult.__dataclass_fields__.keys()
+        raw = {k: v for k, v in raw.items() if k in valid}
+        raw.setdefault('summary', '执行完成')
         raw = ToolResult(**raw)
     if not isinstance(raw, ToolResult):
         raw = ToolResult(summary=str(raw))

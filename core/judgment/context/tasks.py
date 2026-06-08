@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from .utils import (
     _cache_put,
     _clip_text,
+    _clip_for_context,
     _context_fmt_cache,
     _format_fact_value,
     _run_summary,
@@ -116,9 +117,9 @@ def _fmt_recent_runs(runs: list[Run]) -> str:
         return result
     lines: list[str] = []
     for run in runs:
-        summary = _clip_text(_run_summary(run), 120)
+        summary = _clip_for_context(_run_summary(run), 120)
         tool = run.tool_name or run.run_type or "-"
-        progress = _clip_text(run.progress.strip(), 60) if run.progress else ""
+        progress = _clip_for_context(run.progress.strip(), 80) if run.progress else ""
         line = f"- run#{run.id} [{run.status}] tool={tool} tier={run.model_tier or '-'}"
         if progress:
             line += f" progress={progress}"

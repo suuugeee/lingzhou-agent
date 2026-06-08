@@ -5,8 +5,9 @@ from typing import TYPE_CHECKING, Any
 
 from core.persona.self_model import fmt_self_model
 
-from ..context.budget import apply_context_budget
+from ..context.budget import apply_context_budget, resolve_judgment_prompt_budget
 from ..context.sections import (
+    _fmt_episodic,
     _fmt_chat_continuity,
     _fmt_chat_history,
     _fmt_chat_memories,
@@ -118,12 +119,12 @@ def _build_context_memory_sections(
     failures: list[Any],
 ) -> dict[str, Any]:
     return {
-        "episodic_section": episodic_text or "（暂无情节记忆）",
+        "episodic_section": _fmt_episodic(episodic_text),
         "cross_task_episodic_section": _fmt_cross_task_episodic(cross_task_episodic_text),
         "chat_continuity_section": _fmt_chat_continuity(chat_continuity_text),
         "current_interlocutor_profile_section": current_interlocutor_profile_section,
         "current_interlocutor_continuity_section": current_interlocutor_continuity_section,
-        "daily_continuity_section": daily_continuity_text or "（近两日无相关 daily 补短）",
+        "daily_continuity_section": (_fmt_chat_continuity(daily_continuity_text) if daily_continuity_text else "（近两日无相关 daily 补短）"),
         "entity_section": entity_section,
         "chat_memory_section": _fmt_chat_memories(chat_memories),
         "memories_section": _fmt_memories(memories),
@@ -234,31 +235,17 @@ def _build_context_state_sections(
 
 def _finalize_context_text(assembler: Any, ctx: dict[str, Any], wm: WorkingMemory) -> str:
     _validate_context_schema(ctx)
-    from provider.catalog import resolve_context_window
-
-    budget = assembler._cfg.judgment_input_token_budget()
     catalog_path = assembler._cfg.workspace_dir / "models.json"
-    unknown_window_models: list[str] = []
+    budgets = []
     for tier in ("reader", "reasoner", "repair"):
         _, model_ref = assembler._executor._resolve_tier_model(tier)
-        model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
-        cw = resolve_context_window(model_id, None, catalog_path=catalog_path)
-        if cw and cw > 0:
-            output_reserve = max(1024, cw // 4)
-            tier_budget = cw - output_reserve
-            if assembler._cfg.max_judgment_input_tokens is not None:
-                tier_budget = min(tier_budget, assembler._cfg.max_judgment_input_tokens)
-            budget = min(budget, tier_budget)
-        else:
-            unknown_window_models.append(model_ref)
-    if unknown_window_models:
-        fallback_budget = 96_000 if assembler._cfg.max_judgment_input_tokens is None else min(96_000, assembler._cfg.max_judgment_input_tokens)
-        if budget > fallback_budget:
-            _log.warning("[judgment] 检测到未知 context_window 模型，预算降级: budget=%s -> %s models=%s", budget, fallback_budget, ",".join(sorted(set(unknown_window_models))))
-            budget = fallback_budget
+        budgets.append(resolve_judgment_prompt_budget(assembler._cfg, model_ref, catalog_path=catalog_path))
+    budget = min(budgets) if budgets else assembler._cfg.judgment_input_token_budget()
     if budget > 0 and wm is not None and wm._token_budget > 0:
         wm._token_budget = max(256, int(budget * assembler._cfg.memory.wm_token_budget_ratio))
     ctx = apply_context_budget(ctx, budget, skill_min_tokens=assembler._cfg.thresholds.skill_min_budget_tokens)
+    assembler._last_context_sections = dict(ctx)
+    assembler._last_context_budget = int(budget)
     if budget:
         used = sum(len(v) for v in ctx.values())
         assembler._executor.self_model.context_budget = f"{budget // 1000}K" if budget >= 1000 else str(budget)

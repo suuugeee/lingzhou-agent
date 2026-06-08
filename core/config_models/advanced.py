@@ -249,6 +249,10 @@ class ThresholdsConfig(BaseModel):
         default=3, ge=1,
         description="continue phase 压缩 tool_history 时保留最近多少条完整记录，其余折叠为 [compacted] 摘要",
     )
+    continue_context_reserve_tokens: int = Field(
+        default=4096, ge=512,
+        description="continue/reply phase 为本轮工具结果、执行状态和最终指令预留的输入 token 预算",
+    )
     judgment_error_streak_guard: int = Field(
         default=2, ge=1,
         description="JudgmentSignals 中 error streak 的统一门槛；达到后 require_more_evidence / prefer_narrow_scope / pause posture 会被触发",

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tools.registry import tool_has_capability
+from .context.utils import _clip_for_context
 
 if TYPE_CHECKING:
     from tools.registry import ToolRegistry
@@ -103,6 +104,31 @@ def tool_tier_mapping(registry: ToolRegistry | None = None) -> dict[str, list[st
 
 
 def _structured_tool_history_window(tool_history: list[dict[str, Any]]) -> tuple[str, str]:
+    def _trim_value(value: Any, limit: int) -> str:
+        return _clip_for_context(str(value or ""), limit)
+
+    def _trim_state_delta(state_delta: dict[str, Any], *, key_limit: int = 16) -> dict[str, Any]:
+        if not state_delta:
+            return {}
+        compacted: dict[str, Any] = {}
+        for key in sorted(state_delta):
+            if len(compacted) >= key_limit:
+                compacted["..."] = f"({len(state_delta) - key_limit} keys omitted)"
+                break
+            compact_key = _trim_value(key, 64)
+            value = state_delta[key]
+            if isinstance(value, dict):
+                compacted[compact_key] = {
+                    str(inner_key): _trim_value(inner_value, 120) for inner_key, inner_value in list(value.items())[:8]
+                }
+            elif isinstance(value, list):
+                compacted[compact_key] = [
+                    _trim_value(item, 120) for item in list(value)[:8]
+                ]
+            else:
+                compacted[compact_key] = _trim_value(value, 200)
+        return compacted
+
     history_parts: list[str] = []
     structured_window: list[dict[str, Any]] = []
     start_index = max(0, len(tool_history) - 6)
@@ -112,9 +138,10 @@ def _structured_tool_history_window(tool_history: list[dict[str, Any]]) -> tuple
         status = str(item.get("status") or "").strip() or (
             "error" if str(item.get("error") or "").strip() else ("skipped" if item.get("skipped") else "ok")
         )
-        summary = str(item.get("summary") or item.get("result") or "").strip()
+        summary = _trim_value((item.get("summary") or item.get("result") or ""), 400)
         error = str(item.get("error") or "").strip()
         state_delta = item.get("state_delta") if isinstance(item.get("state_delta"), dict) else {}
+        compact_state_delta = _trim_state_delta(state_delta, key_limit=8)
         key = (
             params.get("path")
             or params.get("name")
@@ -129,11 +156,11 @@ def _structured_tool_history_window(tool_history: list[dict[str, Any]]) -> tuple
             "index": index,
             "tool": str(item.get("tool") or ""),
             "status": status,
-            "key": str(key),
+            "key": str(_trim_value(key, 180)),
             "summary": summary,
             "error": error,
             "error_category": str(item.get("error_category") or ""),
-            "state_delta": state_delta,
+            "state_delta": compact_state_delta,
         })
         parts = [f"[{index}] tool={item.get('tool', '')} status={status}"]
         if key:
@@ -144,9 +171,9 @@ def _structured_tool_history_window(tool_history: list[dict[str, Any]]) -> tuple
             parts.append(f"error={error}")
         if state_delta:
             try:
-                state_text = json.dumps(state_delta, ensure_ascii=False, sort_keys=True)
+                state_text = json.dumps(compact_state_delta, ensure_ascii=False, sort_keys=True)
             except Exception:
-                state_text = str(state_delta)
+                state_text = str(compact_state_delta)
             parts.append(f"state_delta={state_text}")
         history_parts.append(" | ".join(parts))
     return (

@@ -80,7 +80,7 @@ class MemoryConfig(BaseModel):
     )
     daily_recall_max_chars: int = Field(
         default=0, ge=0,
-        description="daily 补短片段的最大字符数预算；0 = 不限制",
+        description="daily 补短片段的最大字符数预算；0 = 不限制总字符预算，仍只返回检索命中的 evidence 片段",
     )
     daily_recall_semantic_score_threshold: float = Field(
         default=0.55, ge=0.0, le=1.5,
@@ -203,4 +203,3 @@ def run_result_memory_affect(memory_cfg: Any | None, *, is_failure: bool) -> tup
         float(getattr(cfg, "run_result_success_activation", 0.72)),
         float(getattr(cfg, "run_result_success_valence", 0.65)),
     )
-

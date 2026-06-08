@@ -112,7 +112,7 @@
   },
 
   "temperature": 0.7,
-  "timeout": 300.0,
+  "timeout": null,
 
   "_doc_thinking": [
     "思考深度等级：\"off\" | \"minimal\" | \"low\" | \"medium\" | \"high\"",
@@ -127,6 +127,12 @@
     "内置目录已收录的模型（如 qwen3.6-plus、kimi-k2.5 等）省略此项，系统自动推断。",
     "示例（使用自建代理且未收录的模型时）：  \"context_window_tokens\": 32768"
   ],
+  "_doc_max_judgment_input_tokens": [
+    "判断层工作集预算：模型 context window 是硬上限，不代表每次都应该喂满。",
+    "默认 null = 按模型窗口自适应：小窗口尽量用满，大窗口使用 32K/64K 级工作集。",
+    "长分析可显式调到 32000/64000；超过模型输入硬上限会自动取较小值。"
+  ],
+  "max_judgment_input_tokens": null,
 
   "loop": {
     "_comment": "事件驱动时序：认知唤醒由事件/预测误差驱动，而非固定时钟节拍（Active Inference）",
@@ -137,6 +143,7 @@
     "max_exec_workers": 4,
     "max_multimodal_workers": 2,
     "max_llm_workers": 4,
+    "tick_job_timeout": null,
     "min_act_gap": 2000,
     "max_idle_gap": 60000,
     "wake_poll_interval": 500,
@@ -321,6 +328,7 @@
     "task_explore_converge_after": 4,
     "continue_tool_history_compact_threshold": 6,
     "continue_tool_history_keep_last": 3,
+    "continue_context_reserve_tokens": 4096,
     "judgment_error_streak_guard": 2,
     "judgment_require_more_evidence_worsening_failure_count": 1,
     "judgment_prefer_narrow_failure_count": 2,

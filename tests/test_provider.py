@@ -870,6 +870,30 @@ def test_copilot_mode_ignores_empty_cached_token(monkeypatch):
     assert token == "fresh-copilot-token"
 
 
+def test_openai_mode_default_async_client_has_no_local_timeout(monkeypatch):
+    import httpx
+
+    import provider.openai_compat as openai_mod
+
+    captured: dict[str, Any] = {}
+
+    class _FakeAsyncClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            self.is_closed = False
+
+    monkeypatch.setattr(httpx, "AsyncClient", _FakeAsyncClient)
+
+    mode = openai_mod._OpenAIMode(  # type: ignore[attr-defined]
+        base_url="https://example.invalid/v1",
+        api_key="sk-test",
+        timeout=None,
+    )
+    mode.build_async_client()
+
+    assert captured["timeout"] is None
+
+
 def test_copilot_request_headers_reject_empty_token_from_fallback():
     from provider.openai_compat import OpenAICompatProvider
 
@@ -918,4 +942,3 @@ def test_login_copilot_help_is_registered():
     assert "专用 Copilot 登录命令" in result.stdout
     assert "--method" in result.stdout
     assert "--oauth-client-id" in result.stdout
-

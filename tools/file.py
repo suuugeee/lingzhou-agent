@@ -287,16 +287,18 @@ async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if not edits_raw:
         return ToolResult(summary="edits 参数为空，请提供至少一个 {oldText, newText} 替换操作", error="EmptyEdits", skipped=True)
 
-    # 支持 list 或 JSON 字符串
+    # 支持 list, dict(单条), 或 JSON 字符串
     if isinstance(edits_raw, str):
         try:
             edits = json.loads(edits_raw)
         except json.JSONDecodeError:
             return ToolResult(summary="edits 不是合法的 JSON 数组", error="InvalidJSON")
+    elif isinstance(edits_raw, dict):
+        edits = [edits_raw]
     elif isinstance(edits_raw, list):
         edits = edits_raw
     else:
-        return ToolResult(summary="edits 必须是数组或 JSON 字符串", error="InvalidType", skipped=True)
+        return ToolResult(summary="edits 必须是数组、字典或 JSON 字符串", error="InvalidType", skipped=True)
 
     try:
         # 目录保护
@@ -320,13 +322,12 @@ async def file_edit(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         applied = []
 
         for i, edit in enumerate(edits):
-            old_text = (edit.get("oldText") or "") if isinstance(edit, dict) else ""
-            new_text = (edit.get("newText") or "") if isinstance(edit, dict) else ""
+            old_text = (edit.get("oldText") or edit.get("old_text") or "") if isinstance(edit, dict) else ""
+            new_text = (edit.get("newText") or edit.get("new_text") or "") if isinstance(edit, dict) else ""
 
             if not old_text:
                 return ToolResult(summary=f"edits[{i}]: oldText 不能为空", error="EmptyOldText", skipped=True)
-            if not new_text:
-                return ToolResult(summary=f"edits[{i}]: newText 不能为空", error="EmptyNewText", skipped=True)
+            # 允许 newText 为空（用于删除文本场景），不再抛出 EmptyNewText
 
             # 所有 edit 都基于原始文件匹配，而不是增量匹配修改后的内容。
             first_idx = original.find(old_text)

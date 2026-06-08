@@ -145,6 +145,14 @@ class LoopConfig(BaseModel):
             "llm-worker 的并发上限。控制带 fact/run_monitor 的 LLM 驱动工具的同时执行数。"
         ),
     )
+    tick_job_timeout: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "单个 tick job 的外层保护超时（秒）。None=不加 dispatcher 外层超时，"
+            "由 LLM/provider/tool 自身超时自然结束；设为正数时才启用外层保护。"
+        ),
+    )
     # ── 事件驱动时序（替代固定 interval 概念）───────────────────────────────
     # 设计依据：
     #   Friston Active Inference (2010/2017)：认知循环由自由能（预测误差）阈值驱动，

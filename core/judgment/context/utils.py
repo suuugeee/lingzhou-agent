@@ -45,6 +45,16 @@ def _clip_text(text: str, limit: int = 0) -> str:
     return " ".join((text or "").split())
 
 
+def _clip_for_context(text: str, limit: int = 160) -> str:
+    """为模型上下文增加文本上限，保留开头/结尾与省略提示。"""
+    value = " ".join((text or "").split())
+    if limit <= 0 or len(value) <= limit:
+        return value
+    half = max(16, (limit - 9) // 2)
+    omitted = max(0, len(value) - half * 2)
+    return f"{value[:half]} ...({omitted} chars omitted)... {value[-half:]}"
+
+
 def _format_fact_value(raw: str) -> str:
     text = (raw or "").strip()
     if not text:

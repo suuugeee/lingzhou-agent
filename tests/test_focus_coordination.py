@@ -282,6 +282,10 @@ def test_wait_after_cycle_uses_focus_task_instead_of_global_active():
     asyncio.run(_wait_after_cycle_uses_focus_task_instead_of_global_active())
 
 
+def test_prepare_active_task_ignores_self_drive_for_user_message():
+    asyncio.run(_prepare_active_task_ignores_self_drive_for_user_message())
+
+
 async def _adopt_result_task_picks_task_created_by_task_add():
     from core.judgment import JudgmentOutput
     from core.loop.cycle.focus import adopt_result_task
@@ -373,3 +377,68 @@ async def _wait_after_cycle_uses_focus_task_instead_of_global_active():
             await store.close()
 
         assert seen_before_task == [focus_id]
+
+
+async def _prepare_active_task_ignores_self_drive_for_user_message():
+    from core.loop.tick import prep as prep_module
+
+    self_drive_task = SimpleNamespace(
+        id=42,
+        source="self_drive",
+        extras={},
+    )
+    seen_claims: list[object | None] = []
+
+    async def _prepare_focus_task(loop, *, user_message, chat_id):
+        return self_drive_task
+
+    async def _task_matches_chat(loop, task, chat_id):
+        return False
+
+    async def _noop_ingest(*args, **kwargs):
+        return None
+
+    async def _consume_hints(task_store, active_task, wm, metabolic=None):
+        return active_task
+
+    async def _bind(loop, active_task, chat_id):
+        return None
+
+    async def _claim(loop, active_task, *, chat_id=None, clear_current=True):
+        seen_claims.append(active_task)
+
+    original_prepare = prep_module.prepare_focus_task
+    original_matches = prep_module.task_matches_chat
+    original_ingest = prep_module._ingest_actionable_meta_reflections
+    original_hints = prep_module._consume_task_runtime_hints
+    original_bind = prep_module._bind_chat_id
+    original_claim = prep_module.claim_focus_task
+    try:
+        prep_module.prepare_focus_task = _prepare_focus_task  # type: ignore[assignment]
+        prep_module.task_matches_chat = _task_matches_chat  # type: ignore[assignment]
+        prep_module._ingest_actionable_meta_reflections = _noop_ingest  # type: ignore[assignment]
+        prep_module._consume_task_runtime_hints = _consume_hints  # type: ignore[assignment]
+        prep_module._bind_chat_id = _bind  # type: ignore[assignment]
+        prep_module.claim_focus_task = _claim  # type: ignore[assignment]
+
+        loop = SimpleNamespace(
+            _task_store=SimpleNamespace(),
+            _wm=SimpleNamespace(),
+            _metabolic=None,
+        )
+        active = await prep_module._prepare_active_task_for_tick(
+            loop,
+            user_message="用户新请求",
+            chat_id="wechat:chat-1",
+        )
+    finally:
+        prep_module.prepare_focus_task = original_prepare  # type: ignore[assignment]
+        prep_module.task_matches_chat = original_matches  # type: ignore[assignment]
+        prep_module._ingest_actionable_meta_reflections = original_ingest  # type: ignore[assignment]
+        prep_module._consume_task_runtime_hints = original_hints  # type: ignore[assignment]
+        prep_module._bind_chat_id = original_bind  # type: ignore[assignment]
+        prep_module.claim_focus_task = original_claim  # type: ignore[assignment]
+
+    assert active is None
+    assert seen_claims == [None]
+    assert self_drive_task.extras == {}

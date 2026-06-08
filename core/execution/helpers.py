@@ -533,6 +533,17 @@ async def record_meta_reflection_memory(
             ))
 
 
+_LOW_VALUE_SUCCESS_TOOLS = frozenset({
+    "file.read", "file.list", "memory.search", "memory.get_fact", "memory.list_facts",
+    "probe.list", "probe.run", "schedule.list", "task.list", "config.get", "config.list_keys",
+    "shell.capabilities", "skill.list", "skill.search", "skill.activate",
+    "browser.snapshot", "web.fetch", "web.search", "image.analyze",
+})
+
+def _should_record_successful_run(tool_name: str) -> bool:
+    """Check if a successful run should be recorded to semantic memory."""
+    return tool_name not in _LOW_VALUE_SUCCESS_TOOLS
+
 def _should_record_run_outcome(status: str) -> bool:
     return status in {"succeeded", "failed", "cancelled"}
 
@@ -635,21 +646,25 @@ async def finalize_run(
         _state_log or "-",
     )
     if _should_record_run_outcome(status):
-        await record_run_outcome_memory(
-            ctx.episodic,
-            ctx.semantic,
-            memory_cfg=getattr(ctx.config, "memory", None),
-            run_id=run_id,
-            task_id=resolved_task_id,
-            tool_name=str(result.metadata.get("tool_name") or ""),
-            worker_type=str(result.metadata.get("worker_type") or ""),
-            status=status,
-            progress=progress,
-            summary=result.summary,
-            error=result.error or "",
-            evidence=result.evidence,
-            task_store=ctx.task_store,
-        )
+        tool_name_for_filter = str(result.metadata.get("tool_name") or "")
+        if status == "succeeded" and not _should_record_successful_run(tool_name_for_filter):
+            _log.debug("[run-finalize] Skipping semantic memory for low-value successful run: %s", tool_name_for_filter)
+        else:
+            await record_run_outcome_memory(
+                ctx.episodic,
+                ctx.semantic,
+                memory_cfg=getattr(ctx.config, "memory", None),
+                run_id=run_id,
+                task_id=resolved_task_id,
+                tool_name=tool_name_for_filter,
+                worker_type=str(result.metadata.get("worker_type") or ""),
+                status=status,
+                progress=progress,
+                summary=result.summary,
+                error=result.error or "",
+                evidence=result.evidence,
+                task_store=ctx.task_store,
+            )
     if resolved_task_id:
         await update_task_result(
             ctx,

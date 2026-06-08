@@ -13,6 +13,9 @@ from .source import source_from_role
 
 _log = logging.getLogger("lingzhou.episodic")
 
+_DAILY_SEARCH_MAX_HITS = 5
+_DAILY_SEARCH_EXCERPT_CHARS = 480
+
 
 def narrative_filename(task_id: str | None) -> str:
     return f"task-{task_id}.md" if task_id else "global.md"
@@ -369,6 +372,22 @@ def load_recent_daily_context(memory, days: int = 2, max_chars: int = 1200) -> s
     return "\n\n---\n\n".join(sections)
 
 
+def _daily_search_excerpt(snippet: str, terms: list[str], max_chars: int = _DAILY_SEARCH_EXCERPT_CHARS) -> str:
+    text = str(snippet or "").strip()
+    if not text or len(text) <= max_chars:
+        return text
+    lower = text.lower()
+    positions = [lower.find(term) for term in terms if term and lower.find(term) >= 0]
+    pivot = min(positions) if positions else 0
+    half = max_chars // 2
+    start = max(0, pivot - half)
+    end = min(len(text), start + max_chars)
+    start = max(0, end - max_chars)
+    prefix = "..." if start > 0 else ""
+    suffix = "..." if end < len(text) else ""
+    return f"{prefix}{text[start:end]}{suffix}"
+
+
 def search_recent_daily(memory, query: str, days: int = 2, max_chars: int = 1200) -> str:
     """在最近若干天的 daily 中按 query 检索相关片段。
 
@@ -378,8 +397,6 @@ def search_recent_daily(memory, query: str, days: int = 2, max_chars: int = 1200
     if not query:
         return ""
     days = max(1, days)
-    if max_chars <= 0:
-        max_chars = 999_999_999
 
     safe = re.sub(r"[^\w\s]", " ", query, flags=re.UNICODE)
     strict = [t.lower() for t in safe.split() if len(t) >= 2 and not (t.isascii() and len(t) < 5)]
@@ -390,7 +407,7 @@ def search_recent_daily(memory, query: str, days: int = 2, max_chars: int = 1200
     if not term_sets[0]:
         return ""
 
-    scored_hits: list[tuple[int, int, str]] = []
+    scored_hits: list[tuple[int, int, str, list[str]]] = []
     for terms in term_sets:
         scored_hits = []
         for offset in range(days):
@@ -417,7 +434,7 @@ def search_recent_daily(memory, query: str, days: int = 2, max_chars: int = 1200
                 if match_count <= 0:
                     continue
                 snippet = f"[{stamp}]\n{block}"
-                scored_hits.append((match_count, -offset, snippet))
+                scored_hits.append((match_count, -offset, snippet, terms))
         if scored_hits:
             break
 
@@ -427,10 +444,17 @@ def search_recent_daily(memory, query: str, days: int = 2, max_chars: int = 1200
     scored_hits.sort(key=lambda item: (item[0], item[1]), reverse=True)
     hits: list[str] = []
     total = 0
-    for _, _, snippet in scored_hits:
-        hits.append(snippet)
-        total += len(snippet)
-        if total >= max_chars:
+    excerpt_chars = _DAILY_SEARCH_EXCERPT_CHARS if max_chars <= 0 else min(_DAILY_SEARCH_EXCERPT_CHARS, max_chars)
+    for _, _, snippet, terms in scored_hits[:_DAILY_SEARCH_MAX_HITS]:
+        excerpt = _daily_search_excerpt(snippet, terms, excerpt_chars)
+        if max_chars > 0 and total + len(excerpt) > max_chars:
+            if hits:
+                break
+            hits.append(excerpt)
+            break
+        hits.append(excerpt)
+        total += len(excerpt)
+        if max_chars > 0 and total >= max_chars:
             return "\n\n---\n\n".join(hits)
     return "\n\n---\n\n".join(hits)
 

@@ -6,6 +6,7 @@ from tools.registry import (
     ToolResult,
     tool,
     tool_metadata,
+    tool_registry,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "ToolResult",
     "tool",
     "tool_metadata",
+    "tool_registry",
 ]

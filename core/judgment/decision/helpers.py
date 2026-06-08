@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from core.judgment.output import JudgmentOutput, ModelSelection
 from core.log_fields import format_log_fields, llm_call_fields
+from core.judgment.context.budget import resolve_judgment_prompt_budget
 
 if TYPE_CHECKING:
     from core.judgment.executor import JudgmentExecutor
@@ -81,37 +82,48 @@ def _select_provider_impl(
 
     exclude_reader = phase in executor._REASONER_ONLY_PHASES and _effective_prefer_tier is None
 
+    candidates: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for cand_tier in (tier, *executor._fallback_tiers(tier, exclude_reader=exclude_reader)):
         for model_ref in executor._tier_model_candidates(cand_tier, routing_overrides=routing_overrides):
-            if not executor._is_model_available(model_ref):
+            duplicate_key = (cand_tier, model_ref)
+            if duplicate_key in seen:
                 continue
-            try:
-                provider = executor._find_or_create_provider(model_ref)
-                chosen_tier = cand_tier
-                chosen_model = model_ref
-                selected = True
-                break
-            except Exception as e:
-                executor._mark_model_failure(model_ref, str(e) or repr(e))
-                code = executor._get_health(model_ref).last_code or "other"
-                _log.warning(
-                    "[routing] %s provider_build_failed code=%s err=%s",
-                    format_log_fields(tier=cand_tier, model_ref=model_ref),
-                    code,
-                    e,
-                )
-                continue
+            seen.add(duplicate_key)
+            candidates.append((cand_tier, model_ref))
+
+    for cand_tier, model_ref in candidates:
+        if not executor._is_model_available(model_ref):
+            continue
+        try:
+            provider = executor._find_or_create_provider(model_ref)
+            chosen_tier = cand_tier
+            chosen_model = model_ref
+            selected = True
+            break
+        except Exception as e:
+            executor._mark_model_failure(model_ref, str(e) or repr(e))
+            code = executor._get_health(model_ref).last_code or "other"
+            _log.warning(
+                "[routing] %s provider_build_failed code=%s err=%s",
+                format_log_fields(tier=cand_tier, model_ref=model_ref),
+                code,
+                e,
+            )
         if selected:
             break
 
-    if not selected and exclude_reader:
-        fallback_ref = executor._least_bad_model(tier, routing_overrides, exclude_reader=True)
+    if not selected:
+        fallback_ref = executor._least_bad_model(tier, routing_overrides, exclude_reader=exclude_reader)
         if fallback_ref:
             try:
                 provider = executor._find_or_create_provider(fallback_ref)
                 chosen_tier = tier
                 chosen_model = fallback_ref
-                _log.info("[routing] 全部 reasoner 冷却，强制使用冷却最短模型: %s", fallback_ref)
+                if exclude_reader:
+                    _log.info("[routing] 全部可用模型被冷却，强制使用冷却最短模型: %s", fallback_ref)
+                else:
+                    _log.info("[routing] 全部 reasoner/reader/repair 冷却，强制使用冷却最短模型: %s", fallback_ref)
             except Exception as e:
                 _log.warning("[routing] least-bad model %s 构建失败: %s", fallback_ref, e)
 
@@ -211,6 +223,7 @@ async def _chat_with_retry_impl(
     raw: str | None = None
     last_error: Exception | None = None
     max_attempts = 3
+    call_timeout = _configured_llm_timeout(executor._cfg)
     for _attempt in range(max_attempts):
         executor._set_last_call_meta(
             selection,
@@ -219,9 +232,33 @@ async def _chat_with_retry_impl(
             primary_skill_name=primary_skill_name,
             primary_skill_guidance=primary_skill_guidance,
         )
+        prompt_budget = resolve_judgment_prompt_budget(
+            executor._cfg,
+            selection.model_ref,
+            catalog_path=executor._cfg.workspace_dir / "models.json",
+        )
         message_count, char_count, est_tokens = _message_log_stats(executor, messages)
+        if est_tokens > prompt_budget:
+            trimmed_messages = executor._trim_messages_for_prompt_limit(
+                messages,
+                prompt_budget,
+                prompt_count=est_tokens,
+            )
+            if trimmed_messages is not messages:
+                _log.warning(
+                    "%s [llm] proactive_prompt_trim %s messages=%s chars=%s est_tokens=%s limit=%s",
+                    log_prefix,
+                    _llm_scope(selection, attempt=_attempt + 1, proactive=True),
+                    message_count,
+                    char_count,
+                    est_tokens,
+                    prompt_budget,
+                )
+                messages = trimmed_messages
+                message_count, char_count, est_tokens = _message_log_stats(executor, messages)
         try:
-            raw = await selected_provider.chat(messages, thinking_override=thinking_override)
+            chat_coro = selected_provider.chat(messages, thinking_override=thinking_override)
+            raw = await asyncio.wait_for(chat_coro, timeout=call_timeout) if call_timeout is not None else await chat_coro
             executor._mark_model_success(selection.model_ref)
             executor._track_token_usage(selected_provider)
             usage = getattr(selected_provider, "last_usage", None)
@@ -248,6 +285,61 @@ async def _chat_with_retry_impl(
                 skills,
             )
             return raw, selection, None
+        except TimeoutError as exc:
+            _err = f"llm call timeout {call_timeout:.1f}s" if call_timeout is not None else "llm call timeout"
+            last_error = TimeoutError(_err)
+            _log.warning(
+                "%s LLM timeout %s attempt=%s/%s err=%s",
+                log_prefix,
+                _llm_scope(selection, attempt=_attempt + 1),
+                _attempt + 1,
+                max_attempts,
+                _err,
+            )
+            executor._mark_model_failure(selection.model_ref, _err)
+            if _attempt < max_attempts - 1:
+                _fallback_tier = fallback_prefer_tier or executor._fallback_tiers(selection.tier)[0]
+                fb_provider, fb_selection = executor._select_provider(
+                    phase=phase,
+                    user_message=user_message,
+                    current_action=current_action,
+                    tool_history=tool_history,
+                    prefer_tier=_fallback_tier,
+                    thinking_override=thinking_override,
+                    routing_overrides=routing_overrides,
+                )
+                if fb_selection.model_ref != selection.model_ref:
+                    _log.warning(
+                        "%s LLM failover %s -> %s overflow_kind=timeout attempt=%s/%s err=%s",
+                        log_prefix,
+                        _llm_scope(selection),
+                        _llm_scope(fb_selection),
+                        _attempt + 1,
+                        max_attempts,
+                        _err,
+                    )
+                    selected_provider, selection = fb_provider, fb_selection
+                    continue
+                retry_after = executor._extract_retry_after_seconds(_err, exc)
+                delay = executor._retry_delay_seconds(
+                    _attempt + 1,
+                    retry_after_seconds=retry_after,
+                )
+                _log.warning(
+                    "%s LLM backoff %s delay_sec=%.2f retry_after=%s err=%s",
+                    log_prefix,
+                    _llm_scope(
+                        selection,
+                        overflow_kind="timeout",
+                        attempt=f"{_attempt + 1}/{max_attempts}",
+                    ),
+                    delay,
+                    f"{retry_after:.2f}s" if retry_after is not None else "none",
+                    _err,
+                )
+                await asyncio.sleep(delay)
+                continue
+            continue
         except Exception as exc:
             last_error = exc
             _err = str(exc) or repr(exc)
@@ -389,10 +481,9 @@ async def _repair_output_impl(
         _, repair_model_ref = executor._resolve_tier_model("repair")
         repair_provider = executor._find_or_create_provider(repair_model_ref)
         _log.info("[judgment] repair %s", format_log_fields(tier="repair", model_ref=repair_model_ref))
-        repaired_raw = await repair_provider.chat(
-            repair_messages,
-            temperature=0.0,
-        )
+        repair_coro = repair_provider.chat(repair_messages, temperature=0.0)
+        repair_timeout = _configured_llm_timeout(executor._cfg)
+        repaired_raw = await asyncio.wait_for(repair_coro, timeout=repair_timeout) if repair_timeout is not None else await repair_coro
     except Exception as exc:
         _log.warning("[judgment] repair request failed: %s", exc)
         return None
@@ -407,3 +498,14 @@ async def _repair_output_impl(
         format_log_fields(tier="repair", model_ref=repair_model_ref),
     )
     return repaired
+
+
+def _configured_llm_timeout(cfg: Any) -> float | None:
+    raw = getattr(cfg, "timeout", None)
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except Exception:
+        return None
+    return value if value > 0 else None

@@ -27,7 +27,7 @@ from core.perception import (
 from memory.working import WMItem
 
 from ..cycle.chat import _bind_chat_id
-from ..cycle.focus import claim_focus_task, prepare_focus_task
+from ..cycle.focus import claim_focus_task, prepare_focus_task, task_matches_chat
 from ..shared.common import (
     _perception_replay_fallback,
     _prefer_tier_for_task,
@@ -102,6 +102,18 @@ async def _consume_active_task_inbox(task_store: Any, active_task: Any) -> Any:
 
 async def _prepare_active_task_for_tick(loop: Any, user_message: str, chat_id: str | None) -> Any:
     active_task = await prepare_focus_task(loop, user_message=user_message, chat_id=chat_id)
+    if (
+        active_task is not None
+        and str(getattr(active_task, "source", "") or "") == "self_drive"
+        and str(user_message or "").strip()
+        and (not str(chat_id or "").strip() or not await task_matches_chat(loop, active_task, chat_id))
+    ):
+        _log.info(
+            "[focus] ignore self_drive task=%s for new user message chat_id=%s",
+            getattr(active_task, "id", ""),
+            str(chat_id or "").strip() or "-",
+        )
+        active_task = None
     await _ingest_actionable_meta_reflections(loop._task_store, loop._wm, metabolic=_loop_metabolic(loop))
     active_task = await _consume_task_runtime_hints(loop._task_store, active_task, loop._wm, metabolic=_loop_metabolic(loop))
     active_task = await _maybe_steer_active_task_from_user_message(

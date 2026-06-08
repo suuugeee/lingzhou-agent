@@ -44,6 +44,21 @@ def _token_state(token: str) -> str:
     return "nonempty" if str(token or "").strip() else "empty"
 
 
+def _request_timeout_override(client: Any, level: str | None) -> float | None:
+    """Return per-request timeout only when caller explicitly configured one.
+
+    With cfg.timeout=None, httpx clients are constructed without a local timeout and
+    requests pass timeout=None, leaving timeout behavior to the provider/gateway.
+    """
+    if level in (None, "off"):
+        return None
+    try:
+        timeout = getattr(getattr(client, "timeout", None), "read", None)
+        return float(timeout) if timeout is not None else None
+    except Exception:
+        return None
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 模式适配器：用数据封装 openai / copilot 的差异，消除 if/elif 堆砌
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -51,7 +66,7 @@ def _token_state(token: str) -> str:
 class _ModeAdapter:
     """模式差异的抽象基类。每个具体模式只需覆写差异方法。"""
 
-    def __init__(self, base_url: str, api_key: str, timeout: float):
+    def __init__(self, base_url: str, api_key: str, timeout: float | None):
         self.base_url = base_url
         self.api_key = api_key
         self.timeout = timeout
@@ -60,7 +75,7 @@ class _ModeAdapter:
         return httpx.Client(
             base_url=self.base_url,
             headers={"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"},
-            timeout=30.0,
+            timeout=self.timeout,
         )
 
     def build_async_client(self) -> httpx.AsyncClient:
@@ -88,7 +103,7 @@ class _OpenAIMode(_ModeAdapter):
 class _CopilotMode(_ModeAdapter):
     """GitHub Copilot 模式：token exchange + IDE headers + responses API。"""
 
-    def __init__(self, base_url: str, api_key: str, timeout: float):
+    def __init__(self, base_url: str, api_key: str, timeout: float | None):
         super().__init__(base_url, api_key, timeout)
         self._copilot_api_base_url = _normalize_copilot_api_base_url(base_url)
         self._copilot_gh_token: str = api_key
@@ -182,7 +197,7 @@ def _build_mode_adapter(
     base_url: str,
     api_key: str = "",
     api_key_env: str | None = None,
-    timeout: float,
+    timeout: float | None,
 ) -> _ModeAdapter:
     """根据 provider.mode 创建对应的适配器。
 
@@ -515,7 +530,7 @@ class OpenAICompatProvider:
             payload = self._build_responses_payload(
                 messages, temperature=temp, thinking_override=thinking_override,
             )
-            req_timeout = max(float(self._client.timeout.read or 60.0), 300.0) if level not in (None, "off") else None
+            req_timeout = _request_timeout_override(self._client, level)
             target = self._resolve_url("/responses")
 
             headers = await self._request_headers()
@@ -543,7 +558,7 @@ class OpenAICompatProvider:
         if self._extra_body:
             payload.update(self._extra_body)
 
-        req_timeout = max(float(self._client.timeout.read or 60.0), 300.0) if level not in (None, "off") else None
+        req_timeout = _request_timeout_override(self._client, level)
         target = self._resolve_url("/chat/completions")
 
         headers = await self._request_headers()

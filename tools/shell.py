@@ -16,11 +16,13 @@ from typing import Any
 from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 _DEFAULT_TIMEOUT = 30.0
+_MAX_SUMMARY_CHARS = 4096
+_MAX_OUTPUT_PREVIEW_CHARS = 2048
 _MANIFEST = ToolManifest(
     name="shell.run",
     description=(
         "在当前宿主环境中执行一次性 shell 命令（非持久会话）。"
-        "返回 stdout+stderr 合并输出摘要，不再对输出做硬截断。"
+        "返回 stdout+stderr 合并输出预览，保留头尾与长度信息避免上下文污染。"
         "高风险命令会自动触发沙箱隔离并向工作记忆注入危险感知信号。"
     ),
     progress_category="mutation",
@@ -105,6 +107,32 @@ def _decode_output(data: bytes | None) -> str:
     return data.decode("utf-8", errors="replace")
 
 
+def _shorten_output(text: str, *, max_chars: int = _MAX_OUTPUT_PREVIEW_CHARS) -> str:
+    """对超长输出保留头尾 + 省略说明，尽量保留关键上下文信号。"""
+    value = str(text or "")
+    if max_chars <= 0 or len(value) <= max_chars:
+        return value
+    keep_each = max(64, (max_chars - 64) // 2)
+    omitted = len(value) - keep_each * 2
+    return (
+        value[:keep_each]
+        + f"\n...[output omitted {omitted} chars]...\n"
+        + value[-keep_each:]
+    )
+
+
+def _build_summary(status: str, workdir: Path, *, use_sandbox: bool, is_risky: bool, risk_reason: str, output_preview: str) -> str:
+    summary = f"{status} cwd={workdir}"
+    if use_sandbox:
+        summary = f"[sandbox] {summary}"
+    if is_risky:
+        summary = f"[risky:{risk_reason}] {summary}"
+    output_part = output_preview if output_preview else "(无输出)"
+    if len(output_part) > _MAX_SUMMARY_CHARS:
+        output_part = _shorten_output(output_part, max_chars=_MAX_SUMMARY_CHARS)
+    return f"{summary} | {output_part}"
+
+
 def _fingerprint(command: str, workdir: Path, returncode: int, output: str) -> str:
     digest = hashlib.sha256()
     digest.update(command.encode("utf-8", errors="replace"))
@@ -120,12 +148,8 @@ def _fingerprint(command: str, workdir: Path, returncode: int, output: str) -> s
 @tool(_MANIFEST)
 async def shell_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     _raw_cmd = params.get("command")
-    if _raw_cmd is not None and not isinstance(_raw_cmd, str):
-        return ToolResult(
-            summary=f"参数错误: command 应为字符串，实际收到 {type(_raw_cmd).__name__}（值: {repr(_raw_cmd)}）",
-            error="InvalidParam",
-        )
-    command = (_raw_cmd or "").strip()
+    # 宽松类型转换：自动将非字符串转为字符串，避免 command必须为字符串 报错
+    command = str(_raw_cmd).strip() if _raw_cmd is not None else ""
     if not command:
         return ToolResult(summary="命令为空", skipped=True)
 
@@ -228,18 +252,24 @@ async def _shell_run_impl(params: dict[str, Any], ctx: ToolContext, command: str
     if stdout and stderr:
         combined += "\n"
     combined += stderr
-    output_text = combined or "(无输出)"
     status = "timeout" if timed_out else f"exit={returncode}"
-    summary = f"{status} cwd={workdir}"
-    if use_sandbox:
-        summary = f"[sandbox] {summary}"
-    if is_risky:
-        summary = f"[risky:{risk_reason}] {summary}"
-    summary += f" | {output_text}"
+    output_text = combined or "(无输出)"
+    output_preview = _shorten_output(output_text)
+    summary = _build_summary(
+        status,
+        workdir,
+        use_sandbox=use_sandbox,
+        is_risky=is_risky,
+        risk_reason=risk_reason,
+        output_preview=output_preview,
+    )
 
     log_summary = (
         f"shell.run {'timeout' if timed_out else f'exit={returncode}'} chars={len(combined)}"
     )
+    evidence_preview = _shorten_output(output_text, max_chars=_MAX_OUTPUT_PREVIEW_CHARS)
+    stdout_preview = _shorten_output(stdout or "")
+    stderr_preview = _shorten_output(stderr or "")
     payload = tool_metadata(
         "shell.run",
         log_summary,
@@ -251,9 +281,11 @@ async def _shell_run_impl(params: dict[str, Any], ctx: ToolContext, command: str
         stdout_chars=len(stdout),
         stderr_chars=len(stderr),
         output_chars=len(combined),
-        output_preview=output_text,
-        stdout_preview=stdout,
-        stderr_preview=stderr,
+        output_preview=evidence_preview,
+        stdout_preview=stdout_preview,
+        stderr_preview=stderr_preview,
+        output_preview_chars=len(output_preview),
+        output_omitted_chars=max(0, len(output_text) - len(evidence_preview)),
         sandbox=use_sandbox,
         sandbox_dir=_sandbox_dir,
         risky=is_risky,
