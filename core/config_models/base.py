@@ -25,6 +25,7 @@ class ProviderDefinition(BaseModel):
         description=(
             "openai 模式：存放 API Key 的环境变量名（如 DASHSCOPE_API_KEY）。\n"
             "copilot 模式：存放 GitHub PAT 的环境变量名。\n"
+            "codex 模式：可选 OPENAI_CODEX_ACCESS_TOKEN fallback；推荐使用 auth profile。\n"
             "  推荐用专用变量 COPILOT_GITHUB_TOKEN，避免与 gh CLI / GitHub Actions\n"
             "  的通用 GITHUB_TOKEN 混用。若已执行 lingzhou auth login-copilot，\n"
             "  token 存于 auth-profiles.json，此字段仅作 env fallback。"
@@ -40,6 +41,7 @@ class ProviderDefinition(BaseModel):
             '仅对 type="openai_compat" 有效，描述认证后端与请求数据格式的差异。\n'
             '"openai"：标准 Bearer token + chat/completions API（Qwen/bailian 等）；\n'
             '"copilot"： GitHub token → Copilot token exchange + responses API。\n'
+            '"codex"：OpenAI Codex OAuth + ChatGPT/Codex responses backend。\n'
             "其他协议（如未来的 anthropic/gemini）在各自 Provider 类里处理，不依赖此字段。"
         ),
     )

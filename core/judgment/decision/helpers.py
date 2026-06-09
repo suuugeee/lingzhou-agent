@@ -20,6 +20,7 @@ _PROMPT_OVERFLOW_OMIT_STUB = (
     "[该条消息因模型上下文窗口未纳入本轮请求；"
     "完整证据见本轮 WM、工具历史或 session 记录。]"
 )
+_PROMPT_OVERFLOW_TIGHT_STUB = "[省略]"
 
 
 def _role_drop_priority(role: str, *, is_last_message: bool) -> int:
@@ -137,6 +138,7 @@ def _trim_messages_for_prompt_limit_impl(
     prompt_limit: int,
     *,
     prompt_count: int | None = None,
+    tight: bool = False,
 ) -> list[Any]:
     try:
         from provider.base import Message
@@ -177,12 +179,24 @@ def _trim_messages_for_prompt_limit_impl(
     changed = False
     omitted_indices: set[int] = set()
 
+    if tight:
+        for idx, msg in enumerate(new_messages):
+            content = getattr(msg, "content", None)
+            if not isinstance(content, str) or content.strip() != _PROMPT_OVERFLOW_OMIT_STUB:
+                continue
+            role = str(getattr(msg, "role", "") or "user")
+            if Message is not None:
+                new_messages[idx] = Message(role=role, content=_PROMPT_OVERFLOW_TIGHT_STUB)
+            else:
+                new_messages[idx] = type(msg)(role=role, content=_PROMPT_OVERFLOW_TIGHT_STUB)
+            changed = True
+
     while _estimate_messages_total(new_messages) > target_prompt_budget:
         droppable: list[tuple[int, int, int]] = []
         for idx, role, tokens, content in content_slots:
             if idx in omitted_indices or not content:
                 continue
-            if content.strip() == _PROMPT_OVERFLOW_OMIT_STUB:
+            if content.strip() in {_PROMPT_OVERFLOW_OMIT_STUB, _PROMPT_OVERFLOW_TIGHT_STUB}:
                 continue
             droppable.append(
                 (_role_drop_priority(role, is_last_message=(idx == last_index)), idx, tokens)
@@ -192,10 +206,11 @@ def _trim_messages_for_prompt_limit_impl(
         droppable.sort(key=lambda item: (item[0], item[1]))
         _, drop_idx, _ = droppable[0]
         role = str(getattr(new_messages[drop_idx], "role", "") or "user")
+        replacement = _PROMPT_OVERFLOW_TIGHT_STUB if tight else _PROMPT_OVERFLOW_OMIT_STUB
         if Message is not None:
-            new_messages[drop_idx] = Message(role=role, content=_PROMPT_OVERFLOW_OMIT_STUB)
+            new_messages[drop_idx] = Message(role=role, content=replacement)
         else:
-            new_messages[drop_idx] = type(new_messages[drop_idx])(role=role, content=_PROMPT_OVERFLOW_OMIT_STUB)
+            new_messages[drop_idx] = type(new_messages[drop_idx])(role=role, content=replacement)
         omitted_indices.add(drop_idx)
         changed = True
 
@@ -366,6 +381,7 @@ async def _chat_with_retry_impl(
                     messages,
                     prompt_limit,
                     prompt_count=prompt_count,
+                    tight=True,
                 )
                 if trimmed_messages is not messages:
                     _log.warning(

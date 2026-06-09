@@ -231,5 +231,64 @@
         }
       }
     ]
+  },
+
+  "openai-codex": {
+    "base_url": "https://chatgpt.com/backend-api/codex",
+    "_doc": [
+      "OpenAI Codex OAuth provider（ChatGPT/Codex backend）。",
+      "需要先执行 lingzhou auth login-codex 完成浏览器/device OAuth。",
+      "mode=codex 固定使用 responses API；Codex backend 不支持 temperature/embeddings。"
+    ],
+    "models": [
+      {
+        "id": "gpt-5.5",
+        "context_window": 272000,
+        "max_tokens": 128000,
+        "reasoning": true,
+        "api": "responses",
+        "input": ["text", "image"],
+        "capabilities": ["text_generation", "thinking", "vision"],
+        "request_params": {
+          "unsupported": ["temperature"]
+        }
+      },
+      {
+        "id": "gpt-5.5-pro",
+        "context_window": 272000,
+        "max_tokens": 128000,
+        "reasoning": true,
+        "api": "responses",
+        "input": ["text", "image"],
+        "capabilities": ["text_generation", "thinking", "vision"],
+        "request_params": {
+          "unsupported": ["temperature"]
+        }
+      },
+      {
+        "id": "gpt-5.4",
+        "context_window": 272000,
+        "max_tokens": 128000,
+        "reasoning": true,
+        "api": "responses",
+        "input": ["text", "image"],
+        "capabilities": ["text_generation", "thinking", "vision"],
+        "request_params": {
+          "unsupported": ["temperature"]
+        }
+      },
+      {
+        "id": "gpt-5.4-mini",
+        "context_window": 272000,
+        "max_tokens": 128000,
+        "reasoning": true,
+        "api": "responses",
+        "input": ["text", "image"],
+        "capabilities": ["text_generation", "thinking", "vision"],
+        "request_params": {
+          "unsupported": ["temperature"]
+        }
+      }
+    ]
   }
 }

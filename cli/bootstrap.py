@@ -19,10 +19,13 @@ def _is_env_var_name(value: str) -> bool:
     return bool(value and _ENV_VAR_RE.match(value.strip()))
 
 
-def _print_setup_next_steps(api_key_env: str) -> None:
+def _print_setup_next_steps(api_key_env: str, *, auth_command: str = "") -> None:
     console.print("\n下一步：")
     step = 1
-    if _is_env_var_name(api_key_env):
+    if auth_command:
+        console.print(f"  {step}. 完成浏览器授权:      [bold]{auth_command}[/bold]")
+        step += 1
+    elif _is_env_var_name(api_key_env):
         console.print(f"  {step}. 设置 API key 环境变量: [bold]export {api_key_env}=your_key[/bold]")
         step += 1
     console.print(f"  {step}. 完成初始化:          [bold]lingzhou init[/bold]")
@@ -113,6 +116,11 @@ def _setup_impl(
             "base_url": "https://api.individual.githubcopilot.com",
             "api_key_env": "GITHUB_TOKEN",
         },
+        "openai-codex": {
+            "mode": "codex",
+            "base_url": "https://chatgpt.com/backend-api/codex",
+            "api_key_env": "OPENAI_CODEX_ACCESS_TOKEN",
+        },
     }
 
     console.print("\n[bold]步骤 1 / 5 — 选择 LLM provider[/bold]")
@@ -122,6 +130,8 @@ def _setup_impl(
             hint = "  [dim]百炼/DashScope，Qwen 系列[/dim]"
         elif p == "copilot":
             hint = "  [dim]GitHub Copilot，GPT-5/o-series[/dim]"
+        elif p == "openai-codex":
+            hint = "  [dim]OpenAI Codex，ChatGPT/Codex OAuth[/dim]"
         console.print(f"  {i}. {p}{hint}")
     console.print(f"  {len(catalog_providers)+1}. 自定义其他")
 
@@ -147,14 +157,14 @@ def _setup_impl(
     else:
         provider_name = typer.prompt("\nProvider 名称（将写入 providers 字典）")
         provider_mode = typer.prompt("  protocol mode", default="openai", show_choices=True,
-                                     prompt_suffix=" [openai/copilot]: ")
+                                     prompt_suffix=" [openai/copilot/codex]: ")
         default_base_url = typer.prompt("  base_url")
         default_api_key_env = typer.prompt("  api_key_env 环境变量名", default="OPENAI_API_KEY")
 
     # ── 2. API Key env var ────────────────────────────────────────────
     console.print("\n[bold]步骤 2 / 5 — API Key 环境变量[/bold]")
     console.print("  [dim]填写存放 API key 的 [bold]环境变量名[/bold]（如 DASHSCOPE_API_KEY），")
-    console.print("  [dim]也可直接粘贴 API key，将安全存储到配置文件。[/dim]")
+    console.print("  [dim]也可直接粘贴 API key，将安全存储到配置文件。Codex OAuth 可保留默认值并执行 lingzhou auth login-codex。[/dim]")
     api_key_env = typer.prompt("  环境变量名或 API key", default=default_api_key_env)
     # 如果用户输入了实际的 key（不符合 ENV_VAR 命名规则），保留原值；setup 向导就当 literal key 处理
     if api_key_env and not _is_env_var_name(api_key_env):
@@ -192,6 +202,7 @@ def _setup_impl(
     _THINKING_HINTS = {
         "openai":  "  [dim]openai 体系： off=直接输出; minimal/low/medium/high=按比例分配 budget_tokens[/dim]",
         "copilot": "  [dim]copilot 体系： off=不传 reasoning_effort; low/medium/high=对应 reasoning_effort 字符串[/dim]",
+        "codex": "  [dim]codex 体系： off=不传 reasoning; low/medium/high=传给 Codex responses reasoning.effort[/dim]",
     }
     console.print(_THINKING_HINTS.get(provider_mode, ""))
     console.print("  选项: off / minimal / low / medium / high")
@@ -217,7 +228,7 @@ def _setup_impl(
         },
         "model": f"{provider_name}/{model_id}",
         "temperature": temperature,
-        "timeout": 60.0,
+        "timeout": None,
         "thinking": thinking,
         "loop": {
             "db_path": "~/.lingzhou/state/runtime.db",
@@ -250,7 +261,8 @@ def _setup_impl(
     # ── 提示下一步 ─────────────────────────────────────────────────────
     console.print(f"\n[green]✓ {output} 已生成[/green]")
     if show_next_steps:
-        _print_setup_next_steps(api_key_env)
+        auth_command = "lingzhou auth login-codex" if provider_mode == "codex" else ""
+        _print_setup_next_steps(api_key_env, auth_command=auth_command)
     return output
 
 

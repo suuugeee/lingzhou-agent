@@ -127,7 +127,12 @@ class Config(BaseModel):
         for name, provider in self.providers.items():
             if provider.auth_profile_id.strip():
                 continue
-            provider.auth_profile_id = "copilot:default" if provider.mode == "copilot" else f"{name}:default"
+            if provider.mode == "copilot":
+                provider.auth_profile_id = "copilot:default"
+            elif provider.mode == "codex":
+                provider.auth_profile_id = "openai-codex:default"
+            else:
+                provider.auth_profile_id = f"{name}:default"
         return self
 
     @classmethod

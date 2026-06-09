@@ -132,7 +132,7 @@ async def _run_continue_phase(
             break
 
         # 工具历史超长时压缩早期条目，避免上下文窗口爆炸
-        if len(tool_history) >= compact_threshold + keep_last and len(tool_history) > keep_last:  # 优化：提高压缩触发阈值，避免频繁重组
+        if len(tool_history) >= compact_threshold and len(tool_history) > keep_last:
             _compact_tool_history(tool_history, keep_last=keep_last)
 
         next_tier = _next_initial_tier_hint(action) or ""

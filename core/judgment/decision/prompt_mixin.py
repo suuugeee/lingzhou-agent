@@ -141,6 +141,7 @@ class ExecutorPromptMixin:
         prompt_limit: int,
         *,
         prompt_count: int | None = None,
+        tight: bool = False,
     ) -> list[Any]:
         from core.judgment.decision.helpers import _trim_messages_for_prompt_limit_impl
 
@@ -149,4 +150,5 @@ class ExecutorPromptMixin:
             messages,
             prompt_limit,
             prompt_count=prompt_count,
+            tight=tight,
         )

@@ -21,6 +21,51 @@ def test_auth_store_profile_roundtrip(tmp_path):
     assert data["profiles"]["copilot:default"]["token"] == "tok-123456"
 
 
+def test_codex_oauth_profile_roundtrip(tmp_path):
+    from provider.codex_oauth import resolve_codex_oauth_token, save_codex_oauth_tokens
+    from store.auth import load_auth_profiles
+
+    path = tmp_path / "auth-profiles.json"
+    save_codex_oauth_tokens(
+        tokens={"access_token": "codex-access-token", "refresh_token": "codex-refresh-token"},
+        path=path,
+    )
+
+    data = load_auth_profiles(path)
+    profile = data["profiles"]["openai-codex:default"]
+    assert profile["provider"] == "openai-codex"
+    assert profile["tokens"]["access_token"] == "codex-access-token"
+
+    resolved = resolve_codex_oauth_token(path=path, refresh_if_expiring=False)
+    assert resolved is not None
+    assert resolved.token == "codex-access-token"
+    assert resolved.profile_id == "openai-codex:default"
+
+
+def test_codex_oauth_resolution_falls_back_to_env_for_bad_profile(monkeypatch, tmp_path):
+    from provider.codex_oauth import resolve_codex_oauth_token
+    from store.auth import save_auth_profiles
+
+    path = tmp_path / "auth-profiles.json"
+    save_auth_profiles({
+        "version": 1,
+        "profiles": {
+            "openai-codex:default": {
+                "type": "oauth",
+                "provider": "openai-codex",
+                "tokens": {},
+            }
+        },
+    }, path)
+    monkeypatch.setenv("OPENAI_CODEX_ACCESS_TOKEN", "env-codex-token")
+
+    resolved = resolve_codex_oauth_token(path=path)
+
+    assert resolved is not None
+    assert resolved.token == "env-codex-token"
+    assert resolved.source == "env:OPENAI_CODEX_ACCESS_TOKEN"
+
+
 def test_copilot_token_resolution_prefers_auth_profile(monkeypatch, tmp_path):
     from store.auth import resolve_copilot_token, set_token_profile
 
@@ -65,6 +110,54 @@ def test_openai_compat_rejects_empty_api_key_env(monkeypatch):
             api_key_env="EMPTY_OPENAI_KEY",
             timeout=30.0,
         )
+
+
+def test_codex_headers_include_backend_originator():
+    from provider.codex_oauth import build_codex_headers
+
+    headers = build_codex_headers("token")
+
+    assert headers["Authorization"] == "Bearer token"
+    assert headers["originator"] == "codex_cli_rs"
+    assert headers["Content-Type"] == "application/json"
+
+
+def test_codex_mode_builds_responses_payload(monkeypatch, tmp_path):
+    from core.config import Config
+    from provider.openai_compat import OpenAICompatProvider
+    from provider.codex_oauth import save_codex_oauth_tokens
+
+    auth_path = tmp_path / "auth-profiles.json"
+    save_codex_oauth_tokens(
+        tokens={"access_token": "codex-access-token", "refresh_token": "codex-refresh-token"},
+        path=auth_path,
+    )
+    import store.auth as auth_mod
+    monkeypatch.setattr(auth_mod, "AUTH_PROFILES_PATH", auth_path)
+
+    cfg = Config.model_validate({
+        "providers": {
+            "openai-codex": {
+                "type": "openai_compat",
+                "mode": "codex",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "api_key_env": "OPENAI_CODEX_ACCESS_TOKEN",
+            }
+        },
+        "model": "openai-codex/gpt-5.5",
+        "thinking": "low",
+        "loop": {"workspace_dir": "~/.lingzhou/workspace"},
+    })
+    provider = OpenAICompatProvider(cfg)
+    try:
+        payload = provider._build_responses_payload([SimpleNamespace(role="user", content="hi")])
+        assert payload["model"] == "gpt-5.5"
+        assert payload["store"] is False
+        assert payload["reasoning"]["effort"] == "low"
+        assert payload["reasoning"]["summary"] == "auto"
+        assert "temperature" not in payload
+    finally:
+        asyncio.run(provider.close())
 
 
 def test_openai_compat_usage_normalizes_input_output_aliases():

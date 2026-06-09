@@ -341,7 +341,7 @@ async def record_run_outcome_memory(
     metabolic: Any | None = None,
 ) -> None:
     writer_owner = metabolic or owner or task_store
-    if semantic is None and writer_owner is None and task_store is None:
+    if episodic is None and semantic is None and writer_owner is None and task_store is None:
         return
     is_failure = bool(error) or status == "failed"
     if episodic is not None:
@@ -649,22 +649,21 @@ async def finalize_run(
         tool_name_for_filter = str(result.metadata.get("tool_name") or "")
         if status == "succeeded" and not _should_record_successful_run(tool_name_for_filter):
             _log.debug("[run-finalize] Skipping semantic memory for low-value successful run: %s", tool_name_for_filter)
-        else:
-            await record_run_outcome_memory(
-                ctx.episodic,
-                ctx.semantic,
-                memory_cfg=getattr(ctx.config, "memory", None),
-                run_id=run_id,
-                task_id=resolved_task_id,
-                tool_name=tool_name_for_filter,
-                worker_type=str(result.metadata.get("worker_type") or ""),
-                status=status,
-                progress=progress,
-                summary=result.summary,
-                error=result.error or "",
-                evidence=result.evidence,
-                task_store=ctx.task_store,
-            )
+        await record_run_outcome_memory(
+            ctx.episodic,
+            ctx.semantic,
+            memory_cfg=getattr(ctx.config, "memory", None),
+            run_id=run_id,
+            task_id=resolved_task_id,
+            tool_name=tool_name_for_filter,
+            worker_type=str(result.metadata.get("worker_type") or ""),
+            status=status,
+            progress=progress,
+            summary=result.summary,
+            error=result.error or "",
+            evidence=result.evidence,
+            task_store=ctx.task_store,
+        )
     if resolved_task_id:
         await update_task_result(
             ctx,

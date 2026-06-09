@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 
 from provider.base import Message
-from provider.catalog import lookup_model
+from provider.catalog import lookup_model, lookup_model_ref
+from provider.codex_oauth import (
+    DEFAULT_CODEX_API_BASE_URL,
+    build_codex_headers,
+    resolve_codex_oauth_token,
+)
 from provider.openai_compat_helpers import (
     _EMBED_MAX_CHARS,
     _LEVEL_FRACS,
@@ -191,12 +196,45 @@ class _CopilotMode(_ModeAdapter):
             raise
 
 
+class _CodexMode(_ModeAdapter):
+    """OpenAI Codex OAuth 模式：ChatGPT Codex backend + responses API。"""
+
+    def __init__(self, base_url: str, api_key: str, timeout: float | None, auth_profile_id: str = ""):
+        super().__init__((base_url or DEFAULT_CODEX_API_BASE_URL).rstrip("/"), api_key, timeout)
+        self.auth_profile_id = auth_profile_id
+
+    def build_sync_client(self) -> httpx.Client:
+        return httpx.Client(timeout=self.timeout)
+
+    def build_async_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            timeout=self.timeout,
+            limits=httpx.Limits(max_keepalive_connections=5, keepalive_expiry=20),
+        )
+
+    def resolve_url(self, path: str) -> str:
+        return f"{self.base_url}{path}"
+
+    async def request_headers(self) -> dict[str, str]:
+        resolved = resolve_codex_oauth_token(profile_id=self.auth_profile_id) if self.auth_profile_id else resolve_codex_oauth_token()
+        if not resolved or not resolved.token:
+            raise OSError(
+                "未找到 OpenAI Codex OAuth token。\n"
+                "请先执行 `lingzhou auth login-codex`，或设置 OPENAI_CODEX_ACCESS_TOKEN。"
+            )
+        return build_codex_headers(resolved.token)
+
+    def embedding_url(self) -> str:
+        raise RuntimeError("OpenAI Codex OAuth backend 不支持 embeddings")
+
+
 def _build_mode_adapter(
     *,
     mode: str,
     base_url: str,
     api_key: str = "",
     api_key_env: str | None = None,
+    auth_profile_id: str = "",
     timeout: float | None,
 ) -> _ModeAdapter:
     """根据 provider.mode 创建对应的适配器。
@@ -221,6 +259,9 @@ def _build_mode_adapter(
                 "  export GITHUB_TOKEN=your_token"
             )
         return _CopilotMode(base_url, resolved_api_key, timeout)
+
+    if mode == "codex":
+        return _CodexMode(base_url or DEFAULT_CODEX_API_BASE_URL, resolved_api_key, timeout, auth_profile_id)
 
     # openai 模式（百炼、DeepSeek 等标准 OpenAI 兼容）
     if not resolved_api_key:
@@ -259,9 +300,12 @@ class OpenAICompatProvider:
 
         # 凭证解析：openai 用 provider.api_key（env→auth-profile）
         #           copilot 用 resolve_copilot_token（COPILOT_ENV_ORDER + profile）
+        #           codex 在每次 request_headers 中解析/刷新 OAuth token
         if provider.mode == "copilot":
             _res = resolve_copilot_token(provider.api_key_env)
             _resolved_key = _res.token if _res else ""
+        elif provider.mode == "codex":
+            _resolved_key = ""
         else:
             _resolved_key = provider.api_key
 
@@ -270,6 +314,7 @@ class OpenAICompatProvider:
             mode=provider.mode,
             base_url=self._base_url,
             api_key=_resolved_key,
+            auth_profile_id=provider.auth_profile_id,
             timeout=cfg.timeout,
         )
 
@@ -414,6 +459,11 @@ class OpenAICompatProvider:
             payload["instructions"] = "\n\n".join(instructions_parts)
         if spec.get("reasoning") and level != "off":
             payload["reasoning"] = {"effort": _copilot_reasoning_effort(level)}
+            if self._provider_mode == "codex":
+                payload["reasoning"]["summary"] = "auto"
+                payload["include"] = ["reasoning.encrypted_content"]
+        if self._provider_mode == "codex":
+            payload["store"] = False
         if self._extra_body:
             payload.update(self._extra_body)
         return payload
@@ -458,7 +508,15 @@ class OpenAICompatProvider:
         return max(int(budget_max * frac), budget_min)
 
     def _model_spec(self) -> dict[str, Any]:
-        spec = lookup_model(self._model, catalog_path=getattr(self, "_catalog_path", None))
+        model_ref = getattr(self, "model_ref", "")
+        if model_ref:
+            spec = lookup_model_ref(model_ref, catalog_path=getattr(self, "_catalog_path", None))
+            if not isinstance(spec, dict):
+                spec = lookup_model_ref(model_ref)
+        else:
+            spec = lookup_model(self._model, catalog_path=getattr(self, "_catalog_path", None))
+            if not isinstance(spec, dict):
+                spec = lookup_model(self._model)
         return spec if isinstance(spec, dict) else {}
 
     def _record_usage(self, usage: dict | None) -> None:

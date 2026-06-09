@@ -120,6 +120,26 @@ def set_token_profile(
     save_auth_profiles(data, path)
 
 
+def set_oauth_profile(
+    *,
+    profile_id: str,
+    provider: str,
+    tokens: dict[str, Any],
+    auth_mode: str = "oauth",
+    path: Path | None = None,
+) -> None:
+    data = load_auth_profiles(path)
+    profiles = data.setdefault("profiles", {})
+    profiles[profile_id] = {
+        "type": "oauth",
+        "provider": provider,
+        "auth_mode": auth_mode,
+        "tokens": tokens,
+        "updated_at_ms": int(time.time() * 1000),
+    }
+    save_auth_profiles(data, path)
+
+
 def load_github_device_client_id(path: Path | None = None) -> str:
     path = path or GITHUB_DEVICE_AUTH_PATH
     env_value = os.environ.get("LINGZHOU_GITHUB_CLIENT_ID", "").strip()
@@ -212,4 +232,5 @@ __all__ = [
     "save_auth_profiles",
     "save_copilot_token_cache",
     "set_token_profile",
+    "set_oauth_profile",
 ]

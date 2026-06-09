@@ -70,7 +70,7 @@ def _build_continue_context(
         delta_lines = [f"- [{item.get('kind', '')}|p={item.get('priority', 0):.2f}] {item.get('content', '')}" for item in wm_delta]
         wm_delta_block = "## 本轮新增工作记忆（WM 更新，初始上下文之后）\n" + "\n".join(delta_lines) + "\n\n"
     action_result_block = ""
-    if action_result is not None:
+    if reply_only and action_result is not None:
         _ran = action_result.action_ran
         _succ = action_result.action_succeeded
         if not _ran:
@@ -96,7 +96,7 @@ def _build_continue_context(
         )
 
     emotion_block = ""
-    if emotion_state:
+    if reply_only and emotion_state:
         _dom = emotion_state.get("dominant", "")
         _val = emotion_state.get("valence", 0.0)
         _aro = emotion_state.get("arousal", 0.0)

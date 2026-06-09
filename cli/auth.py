@@ -10,6 +10,13 @@ import typer
 from rich.panel import Panel
 
 from cli.common import DEFAULT_CONFIG_PATH, console, load_cfg
+from provider.codex_oauth import (
+    CODEX_PROFILE_ID,
+    exchange_codex_device_authorization,
+    poll_codex_device_authorization,
+    request_codex_device_code,
+    save_codex_oauth_tokens,
+)
 from store.auth import (
     AUTH_PROFILES_PATH,
     COPILOT_PROFILE_ID,
@@ -256,6 +263,78 @@ def auth_login_copilot(
 ) -> None:
     """专用 Copilot 登录命令（默认走 GitHub token → Copilot token exchange）。"""
     _login_copilot_impl(config, force, method=method, oauth_client_id=oauth_client_id)
+
+
+def _login_codex_device_impl(force: bool) -> None:
+    """OpenAI Codex device/browser OAuth，流程与 OpenClaw 的 device auth 集成一致。"""
+    existing = get_auth_profile(CODEX_PROFILE_ID)
+    if existing and not force:
+        tokens = existing.get("tokens") if isinstance(existing, dict) else None
+        token = str(tokens.get("access_token", "") if isinstance(tokens, dict) else "").strip()
+        if token:
+            console.print("[yellow]已存在 OpenAI Codex 登录（使用 --force 重新授权）[/yellow]")
+            console.print(f"  profile: [dim]{CODEX_PROFILE_ID}[/dim]")
+            console.print(f"  token:   [dim]{mask_secret(token)}[/dim]")
+            raise typer.Exit(0)
+
+    try:
+        device = request_codex_device_code()
+    except Exception as exc:
+        console.print(f"[red]OpenAI device code 请求失败: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    console.print(Panel(
+        f"[bold]访问以下网址并输入验证码：[/bold]\n\n"
+        f"  网址: [link]{device.verification_url}[/link]\n"
+        f"  验证码: [bold yellow]{device.user_code}[/bold yellow]\n\n"
+        "  [dim]本机会尝试自动打开浏览器；远程环境请在本地浏览器打开网址。[/dim]",
+        border_style="cyan",
+        title="OpenAI Codex 授权",
+    ))
+    try:
+        import webbrowser
+        webbrowser.open(device.verification_url)
+    except Exception:
+        pass
+
+    console.print("[dim]等待 OpenAI 授权...[/dim]")
+    try:
+        authorization = poll_codex_device_authorization(
+            device,
+            on_waiting=lambda: console.print("  [dim]等待确认...[/dim]", end="\r"),
+        )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]授权已取消[/yellow]")
+        raise typer.Exit(130) from None
+    except TimeoutError:
+        console.print("\n[yellow]授权超时，请重试[/yellow]")
+        raise typer.Exit(1)
+    except Exception as exc:
+        console.print(f"\n[red]OpenAI 授权失败: {exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    try:
+        tokens = exchange_codex_device_authorization(authorization)
+    except Exception as exc:
+        console.print(f"\n[red]OpenAI token exchange 失败: {exc}[/red]")
+        raise typer.Exit(1)
+
+    save_codex_oauth_tokens(tokens)
+    access_token = str(tokens.get("access_token") or "").strip()
+    console.print(
+        f"\n[green]✓ OpenAI Codex 登录信息已保存[/green]\n"
+        f"  auth profiles: [dim]{AUTH_PROFILES_PATH}[/dim]\n"
+        f"  profile:       [dim]{CODEX_PROFILE_ID}[/dim]\n"
+        f"  token:         [dim]{mask_secret(access_token)}[/dim]"
+    )
+
+
+@auth_app.command("login-codex")
+def auth_login_codex(
+    force: Annotated[bool, typer.Option("--force/--no-force", help="已有 token 时强制重新授权")] = False,
+) -> None:
+    """专用 OpenAI Codex 登录命令（浏览器/device OAuth，保存到 openai-codex profile）。"""
+    _login_codex_device_impl(force)
 
 
 @auth_app.command("set-token")

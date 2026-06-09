@@ -71,19 +71,24 @@ def smoke_test_module(
     else:
         parent_imports_lines = ""
 
-    try:
-        import tools.registry as _curr_registry_mod
+    preload_registry = bool(snippet.strip())
+    if preload_registry:
+        try:
+            import tools.registry as _curr_registry_mod
 
-        _registry_file = str(Path(_curr_registry_mod.__file__).resolve())
-    except Exception:
-        _registry_file = str((root / "tools" / "registry.py").resolve())
+            _registry_file = str(Path(_curr_registry_mod.__file__).resolve())
+        except Exception:
+            _registry_file = str((root / "tools" / "registry.py").resolve())
 
-    try:
-        import tools.view_protocols as _curr_vp_mod
+        try:
+            import tools.view_protocols as _curr_vp_mod
 
-        _view_protocols_file = str(Path(_curr_vp_mod.__file__).resolve())
-    except Exception:
-        _view_protocols_file = str((root / "tools" / "view_protocols.py").resolve())
+            _view_protocols_file = str(Path(_curr_vp_mod.__file__).resolve())
+        except Exception:
+            _view_protocols_file = str((root / "tools" / "view_protocols.py").resolve())
+    else:
+        _registry_file = ""
+        _view_protocols_file = ""
 
     staging_path = generated_dir() / f"_smoke_staging_{module_path.stem}_{uuid.uuid4().hex}{module_path.suffix}"
     try:
@@ -94,20 +99,21 @@ import sys
 sys.path.insert(0, {str(root)!r})
 import importlib.util as _ilu
 import types as _types
-_tools_pkg = _types.ModuleType("tools")
-_tools_pkg.__path__ = [{str(root / "tools")!r}]
-_tools_pkg.__package__ = "tools"
-sys.modules.setdefault("tools", _tools_pkg)
-_vp_spec = _ilu.spec_from_file_location("tools.view_protocols", {_view_protocols_file!r})
-_vp_mod = _ilu.module_from_spec(_vp_spec)
-_vp_mod.__package__ = "tools"
-sys.modules["tools.view_protocols"] = _vp_mod
-_vp_spec.loader.exec_module(_vp_mod)
-_reg_spec = _ilu.spec_from_file_location("tools.registry", {_registry_file!r})
-_reg_mod = _ilu.module_from_spec(_reg_spec)
-_reg_mod.__package__ = "tools"
-sys.modules["tools.registry"] = _reg_mod
-_reg_spec.loader.exec_module(_reg_mod)
+if {preload_registry!r}:
+    _tools_pkg = _types.ModuleType("tools")
+    _tools_pkg.__path__ = [{str(root / "tools")!r}]
+    _tools_pkg.__package__ = "tools"
+    sys.modules.setdefault("tools", _tools_pkg)
+    _vp_spec = _ilu.spec_from_file_location("tools.view_protocols", {_view_protocols_file!r})
+    _vp_mod = _ilu.module_from_spec(_vp_spec)
+    _vp_mod.__package__ = "tools"
+    sys.modules["tools.view_protocols"] = _vp_mod
+    _vp_spec.loader.exec_module(_vp_mod)
+    _reg_spec = _ilu.spec_from_file_location("tools.registry", {_registry_file!r})
+    _reg_mod = _ilu.module_from_spec(_reg_spec)
+    _reg_mod.__package__ = "tools"
+    sys.modules["tools.registry"] = _reg_mod
+    _reg_spec.loader.exec_module(_reg_mod)
 {parent_imports_lines}
 _spec = _ilu.spec_from_file_location({real_module_name!r}, {str(staging_path)!r})
 mod = _ilu.module_from_spec(_spec)
