@@ -180,3 +180,58 @@ def build_action_first_cortex_patch(
         action_first["minimum_next_action"] = signal.minimum_next_action
     cortex["action_first"] = action_first
     return {"cortex": cortex}
+
+
+def _is_non_task_run(run: Any) -> bool:
+    return bool(str(getattr(run, "tool_name", "") or "").strip()) and not str(getattr(run, "tool_name", "") or "").startswith("task.")
+
+
+def _run_status(run: Any) -> str:
+    return str(getattr(run, "status", "") or "").strip().lower()
+
+
+def action_first_completion_blockers(
+    *,
+    task: Any,
+    recent_runs: list[Any],
+) -> list[str]:
+    """Return blockers that prevent completing an action-first task."""
+    result_json = getattr(task, "result_json", {}) or {}
+    cortex = result_json.get("cortex") if isinstance(result_json, dict) else None
+    if not isinstance(cortex, dict):
+        return []
+    action_first = cortex.get("action_first") if isinstance(cortex.get("action_first"), dict) else {}
+    captured_inputs = cortex.get("captured_inputs") if isinstance(cortex.get("captured_inputs"), list) else []
+    execute_like = (
+        bool(action_first.get("must_act"))
+        or str(action_first.get("intent") or "") == "execute"
+        or bool(captured_inputs)
+    )
+    if not execute_like:
+        return []
+
+    non_task_runs = [run for run in recent_runs if _is_non_task_run(run)]
+    blockers: list[str] = []
+    if not non_task_runs:
+        blockers.append("缺少执行型证据：尚未看到非 task 工具的成功运行。")
+    else:
+        latest = non_task_runs[0]
+        if _run_status(latest) in {"failed", "error", "cancelled"} or str(getattr(latest, "error_text", "") or "").strip():
+            blockers.append(f"最近一次实际动作 run#{getattr(latest, 'id', '?')} 失败，需先恢复或换路验证。")
+        if not any(_run_status(run) in {"succeeded", "success", "done", "completed"} for run in non_task_runs):
+            blockers.append("缺少完成证据：没有非 task 工具成功运行。")
+
+    checks = cortex.get("completion_checks")
+    if isinstance(checks, list) and checks:
+        done_statuses = {"done", "completed", "succeeded", "success", "passed", "ok"}
+        has_done_check = False
+        for item in checks:
+            if isinstance(item, dict):
+                status = str(item.get("status") or "").strip().lower()
+                has_done_check = has_done_check or status in done_statuses
+            else:
+                text = str(item or "").strip().lower()
+                has_done_check = has_done_check or any(marker in text for marker in done_statuses)
+        if not has_done_check:
+            blockers.append("completion_checks 尚无完成项，不能把计划/意图当作完成证据。")
+    return blockers

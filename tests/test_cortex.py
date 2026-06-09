@@ -300,7 +300,29 @@ def test_auto_cortex_patch_appends_run_outcomes_without_overwriting_intent():
     assert cortex["experiments"][1]["run_id"] == "1"
     assert "run#2 shell.run failed" in cortex["failures"][0]
     assert cortex["recovery_state"] == "recovering_from_run_failure"
+    assert cortex["problem_runtime"]["phase"] == "recovering"
+    assert cortex["problem_runtime"]["failure_streak"] == 1
     assert "next_verification" in cortex
+
+
+def test_auto_cortex_patch_marks_successful_non_task_run_as_verification_collected():
+    patch = build_auto_cortex_patch(
+        existing_cortex={
+            "action_first": {"intent": "execute", "must_act": True},
+            "problem_runtime": {"phase": "acting", "failure_streak": 2},
+        },
+        run_id=5,
+        task_id=13,
+        tool_name="web.fetch",
+        status="succeeded",
+        summary="获取成功",
+    )
+
+    cortex = patch["cortex"]
+    assert cortex["problem_runtime"]["phase"] == "verification_collected"
+    assert cortex["problem_runtime"]["failure_streak"] == 0
+    assert cortex["problem_runtime"]["last_success_run_id"] == "5"
+    assert cortex["action_first"]["last_verifiable_action_run_id"] == "5"
 
 
 def test_auto_cortex_patch_skips_task_workbench_to_avoid_self_noise():

@@ -36,6 +36,9 @@ class CortexWorkspace:
     action_first_markers: list[str] = field(default_factory=list)
     minimum_next_action: str = ""
     captured_inputs: list[str] = field(default_factory=list)
+    runtime_phase: str = ""
+    runtime_last_status: str = ""
+    runtime_failure_streak: int = 0
 
 
 def _clip_text(text: str, max_chars: int) -> str:
@@ -205,6 +208,7 @@ def build_cortex_workspace(
     evidence = _as_list(cortex.get("evidence"), limit=8)
     evidence.extend(_facts_as_evidence(context_facts or [], limit=max(0, 8 - len(evidence))))
     action_first = cortex.get("action_first") if isinstance(cortex.get("action_first"), dict) else {}
+    problem_runtime = cortex.get("problem_runtime") if isinstance(cortex.get("problem_runtime"), dict) else {}
     return CortexWorkspace(
         task_id=int(getattr(task, "id", 0) or 0),
         title=str(getattr(task, "title", "") or "").strip(),
@@ -230,6 +234,9 @@ def build_cortex_workspace(
         action_first_markers=_as_list(action_first.get("markers"), limit=6),
         minimum_next_action=_text_field(action_first, "minimum_next_action"),
         captured_inputs=_captured_inputs(cortex.get("captured_inputs"), limit=8),
+        runtime_phase=_text_field(problem_runtime, "phase"),
+        runtime_last_status=_text_field(problem_runtime, "last_status"),
+        runtime_failure_streak=int(problem_runtime.get("failure_streak") or 0),
     )
 
 
@@ -257,6 +264,13 @@ def format_cortex_workspace(workspace: CortexWorkspace) -> str:
             f"- hypothesis={workspace.hypothesis or '（未建立）'}",
             f"- recovery_state={workspace.recovery_state or '（未进入恢复状态）'}",
             f"- next_verification={workspace.next_verification or '（未指定）'}",
+        ])
+    if workspace.runtime_phase or workspace.runtime_last_status or workspace.runtime_failure_streak:
+        lines.extend([
+            "problem_runtime:",
+            f"- phase={workspace.runtime_phase or 'unknown'}",
+            f"- last_status={workspace.runtime_last_status or 'unknown'}",
+            f"- failure_streak={workspace.runtime_failure_streak}",
         ])
     if (
         workspace.action_first_intent

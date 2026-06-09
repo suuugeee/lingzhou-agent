@@ -208,6 +208,46 @@ async def test_problem_solving_guard_allows_action_first_tool_actions() -> None:
     assert out.params["command"].startswith("curl -L")
 
 
+@pytest.mark.asyncio
+async def test_action_first_wait_falls_back_to_web_fetch_for_captured_url() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name in {"web.fetch", "task.list"} else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "action_first:\n"
+        "- intent=execute\n"
+        "- must_act=yes\n"
+        "captured_inputs:\n"
+        "- url=https://example.com/sub?clash=1\n"
+        "\n### 通用问题解决守卫\n"
+        "guard=active\n"
+        "signals=action_first_required, workbench_incomplete\n"
+        "missing_fields=domain, intent\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="我下一轮处理"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "web.fetch"
+    assert out.params == {"url": "https://example.com/sub?clash=1", "max_chars": 20000}
+    assert "Action-first fallback" in out.rationale
+
+
 def test_judgment_subpackages_importable() -> None:
     for name in ("core.judgment.boundary", "core.judgment.decision", "core.judgment.policy"):
         mod = importlib.import_module(name)

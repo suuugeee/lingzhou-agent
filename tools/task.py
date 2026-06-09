@@ -5,6 +5,7 @@ import logging as _logging
 import uuid
 from typing import Any
 
+from core.cortex import action_first_completion_blockers
 from core.metabolic import (
     add_semantic_memory as metabolic_add_semantic_memory,
 )
@@ -298,6 +299,22 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 ),
             )
         recent_runs = await ctx.task_store.list_runs(task_id=task.id, limit=12)
+        action_first_blockers = action_first_completion_blockers(task=task, recent_runs=recent_runs)
+        if action_first_blockers:
+            return ToolResult(
+                summary=(
+                    f"任务 [{task.id}] 暂不允许完成：Action-first 执行任务仍缺少验收证据。"
+                    + " ".join(action_first_blockers)
+                ),
+                error="ActionFirstCompletionBlocked",
+                skipped=True,
+                metadata=_task_metadata(
+                    task,
+                    tool_name="task.complete",
+                    log_summary=f"task.complete rejected ActionFirstCompletionBlocked id={task.id}",
+                    blockers=action_first_blockers,
+                ),
+            )
         recent_tools = [
             r.tool_name for r in recent_runs
             if r.status == "succeeded" and r.tool_name and not r.tool_name.startswith("task.")

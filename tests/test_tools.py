@@ -149,6 +149,71 @@ async def _task_tools_do_not_reenter_terminal_tasks():
             await store.close()
 
 
+def test_task_complete_blocks_action_first_tasks_until_verifiable_success():
+    asyncio.run(_task_complete_blocks_action_first_tasks_until_verifiable_success())
+
+
+async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    class _Registry:
+        def get(self, name: str):
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "action-first-complete.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "下载并应用配置",
+                goal="用户给了 URL，需要下载、验证并应用",
+                status="in_progress",
+                result_json={
+                    "cortex": {
+                        "action_first": {"intent": "execute", "must_act": True},
+                        "captured_inputs": [{"kind": "url", "value": "https://example.com/sub"}],
+                    }
+                },
+            )
+            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
+            ctx.registry = _Registry()
+
+            no_evidence = await task_complete({"task_id": task_id}, ctx)
+            assert no_evidence.skipped is True
+            assert no_evidence.error == "ActionFirstCompletionBlocked"
+            assert "缺少执行型证据" in no_evidence.summary
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="failed",
+                tool_name="web.fetch",
+                error_text="Timeout",
+            )
+            failed_latest = await task_complete({"task_id": task_id}, ctx)
+            assert failed_latest.skipped is True
+            assert failed_latest.error == "ActionFirstCompletionBlocked"
+            assert "失败" in failed_latest.summary
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="web.fetch",
+                log_text="fetched ok",
+            )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
 def test_task_tools_prefer_ctx_focus_task_over_global_active():
     asyncio.run(_task_tools_prefer_ctx_focus_task_over_global_active())
 

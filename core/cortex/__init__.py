@@ -2,6 +2,7 @@
 
 from .action_first import (
     ActionFirstSignal,
+    action_first_completion_blockers,
     build_action_first_cortex_patch,
     extract_action_first_signal,
 )
@@ -11,6 +12,7 @@ from .workspace import build_cortex_workspace, format_cortex_workspace
 
 __all__ = [
     "ActionFirstSignal",
+    "action_first_completion_blockers",
     "build_action_first_cortex_patch",
     "build_auto_cortex_patch",
     "build_auto_cortex_result_patch",

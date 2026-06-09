@@ -116,8 +116,21 @@ def build_auto_cortex_patch(
         [experiment],
         limit=_MAX_ITEMS["experiments"],
     )
+    runtime = dict(cortex.get("problem_runtime") if isinstance(cortex.get("problem_runtime"), dict) else {})
+    runtime["last_run_id"] = str(int(run_id))
+    runtime["last_tool"] = tool
+    runtime["last_status"] = run_status
 
     if run_status == "succeeded":
+        if not tool.startswith("task."):
+            runtime["phase"] = "verification_collected"
+            runtime["last_success_run_id"] = str(int(run_id))
+            runtime["failure_streak"] = 0
+            action_first = dict(cortex.get("action_first") if isinstance(cortex.get("action_first"), dict) else {})
+            if action_first:
+                action_first["last_verifiable_action_run_id"] = str(int(run_id))
+                action_first["last_verifiable_action_tool"] = tool
+                cortex["action_first"] = action_first
         capability = {"name": f"{tool} 可用", "status": "available"}
         cortex["capabilities"] = _merge_list(
             cortex.get("capabilities"),
@@ -139,6 +152,9 @@ def build_auto_cortex_patch(
             limit=_MAX_ITEMS["progress"],
         )
     elif run_status in {"failed", "cancelled"} or err:
+        runtime["phase"] = "recovering"
+        runtime["failure_streak"] = int(runtime.get("failure_streak") or 0) + 1
+        runtime["last_failure_run_id"] = str(int(run_id))
         failure_detail = _meaningful_detail(err, summary, evidence, progress)
         failure_line = f"run#{int(run_id)} {tool} {run_status}"
         if failure_detail:
@@ -152,6 +168,8 @@ def build_auto_cortex_patch(
         if not str(cortex.get("next_verification") or "").strip():
             cortex["next_verification"] = f"修正 {tool} 的失败原因后，用不同证据路径验证任务 #{int(task_id)} 是否推进。"
 
+    if runtime:
+        cortex["problem_runtime"] = runtime
     return {"cortex": cortex}
 
 

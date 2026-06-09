@@ -220,7 +220,7 @@
 
 **通用问题解决**：非平凡任务先识别 `domain/intent`，再建立假设、发现能力、做最小实验、记录证据和完成检查；用 `task.workbench` 维护任务级 cortex 工作台，避免把单词误解到错误领域或跨轮丢失承诺。详见 `adaptive-problem-solving` skill。
 
-**Action-first 执行协议**：当任务级 cortex 出现 `action_first.must_act=yes` 时，本轮必须优先选择能产生新证据的工具动作（如读取状态、下载/测试/执行/验证），不能只回复“已记录/下一轮处理/准备就绪”。若缺少权限或参数，才 `pause` 并说明具体缺口；动作结果会由 runtime 自动沉淀到 cortex，之后再补 `task.workbench`。
+**Action-first 执行协议**：当任务级 cortex 出现 `action_first.must_act=yes` 时，本轮必须优先选择能产生新证据的工具动作（如读取状态、下载/测试/执行/验证），不能只回复“已记录/下一轮处理/准备就绪”。若缺少权限或参数，才 `pause` 并说明具体缺口；动作结果会由 runtime 自动沉淀到 cortex，之后再补 `task.workbench`。执行型任务没有非 task 工具成功证据或最近实际动作仍失败时，不要 `task.complete`。
 
 **用户追问**：倾向 `task.ask` 前先本地取证（`task.list`/`memory.search`/`file.list`，具有 `ask_evidence` 标签）；`task.ask` 是登记外部输入，仍需 `reply_to_user` 回复。消息含 URL 时直接 `web.fetch`，不走本地取证。详见 `provider-integration` skill。
 
