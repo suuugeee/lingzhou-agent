@@ -581,6 +581,48 @@ def test_waiting_tasks_section_exposes_wait_reason_and_next_step():
     assert "next=拿到源路径后恢复任务并重新验证目录结构" in text
 
 
+def test_task_anchor_item_includes_recovery_hint():
+    from core.loop.runtime.memory_hooks import build_task_anchor_item
+    from types import SimpleNamespace
+
+    task = SimpleNamespace(
+        id=1,
+        title="复盘成长闭环",
+        goal="确认 recovery 机制",
+        next_step="执行 memory 回溯",
+        result_json={
+            "cortex": {
+                "recovery_state": "recovering_from_run_failure",
+                "next_verification": "重新执行 tool.workbench 并验证下一步",
+            }
+        },
+    )
+
+    item = build_task_anchor_item(task)
+    assert "恢复状态: recovering_from_run_failure" in item.content
+    assert "下一步验证: 重新执行 tool.workbench 并验证下一步" in item.content
+
+
+def test_fmt_task_includes_recovery_hint():
+    from core.judgment.context.tasks import _fmt_task
+    from store.task import Task
+
+    task = Task(
+        id=11,
+        title="修复闭环停摆",
+        status="in_progress",
+        priority="normal",
+        created_at="2026-06-10T10:00:00+00:00",
+        goal="修复决策停摆",
+        next_step="读取 task 历史",
+        result_json={"cortex": {"recovery_state": "recovering_from_runtime_guard", "next_verification": "执行 probe.run 验证"}},
+    )
+
+    text = _fmt_task(task)
+    assert "恢复状态: recovering_from_runtime_guard" in text
+    assert "下一步验证: 执行 probe.run 验证" in text
+
+
 def test_runnable_tasks_section_omits_active_task():
     from core.judgment.context.tasks import _fmt_runnable_tasks
     from store.task import Task
