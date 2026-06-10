@@ -103,6 +103,9 @@ def _fmt_memory_system(
     max_tick_queue: int,
 ) -> str:
     stats = cast(Any, semantic).stats()
+    embedding_provider = getattr(memory_cfg, "embedding_provider", None) if memory_cfg is not None else None
+    embedding_model = getattr(memory_cfg, "embedding_model", None) if memory_cfg is not None else None
+    embedding_fallback = getattr(memory_cfg, "embedding_fallback", None) if memory_cfg is not None else None
     local_embed_model = getattr(memory_cfg, "local_embed_model", None) if memory_cfg is not None else None
     local_embed_guard = bool(getattr(memory_cfg, "local_embed_command_guard", True)) if memory_cfg is not None else True
     local_embed_min_mib = int(getattr(memory_cfg, "local_embed_min_available_mib", 12288) or 0) if memory_cfg is not None else 12288
@@ -120,6 +123,9 @@ def _fmt_memory_system(
         f"semantic_maintenance_startup_seconds: {float(stats.get('maintenance_last_startup_seconds') or 0.0):.3f}",
         f"semantic_maintenance_background_seconds: {float(stats.get('maintenance_last_background_seconds') or 0.0):.3f}",
         f"embedding_enabled: {'yes' if stats.get('embedding_enabled') else 'no'}",
+        f"embedding_provider: {embedding_provider or 'local'}",
+        f"embedding_model: {embedding_model or 'none'}",
+        f"embedding_fallback: {embedding_fallback or 'fts'}",
         f"local_embed_model: {local_embed_model or 'none'}",
         f"local_embed_command_guard: {'yes' if local_embed_guard else 'no'}",
         f"local_embed_min_available_mib: {local_embed_min_mib}",

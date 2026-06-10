@@ -39,6 +39,13 @@ class Config(BaseModel):
             "provider-name 必须在 providers 中定义。"
         )
     )
+    vision_model: str | None = Field(
+        default="copilot/gpt-5.4",
+        description=(
+            "识图/视觉模型引用，格式 'provider-name/model-id'。"
+            "image.analyze 优先使用该模型；设为 null 时按模型目录自动选择具备 vision + image 能力的模型。"
+        ),
+    )
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     timeout: float | None = Field(
         default=None,
@@ -286,6 +293,8 @@ def _strip_config_doc_fields(value: Any) -> Any:
 
 
 def _format_config_doc_default(value: Any) -> str:
+    if value is None:
+        return "null"
     if isinstance(value, bool):
         return "true" if value else "false"
     if isinstance(value, str):
@@ -302,6 +311,7 @@ def config_reference_defaults() -> dict[str, str]:
     evolution = EvolutionConfig()
     gateway = GatewayConfig()
     return {
+        "vision_model": _format_config_doc_default(Config.model_fields["vision_model"].default),
         "loop.max_concurrent_ticks": _format_config_doc_default(loop.max_concurrent_ticks),
         "loop.max_tick_queue": _format_config_doc_default(loop.max_tick_queue),
         "loop.max_idle_gap": _format_config_doc_default(loop.max_idle_gap),
@@ -313,6 +323,9 @@ def config_reference_defaults() -> dict[str, str]:
         "memory.working_capacity": _format_config_doc_default(memory.working_capacity),
         "memory.max_events": _format_config_doc_default(memory.max_events),
         "memory.semantic_decay_lambda": _format_config_doc_default(memory.semantic_decay_lambda),
+        "memory.embedding_provider": _format_config_doc_default(memory.embedding_provider),
+        "memory.embedding_model": _format_config_doc_default(memory.embedding_model),
+        "memory.embedding_fallback": _format_config_doc_default(memory.embedding_fallback),
         "memory.embedding_weight": _format_config_doc_default(memory.embedding_weight),
         "evolution.enabled": _format_config_doc_default(evolution.enabled),
         "evolution.trigger_min_failures": _format_config_doc_default(evolution.trigger_min_failures),

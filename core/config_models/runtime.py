@@ -1,7 +1,7 @@
 """core.config_models.runtime — prompts/memory 与运行时记忆辅助函数。"""
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -53,9 +53,23 @@ class MemoryConfig(BaseModel):
         le=10.0,
         description="语义记忆激活衰减率（Ebbinghaus，λ/天）；0 表示不衰减",
     )
+    embedding_provider: str = Field(
+        default="local",
+        description=(
+            "独立 embedding provider 名。'local'=使用本地 local_embed_model；"
+            "'none'=禁用向量检索；其他值需存在于 providers 中，并使用该 provider 调用 embedding_model。"
+        ),
+    )
     embedding_model: str | None = Field(
         default=None,
-        description="DashScope embedding model ID（如 'text-embedding-v3'）；None=禁用向量混合检索",
+        description="远程 embedding 模型 ID（如 'text-embedding-v3'）；本地 provider 不需要设置",
+    )
+    embedding_fallback: Literal["fts", "none"] = Field(
+        default="fts",
+        description=(
+            "embedding 不可用时的降级策略。fts=保持 FTS5/关键词检索；"
+            "none=不额外降级（当前等价于禁用向量函数，保留基础检索）。"
+        ),
     )
     embedding_weight: float = Field(
         default=0.3, ge=0.0, le=1.0,
@@ -103,9 +117,9 @@ class MemoryConfig(BaseModel):
         description="weekly daily summary 进入语义记忆时的 importance",
     )
     local_embed_model: str | None = Field(
-        default=None,
+        default="shibing624/text2vec-base-multilingual",
         description=(
-            "本地 SentenceTransformer 模型名（如 'BAAI/bge-m3'）；"
+            "本地 SentenceTransformer 模型名（如 'shibing624/text2vec-base-multilingual'）；"
             "设置后优先于 API embedding_model，需安装 sentence-transformers；None=不使用本地模型"
         ),
     )
@@ -117,7 +131,7 @@ class MemoryConfig(BaseModel):
         ),
     )
     local_embed_min_available_mib: int = Field(
-        default=12288,
+        default=2048,
         ge=0,
         description=(
             "加载本地 SentenceTransformer 或执行本地 embedding 批量重建前要求的可用内存 MiB；"

@@ -11,6 +11,7 @@ The default runtime directory layout is under `~/.lingzhou/`: `db_path`, `memory
 ```jsonc
 {
   "model": "bailian/qwen3.6-plus",
+  "vision_model": "copilot/gpt-5.4",
   "routing": {
     "reader": "bailian/qwen-plus",
     "reasoner": "copilot/gpt-5.4",
@@ -20,6 +21,8 @@ The default runtime directory layout is under `~/.lingzhou/`: `db_path`, `memory
 ```
 
 Providers are defined in the `providers` section. Environment variables or auth profiles remain the recommended source of API keys; the setup flow may also store a key directly in a local machine config, but that file should never be committed.
+
+`vision_model` is the preferred model for `image.analyze`; set it to `null` to let the runtime pick a vision-capable model from the catalog.
 
 ## Loop Parameters
 
@@ -47,6 +50,9 @@ Providers are defined in the `providers` section. Environment variables or auth 
 | `memory.working_capacity` | working memory item capacity |
 | `memory.max_events` | episodic event cap |
 | `memory.semantic_decay_lambda` | semantic memory decay coefficient |
+| `memory.embedding_provider` | independent embedding provider; `local` uses local embeddings, `none` disables vector embedding, other values select a named provider |
+| `memory.embedding_model` | embedding model ID, independent from the main chat model when `embedding_provider` is set |
+| `memory.embedding_fallback` | fallback behavior when embeddings are unavailable; default keeps FTS5/text retrieval |
 | `memory.embedding_weight` | hybrid retrieval vector weight |
 
 ## Evolution Parameters

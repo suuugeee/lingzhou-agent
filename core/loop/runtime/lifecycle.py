@@ -57,6 +57,12 @@ async def shutdown_runtime(loop: Any) -> None:
         await loop._tick_dispatcher.shutdown()
     loop._probe_manager.stop()
     await loop._task_store.close()
+    embedding_provider = getattr(loop, "_embedding_provider", None)
+    if embedding_provider is not None and embedding_provider is not loop._provider:
+        try:
+            await embedding_provider.close()
+        except Exception:
+            _log.exception("[loop] 关闭 embedding provider 失败")
     await loop._provider.close()
     for routing_provider in loop._routing_providers.values():
         try:

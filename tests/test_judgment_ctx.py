@@ -3437,6 +3437,9 @@ def test_memory_system_section_exposes_local_embedding_guard():
         workspace_dir="/tmp/workspace",
         semantic=_Semantic(),
         memory_cfg=SimpleNamespace(
+            embedding_provider="local",
+            embedding_model=None,
+            embedding_fallback="fts",
             local_embed_model="BAAI/bge-m3",
             local_embed_command_guard=True,
             local_embed_min_available_mib=12288,
@@ -3445,6 +3448,9 @@ def test_memory_system_section_exposes_local_embedding_guard():
         max_tick_queue=2,
     )
 
+    assert "embedding_provider: local" in text
+    assert "embedding_model: none" in text
+    assert "embedding_fallback: fts" in text
     assert "local_embed_model: BAAI/bge-m3" in text
     assert "local_embed_command_guard: yes" in text
     assert "local_embed_min_available_mib: 12288" in text

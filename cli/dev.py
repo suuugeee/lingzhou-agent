@@ -15,6 +15,7 @@ from cli.common import DEFAULT_CONFIG_PATH, PROJECT_ROOT, console, load_cfg
 from cli.dev_helpers import (
     _apply_model_target_selection,
     _effective_target_model,
+    _model_supports_vision,
     _normalize_model_target,
     _preferred_model_index,
     _set_db_routing_override,
@@ -142,6 +143,8 @@ def model(
                     tags.append("thinking")
                 if m.get("reasoning"):
                     tags.append("reasoning")
+                if _model_supports_vision(m):
+                    tags.append("vision")
                 tag_str = f"  [dim][{', '.join(tags)}][/dim]" if tags else ""
                 ctx_str = f"  [dim]{ctx_k}K[/dim]" if ctx_k else ""
                 console.print(f"  {m['id']}{ctx_str}{tag_str}")
@@ -179,6 +182,7 @@ def model(
         console.print("\n[bold]选择要设置的模型槽位[/bold]")
         target_options = [
             ("primary", f"主模型 (model)  [dim]当前: {current}[/dim]"),
+            ("vision", f"识图模型 (vision_model)  [dim]当前: {_effective_target_model(cfg_data, 'vision')}[/dim]"),
             ("reasoner", f"思考层 (reasoner)  [dim]当前: {_effective_target_model(cfg_data, 'reasoner')}[/dim]"),
             ("reader", f"Reader 层 (reader)  [dim]当前: {_effective_target_model(cfg_data, 'reader')}[/dim]"),
             ("repair", f"Repair 层 (repair)  [dim]当前: {_effective_target_model(cfg_data, 'repair')}[/dim]"),
@@ -304,6 +308,10 @@ def model(
 
         # 选模型
         catalog_models = list_provider_models(chosen_provider)
+        if _normalize_model_target(model_target) == "vision":
+            vision_models = [m for m in catalog_models if _model_supports_vision(m)]
+            if vision_models:
+                catalog_models = vision_models
         console.print(f"\n[bold]选择模型[/bold]  [dim](provider={chosen_provider})[/dim]")
         if catalog_models:
             preferred_index = _preferred_model_index(
@@ -317,6 +325,8 @@ def model(
                     tags.append("thinking")
                 if m.get("reasoning"):
                     tags.append("reasoning")
+                if _model_supports_vision(m):
+                    tags.append("vision")
                 ctx_str = f"  [dim]{ctx_k}K[/dim]" if ctx_k else ""
                 tag_str = f"  [dim][{', '.join(tags)}][/dim]" if tags else ""
                 mark = " [bold cyan]← 默认[/bold cyan]" if i - 1 == preferred_index else ""

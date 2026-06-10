@@ -572,7 +572,7 @@ async def _hot_reload_success_atomically_replaces_runtime(monkeypatch, tmp_path)
     assert old_reader.closed is True
     assert loop._soul._cfg is loop._cfg
     assert loop._soul.refresh_calls == 1
-    assert callable(loop._semantic._embed_fn)
+    assert loop._semantic._embed_fn is None
     assert loop._semantic._embedding_weight == loop._cfg.memory.embedding_weight
     assert self_model.last_cfg is loop._cfg
     assert create_calls["count"] == 1
@@ -580,6 +580,67 @@ async def _hot_reload_success_atomically_replaces_runtime(monkeypatch, tmp_path)
 
 def test_hot_reload_refreshes_runtime_routing_overrides_from_db(monkeypatch, tmp_path):
     asyncio.run(_hot_reload_refreshes_runtime_routing_overrides_from_db(monkeypatch, tmp_path))
+
+
+def test_hot_reload_replaces_independent_embedding_provider_without_main_swap(monkeypatch, tmp_path):
+    asyncio.run(_hot_reload_replaces_independent_embedding_provider_without_main_swap(monkeypatch, tmp_path))
+
+
+async def _hot_reload_replaces_independent_embedding_provider_without_main_swap(monkeypatch, tmp_path):
+    import core.loop.runtime.reload as reload_mod
+    from core.config import Config
+    from core.loop.runtime.builder import EmbeddingRuntime
+
+    cfg_path = tmp_path / "lingzhou.json"
+    mtime = time.time() - 10
+    _write_hot_reload_config(cfg_path, model="bailian/qwen-plus", mtime=mtime)
+    cfg = Config.load(cfg_path)
+
+    main_provider = _ReloadClosable("main")
+    old_embedding = _ReloadClosable("old-embedding")
+    new_embedding = _ReloadClosable("new-embedding")
+    _semantic = SimpleNamespace(_embed_fn=None, _embedding_weight=0.0)
+    loop = cast(
+        "Any",
+        SimpleNamespace(
+            _cfg=cfg,
+            _provider=main_provider,
+            _embedding_provider=old_embedding,
+            _routing_providers={},
+            _registry=object(),
+            _judgment=SimpleNamespace(self_model=_ReloadSelfModel()),
+            _execution="old-execution",
+            _evolution="old-evolution",
+            _perception="old-perception",
+            _semantic=_semantic,
+            semantic=_semantic,
+            _soul=_ReloadSoul(cfg),
+            _task_store=_ReloadTaskStore(),
+        ),
+    )
+
+    def _new_embed(text: str) -> list[float]:
+        return [float(len(text))]
+
+    candidate = reload_mod._HotReloadCandidate(
+        cfg=cfg,
+        provider=main_provider,
+        embedding_runtime=EmbeddingRuntime(_new_embed, new_embedding),
+        routing_providers={},
+        judgment=_ReloadJudgment(main_provider, object(), cfg),
+        execution=_ReloadExecution(object(), cfg),
+        evolution=_ReloadEvolution(cfg, main_provider, object()),
+        perception=_ReloadPerception(cfg),
+        replaced_provider_stack=False,
+    )
+
+    await reload_mod._commit_hot_reload_candidate(loop, candidate, cfg_mtime=mtime + 5, auth_mtime=0.0)
+
+    assert loop._provider is main_provider
+    assert loop._embedding_provider is new_embedding
+    assert old_embedding.closed is True
+    assert main_provider.closed is False
+    assert loop._semantic._embed_fn("abcd") == [4.0]
 
 
 def test_routing_overrides_reject_numeric_model_refs():

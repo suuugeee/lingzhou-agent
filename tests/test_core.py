@@ -1177,6 +1177,122 @@ def test_create_provider_with_model_exposes_public_model_ref(monkeypatch):
         asyncio.run(provider.close())
 
 
+def test_embedding_runtime_rejects_codex_embedding_provider():
+    from core.config import Config
+    from core.loop.runtime.builder import _build_embedding_runtime
+
+    cfg = Config.model_validate({
+        "providers": {
+            "openai-codex": {
+                "type": "openai_compat",
+                "mode": "codex",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "api_key_env": "OPENAI_CODEX_ACCESS_TOKEN",
+            }
+        },
+        "model": "openai-codex/gpt-5.5",
+        "memory": {
+            "embedding_provider": "openai-codex",
+            "embedding_model": "text-embedding-v3",
+        },
+    })
+    runtime = _build_embedding_runtime(cfg)
+
+    assert runtime.embed_fn is None
+    assert runtime.provider is None
+
+
+def test_embedding_runtime_uses_explicit_independent_provider(monkeypatch):
+    import core.loop.runtime.builder as builder_mod
+    from core.config import Config
+
+    cfg = Config.model_validate({
+        "providers": {
+            "openai-codex": {
+                "type": "openai_compat",
+                "mode": "codex",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "api_key_env": "OPENAI_CODEX_ACCESS_TOKEN",
+            },
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            },
+        },
+        "model": "openai-codex/gpt-5.5",
+        "memory": {
+            "embedding_provider": "bailian",
+            "embedding_model": "text-embedding-v3",
+        },
+    })
+
+    class _EmbeddingOnly:
+        model_ref = "bailian/text-embedding-v3"
+        _provider_mode = "openai"
+
+        def embed(self, text: str) -> list[float]:
+            return [float(len(text))]
+
+    created: list[str] = []
+
+    def _fake_create_provider_with_model(_cfg: Any, model_ref: str) -> _EmbeddingOnly:
+        created.append(model_ref)
+        return _EmbeddingOnly()
+
+    monkeypatch.setattr(builder_mod, "create_provider_with_model", _fake_create_provider_with_model)
+
+    runtime = builder_mod._build_embedding_runtime(cfg)
+
+    assert created == ["bailian/text-embedding-v3"]
+    assert runtime.provider is not None
+    assert runtime.embed_fn is not None
+    assert runtime.embed_fn("abc") == [3.0]
+
+
+def test_shutdown_runtime_closes_independent_embedding_provider():
+    asyncio.run(_shutdown_runtime_closes_independent_embedding_provider())
+
+
+async def _shutdown_runtime_closes_independent_embedding_provider():
+    from core.loop.runtime.lifecycle import shutdown_runtime
+
+    class _Dispatcher:
+        enabled = False
+
+    class _Probe:
+        def stop(self) -> None:
+            pass
+
+    class _Store:
+        async def close(self) -> None:
+            pass
+
+    class _Closable:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    main_provider = _Closable()
+    embedding_provider = _Closable()
+    loop = SimpleNamespace(
+        _tick_dispatcher=_Dispatcher(),
+        _probe_manager=_Probe(),
+        _task_store=_Store(),
+        _provider=main_provider,
+        _embedding_provider=embedding_provider,
+        _routing_providers={},
+        _cfg=SimpleNamespace(state_dir=Path("/tmp/lingzhou-test-no-state")),
+    )
+
+    await shutdown_runtime(loop)
+
+    assert embedding_provider.closed is True
+    assert main_provider.closed is True
+
+
 def test_gateway_start_prefers_config_default_channel_over_raw_json(monkeypatch, tmp_path):
     import core.loop as loop_mod
     from cli import gateway as gateway_mod
@@ -3468,6 +3584,23 @@ def test_image_model_routing_falls_back_to_vision_model():
     routed = _resolve_multimodal_model_ref(ctx, capability="vision", input_modality="image")
     assert routed != "deepseek/deepseek-v4-pro"
     assert routed == "bailian/qwen3.6-plus"
+
+
+def test_image_model_routing_prefers_configured_vision_model():
+    from tools.image import _resolve_multimodal_model_ref
+
+    ctx = cast(
+        "Any",
+        SimpleNamespace(
+            config=SimpleNamespace(
+                model="deepseek/deepseek-v4-pro",
+                vision_model="copilot/gpt-5.4",
+                active_provider_name="deepseek",
+                providers={"copilot": object(), "deepseek": object()},
+            )
+        ),
+    )
+    assert _resolve_multimodal_model_ref(ctx, capability="vision", input_modality="image") == "copilot/gpt-5.4"
 
 
 async def _file_list_and_memory_search():

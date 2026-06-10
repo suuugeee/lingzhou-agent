@@ -108,6 +108,7 @@
     "  copilot/claude-sonnet-4.5  — 200K Claude Sonnet 4.5"
   ],
   "model": "bailian/qwen3.6-plus",
+  "vision_model": "copilot/gpt-5.4",
 
   "routing": {
     "reader": "bailian/qwen3.6-plus",
@@ -239,7 +240,14 @@
     "run_result_failure_activation": 0.82,
     "run_result_success_valence": 0.65,
     "run_result_failure_valence": 0.35,
-    "embedding_model": "bailian/text-embedding-v3",
+    "embedding_provider": "local",
+    "embedding_model": null,
+    "embedding_fallback": "fts",
+    "local_embed_model": "shibing624/text2vec-base-multilingual",
+    "local_embed_min_available_mib": 2048,
+    "embedding_backfill_batch_size": 1,
+    "embedding_backfill_sleep_seconds": 0.5,
+    "embedding_backfill_max_text_chars": 4000,
     "embedding_weight": 0.4,
     "semantic_source_weight": 0.12,
     "semantic_temporal_weight": 0.08,

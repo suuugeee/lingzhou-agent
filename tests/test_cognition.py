@@ -1253,6 +1253,33 @@ def test_dev_model_target_selection_updates_reasoner_without_touching_primary_mo
     assert cfg_data["routing"]["reasoner"] == "copilot/o3"
 
 
+def test_dev_model_target_selection_updates_vision_model_without_touching_routing():
+    from cli.dev import _apply_model_target_selection
+
+    cfg_data = {
+        "model": "bailian/qwen3.6-plus",
+        "vision_model": "bailian/qwen3.6-plus",
+        "routing": {
+            "reasoner": "copilot/gpt-5.4",
+        },
+    }
+
+    result = _apply_model_target_selection(
+        cfg_data,
+        current_model="bailian/qwen3.6-plus",
+        new_model="copilot/gpt-5.4",
+        target="vision",
+    )
+
+    assert result["target"] == "vision"
+    assert result["previous"] == "bailian/qwen3.6-plus"
+    assert result["routing_changed"] == ["vision_model"]
+    assert result["runtime_override_tier"] is None
+    assert cfg_data["model"] == "bailian/qwen3.6-plus"
+    assert cfg_data["routing"] == {"reasoner": "copilot/gpt-5.4"}
+    assert cfg_data["vision_model"] == "copilot/gpt-5.4"
+
+
 def test_dev_model_target_selection_rejects_unknown_target():
     from cli.dev import _apply_model_target_selection
 
