@@ -1918,6 +1918,66 @@ def test_subagent_runner_shared_memory_does_not_write_parent_episodic():
     asyncio.run(_subagent_runner_shared_memory_does_not_write_parent_episodic())
 
 
+def test_subagent_episodic_view_accepts_parent_memory_signatures():
+    from core.subagent import _SubagentEpisodicView
+
+    class _Parent:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        def load_for_context(self, task_id: str | None, n_recent: int = 20) -> str:
+            self.calls.append(("load_for_context", task_id, n_recent))
+            return "task narrative"
+
+        def load_for_chat_context(
+            self,
+            chat_id: str | None,
+            n_recent: int = 20,
+            *,
+            max_chars: int | None = None,
+        ) -> str:
+            self.calls.append(("load_for_chat_context", chat_id, n_recent, max_chars))
+            return "chat narrative"
+
+        def load_for_interlocutor_context(
+            self,
+            interlocutor_id: str | None,
+            n_recent: int = 20,
+            *,
+            max_chars: int | None = None,
+        ) -> str:
+            self.calls.append(("load_for_interlocutor_context", interlocutor_id, n_recent, max_chars))
+            return "speaker narrative"
+
+        def load_for_task_narrative(self, task_id: str | None, n_recent: int = 20) -> str:
+            self.calls.append(("load_for_task_narrative", task_id, n_recent))
+            return "task-only narrative"
+
+        def load_recent_daily_context(self, days: int = 2, max_chars: int = 1200) -> str:
+            self.calls.append(("load_recent_daily_context", days, max_chars))
+            return "daily narrative"
+
+        def search(self, query: str, max_chars: int = 2000, exclude_task_id: str | None = None) -> str:
+            self.calls.append(("search", query, max_chars, exclude_task_id))
+            return "search result"
+
+    parent = _Parent()
+    view = _SubagentEpisodicView(parent)
+
+    assert view.load_for_context("task-1", 6) == "task narrative"
+    assert view.load_for_chat_context("chat-1", 7, max_chars=800) == "chat narrative"
+    assert view.load_for_interlocutor_context("speaker-1", 8, max_chars=900) == "speaker narrative"
+    assert view.load_for_task_narrative("task-2", 9) == "task-only narrative"
+    assert view.load_recent_daily_context(3, 1000) == "daily narrative"
+    assert parent.calls == [
+        ("load_for_context", "task-1", 6),
+        ("load_for_chat_context", "chat-1", 7, 800),
+        ("load_for_interlocutor_context", "speaker-1", 8, 900),
+        ("load_for_task_narrative", "task-2", 9),
+        ("load_recent_daily_context", 3, 1000),
+    ]
+
+
 async def _subagent_runner_shared_memory_does_not_write_parent_episodic():
     from core.execution import ExecutionLayer
     from core.judgment import JudgmentOutput
