@@ -9,6 +9,73 @@ from core.judgment.output import JudgmentOutput
 
 _PROBLEM_SOLVING_GUARD_ACTIVE = "### 通用问题解决守卫"
 _PROBLEM_SOLVING_ALLOWED_ACTIONS = {"task.workbench", "task.amend"}
+_RECOVERY_GATE_ACTIVE_MARKER = re.compile(
+    r"### 任务级皮层工作区\n(?:(?:.|\n)*?)(?:^### |\Z)",
+    re.MULTILINE,
+)
+
+
+def _extract_recovery_fields(context_text: str) -> tuple[str, str]:
+    """从上下文提取 recovery_state 与 next_verification."""
+    text = str(context_text or "")
+    section_match = _RECOVERY_GATE_ACTIVE_MARKER.search(text)
+    section_text = section_match.group(0) if section_match else text
+
+    recovery_state = ""
+    next_verification = ""
+    recovery_match = re.search(r"-\s*recovery_state=([^\n]+)", section_text)
+    if recovery_match:
+        recovery_state = str(recovery_match.group(1) or "").strip()
+    if not recovery_state:
+        recovery_match = re.search(r"恢复状态[:：]\s*(.+)", section_text)
+        if recovery_match:
+            recovery_state = str(recovery_match.group(1) or "").strip()
+
+    next_match = re.search(r"-\s*next_verification=([^\n]+)", section_text)
+    if next_match:
+        next_verification = str(next_match.group(1) or "").strip()
+    if not next_match:
+        next_match = re.search(r"下一步验证[:：]\s*(.+)", section_text)
+        if next_match:
+            next_verification = str(next_match.group(1) or "").strip()
+
+    if next_verification.startswith("（") and next_verification.endswith("）"):
+        next_verification = ""
+    if recovery_state.startswith("（") and recovery_state.endswith("）"):
+        recovery_state = ""
+    return recovery_state, next_verification
+
+
+def _build_recovery_fallback_action(
+    next_verification: str,
+    registry: Any | None,
+) -> tuple[str, dict[str, Any]] | None:
+    lowered = str(next_verification or "").lower()
+    getter = getattr(registry, "get", None)
+
+    def _has_tool(name: str) -> bool:
+        if getter is None:
+            return False
+        try:
+            return getter(name) is not None
+        except Exception:
+            return False
+
+    if "probe.run" in lowered and _has_tool("probe.run"):
+        return "probe.run", {}
+    if (
+        any(
+            marker in lowered
+            for marker in ("memory.search", "查找", "搜索", "检索", "记录", "历史")
+        )
+        and _has_tool("memory.search")
+    ):
+        return "memory.search", {"query": next_verification[:420], "limit": 5}
+    if "task.list" in lowered and _has_tool("task.list"):
+        return "task.list", {"status": "all", "limit": 8}
+    if _has_tool("task.list"):
+        return "task.list", {"status": "all", "limit": 8}
+    return None
 
 
 def _problem_solving_guard_active(context_text: str) -> bool:
@@ -18,6 +85,39 @@ def _problem_solving_guard_active(context_text: str) -> bool:
     next_section = context_text.find("\n### ", marker_index + len(_PROBLEM_SOLVING_GUARD_ACTIVE))
     section = context_text[marker_index:] if next_section < 0 else context_text[marker_index:next_section]
     return "guard=active" in section
+
+
+def _enforce_recovery_continuation(
+    output: JudgmentOutput,
+    *,
+    context_text: str,
+    registry: Any | None = None,
+) -> JudgmentOutput:
+    if output.decision != "wait":
+        return output
+
+    recovery_state, next_verification = _extract_recovery_fields(context_text)
+    if not (recovery_state and next_verification):
+        return output
+
+    fallback = _build_recovery_fallback_action(next_verification, registry)
+    if not fallback:
+        return output
+
+    action_id, params = fallback
+    return JudgmentOutput(
+        decision="act",
+        chosen_action_id=action_id,
+        params=params,
+        rationale=(
+            f"任务仍处于恢复态 {recovery_state} 且 next_verification 未完成，"
+            f"需要继续最小验证动作：{action_id}"
+        ),
+        reflection=output.reflection,
+        next_step=output.next_step,
+        model_strategy=dict(output.model_strategy or {}),
+        applied_skills=list(output.applied_skills or []),
+    )
 
 
 def _action_first_must_act(context_text: str) -> bool:
@@ -186,6 +286,7 @@ async def normalize_judgment_output(
     output = normalize_reply_pseudo_tool(output)
     output = enforce_action_first_progress(output, context_text=context_text, registry=registry)
     output = enforce_problem_solving_guard(output, context_text=context_text)
+    output = _enforce_recovery_continuation(output, context_text=context_text, registry=registry)
     return normalize_action_shape(
         output,
         registry=registry,
