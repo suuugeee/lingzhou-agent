@@ -2609,6 +2609,63 @@ async def _memory_embed_backfill_runs_in_small_batches():
         assert semantic.get_unembedded(modality="text", model="test-model", limit=10) == []
 
 
+def test_memory_embed_backfill_can_target_node_id():
+    asyncio.run(_memory_embed_backfill_can_target_node_id())
+
+
+async def _memory_embed_backfill_can_target_node_id():
+    from store.semantic import MemoryNode, SemanticMemory
+    from tools.memory import memory_embed_backfill
+
+    calls: list[str] = []
+
+    def _embed(text: str) -> list[float]:
+        calls.append(text)
+        return [0.0, 1.0]
+
+    with tempfile.TemporaryDirectory() as d:
+        semantic = SemanticMemory(Path(d), decay_lambda=0.0, embed_fn=_embed)
+        semantic.upsert(MemoryNode(id="target", kind="fact", title="target title", body="target body"))
+        semantic.upsert(MemoryNode(id="other", kind="fact", title="other title", body="other body"))
+        ctx = _tool_ctx(semantic=semantic)
+
+        result = await memory_embed_backfill(
+            {"node_id": "target", "batch_size": 10, "sleep_seconds": 0, "model": "test-model", "max_text_chars": 64},
+            ctx,
+        )
+
+        assert result.error is None
+        assert result.metadata["processed"] == 1
+        assert result.metadata["processed_ids"] == ["target"]
+        assert result.metadata["node_id"] == "target"
+        assert calls == ["target title target body"]
+        assert ("target", "target title target body") not in semantic.get_unembedded(modality="text", model="test-model", limit=10)
+        assert ("other", "other title other body") in semantic.get_unembedded(modality="text", model="test-model", limit=10)
+
+
+def test_memory_embed_backfill_target_node_id_not_found():
+    asyncio.run(_memory_embed_backfill_target_node_id_not_found())
+
+
+async def _memory_embed_backfill_target_node_id_not_found():
+    from store.semantic import SemanticMemory
+    from tools.memory import memory_embed_backfill
+
+    with tempfile.TemporaryDirectory() as d:
+        semantic = SemanticMemory(Path(d), decay_lambda=0.0, embed_fn=lambda text: [1.0])
+        ctx = _tool_ctx(semantic=semantic)
+
+        result = await memory_embed_backfill(
+            {"node_id": "missing", "sleep_seconds": 0, "model": "test-model"},
+            ctx,
+        )
+
+        assert result.skipped is True
+        assert result.error == "SemanticNodeNotFound"
+        assert result.metadata["node_id"] == "missing"
+        assert result.metadata["processed"] == 0
+
+
 def test_process_kill():
     """process.kill 可以终止后台进程。"""
     asyncio.run(_process_kill())
