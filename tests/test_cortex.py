@@ -325,6 +325,53 @@ def test_auto_cortex_patch_marks_successful_non_task_run_as_verification_collect
     assert cortex["action_first"]["last_verifiable_action_run_id"] == "5"
 
 
+def test_auto_cortex_patch_promotes_tool_input_recovery_hint():
+    patch = build_auto_cortex_patch(
+        existing_cortex={"domain": "runtime", "intent": "fix tool call"},
+        run_id=7,
+        task_id=13,
+        tool_name="task.workbench",
+        status="failed",
+        summary="工具参数缺失: task.workbench requires workbench",
+        error="ToolInputInvalid",
+        state_delta={
+            "tool_input_invalid": True,
+            "missing_params": ["workbench"],
+            "recovery_next_step": "按 task.workbench 的 manifest 重新调用工具；补齐必填参数 workbench。",
+            "retry_params_template": {"workbench": {}},
+        },
+    )
+
+    cortex = patch["cortex"]
+    assert cortex["recovery_state"] == "recovering_from_run_failure"
+    assert cortex["problem_runtime"]["phase"] == "recovering"
+    assert cortex["next_verification"] == "按 task.workbench 的 manifest 重新调用工具；补齐必填参数 workbench。"
+    assert cortex["experiments"][0]["run_id"] == "7"
+
+
+def test_auto_cortex_patch_promotes_completion_block_recovery_hint():
+    patch = build_auto_cortex_patch(
+        existing_cortex={"domain": "self_evolution", "intent": "self_drive_growth"},
+        run_id=8,
+        task_id=13,
+        tool_name="task.complete",
+        status="failed",
+        summary="任务皮层仍有未验证的下一步",
+        error="WorkbenchVerificationPending",
+        state_delta={
+            "completion_blocked": True,
+            "completion_blocker": "WorkbenchVerificationPending",
+            "recovery_next_step": "读取最新 loop 日志并确认 active_idle_gap 是否生效。",
+            "suggested_tools": ["file.read", "shell.run"],
+        },
+    )
+
+    cortex = patch["cortex"]
+    assert cortex["problem_runtime"]["phase"] == "recovering"
+    assert cortex["next_verification"] == "读取最新 loop 日志并确认 active_idle_gap 是否生效。"
+    assert "run#8 task.complete failed" in cortex["failures"][0]
+
+
 def test_auto_cortex_patch_skips_task_workbench_to_avoid_self_noise():
     assert build_auto_cortex_patch(
         existing_cortex={"domain": "git"},

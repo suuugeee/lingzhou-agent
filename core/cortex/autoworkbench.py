@@ -65,7 +65,7 @@ def _meaningful_detail(*values: Any) -> str:
 
 
 def _should_auto_record(tool_name: str, status: str, *, summary: str, error: str, evidence: str, state_delta: dict[str, Any], artifact_paths: list[str]) -> bool:
-    if tool_name in _SKIP_AUTO_TOOLS:
+    if tool_name in _SKIP_AUTO_TOOLS and status not in {"failed", "cancelled"} and not error:
         return False
     if status in {"failed", "cancelled"} or error:
         return True
@@ -165,8 +165,15 @@ def build_auto_cortex_patch(
             limit=_MAX_ITEMS["failures"],
         )
         cortex["recovery_state"] = "recovering_from_run_failure"
+        recovery_next_step = _clip_text(state.get("recovery_next_step") or state.get("next_verification") or "", limit=240)
         if not str(cortex.get("next_verification") or "").strip():
-            cortex["next_verification"] = f"修正 {tool} 的失败原因后，用不同证据路径验证任务 #{int(task_id)} 是否推进。"
+            cortex["next_verification"] = recovery_next_step or f"修正 {tool} 的失败原因后，用不同证据路径验证任务 #{int(task_id)} 是否推进。"
+    elif state.get("tool_input_invalid") or state.get("completion_blocked"):
+        recovery_next_step = _clip_text(state.get("recovery_next_step") or state.get("next_verification") or "", limit=240)
+        if recovery_next_step:
+            runtime["phase"] = "recovering"
+            cortex["recovery_state"] = "recovering_from_runtime_guard"
+            cortex["next_verification"] = recovery_next_step
 
     if runtime:
         cortex["problem_runtime"] = runtime
