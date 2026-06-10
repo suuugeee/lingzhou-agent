@@ -66,6 +66,12 @@ async def _worker_validates_required_tool_params_before_handler():
     assert result.skipped is True
     assert result.error == "ToolInputInvalid"
     assert result.metadata["missing_params"] == ["path"]
+    assert result.state_delta["tool_input_invalid"] is True
+    assert result.state_delta["missing_params"] == ["path"]
+    assert result.state_delta["retry_params_template"] == {"path": "<string>"}
+    assert result.metadata["retry_params_template"] == {"path": "<string>"}
+    assert result.state_delta["expected_params"][0]["name"] == "path"
+    assert "补齐必填参数 path" in result.state_delta["recovery_next_step"]
 
 
 def test_task_store_get_active_prefers_started_task_over_pending():

@@ -104,6 +104,8 @@ def _should_continue_within_tick(
     if action.decision != "act":
         return False
     tool_name = action.chosen_action_id or ""
+    if result is not None and result.skipped and str(result.error or "") == "ToolInputInvalid":
+        return True
     if tool_name == "task.complete":
         recoverable_errors = {
             "SelfDriveGrowthIncomplete",

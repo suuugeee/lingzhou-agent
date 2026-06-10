@@ -2415,6 +2415,15 @@ def test_should_continue_within_tick_for_autonomous_act():
         ),
     ) is True
     assert _should_continue_within_tick(
+        _judgment_output(decision="act", chosen_action_id="task.workbench"),
+        result=ToolResult(
+            summary="工具参数缺失: task.workbench requires workbench",
+            skipped=True,
+            error="ToolInputInvalid",
+            state_delta={"retry_params_template": {"workbench": {}}},
+        ),
+    ) is True
+    assert _should_continue_within_tick(
         _judgment_output(decision="act", chosen_action_id="task.complete"),
         result=ToolResult(summary="任务已完成", skipped=False, state_delta={"task_status": "done"}),
     ) is False
