@@ -286,6 +286,13 @@ async def _task_complete_blocks_unresolved_workbench_next_verification():
             assert blocked.error == "WorkbenchVerificationPending"
             assert "未验证的下一步" in blocked.summary
             assert "reasoner_route_drift_watch" in blocked.summary
+            assert blocked.state_delta["completion_blocked"] is True
+            assert blocked.state_delta["completion_blocker"] == "WorkbenchVerificationPending"
+            assert "reasoner_route_drift_watch" in blocked.state_delta["next_verification"]
+            assert "file.read" in blocked.state_delta["suggested_tools"]
+            assert "shell.run" in blocked.state_delta["suggested_tools"]
+            assert blocked.metadata["completion_blocked"] is True
+            assert blocked.metadata["recovery_next_step"] == blocked.state_delta["recovery_next_step"]
 
             await store.add_run(
                 task_id=task_id,
@@ -336,6 +343,10 @@ async def _task_complete_blocks_self_drive_growth_without_evidence():
             assert no_probe.skipped is True
             assert no_probe.error == "SelfDriveGrowthIncomplete"
             assert "非 task 工具取证" in no_probe.summary
+            assert no_probe.state_delta["completion_blocked"] is True
+            assert no_probe.state_delta["completion_blocker"] == "SelfDriveGrowthIncomplete"
+            assert "memory.search" in no_probe.state_delta["suggested_tools"]
+            assert "task.workbench" in no_probe.state_delta["suggested_tools"]
 
             await store.add_run(
                 task_id=task_id,
@@ -349,6 +360,8 @@ async def _task_complete_blocks_self_drive_growth_without_evidence():
             assert no_evidence.skipped is True
             assert no_evidence.error == "SelfDriveGrowthIncomplete"
             assert "成长证据" in no_evidence.summary
+            assert no_evidence.state_delta["completion_blocked"] is True
+            assert "证据" in no_evidence.state_delta["recovery_next_step"]
 
             await store.update_status(
                 task_id,
