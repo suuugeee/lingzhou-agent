@@ -28,7 +28,7 @@ from core.perception import (
 from memory.working import WMItem
 
 from ..cycle.chat import _bind_chat_id
-from ..cycle.focus import claim_focus_task, prepare_focus_task, task_matches_chat
+from ..cycle.focus import claim_focus_task, prepare_focus_task, resolve_focus_task, task_matches_chat
 from ..shared.common import (
     _perception_replay_fallback,
     _prefer_tier_for_task,
@@ -200,6 +200,8 @@ async def _prepare_active_task_for_tick(loop: Any, user_message: str, chat_id: s
 
     if not user_message:
         await loop._maybe_inject_self_drive()
+        if active_task is None:
+            active_task = await resolve_focus_task(loop, fallback_active=True)
         if loop._bootstrap_mode == "full":
             if active_task is not None:
                 content = (

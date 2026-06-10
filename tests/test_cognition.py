@@ -183,6 +183,10 @@ def test_self_drive_signal_auto_creates_lightweight_growth_task():
     asyncio.run(_self_drive_signal_auto_creates_lightweight_growth_task())
 
 
+def test_prepare_tick_adopts_auto_created_self_drive_task():
+    asyncio.run(_prepare_tick_adopts_auto_created_self_drive_task())
+
+
 def test_self_drive_signal_does_not_duplicate_pending_growth_task():
     asyncio.run(_self_drive_signal_does_not_duplicate_pending_growth_task())
 
@@ -351,6 +355,37 @@ async def _self_drive_signal_auto_creates_lightweight_growth_task():
             assert "open_questions:" in content
             assert "available_directions:" in content
             assert "task.add" not in content
+        finally:
+            await loop.task_store.close()
+            await loop.provider.close()
+
+
+async def _prepare_tick_adopts_auto_created_self_drive_task():
+    os.environ.setdefault("DASHSCOPE_API_KEY", "test-key")
+    os.environ.setdefault("GITHUB_TOKEN", "test-token")
+    from core.config import Config
+    from core.loop import CognitionLoop
+    from core.loop.tick import _prepare_active_task_for_tick
+
+    cfg = Config.load(_proj_root() / "lingzhou.json.example")
+    with tempfile.TemporaryDirectory() as d:
+        cfg.loop.db_path = f"{d}/state/runtime.db"
+        cfg.loop.memory_dir = f"{d}/memory"
+        cfg.loop.workspace_dir = f"{d}/workspace"
+        cfg.loop.act = False
+        cfg.evolution.enabled = False
+
+        loop = CognitionLoop(cfg)
+        await loop.task_store.open()
+        try:
+            loop._behavior._wait_streak = cfg.thresholds.curiosity_idle_min_cycles
+
+            active_task = await _prepare_active_task_for_tick(loop, user_message="", chat_id=None)
+
+            assert active_task is not None
+            assert active_task.source == "self_drive"
+            assert active_task.result_json["cortex"]["intent"] == "self_drive_growth"
+            assert active_task.next_step
         finally:
             await loop.task_store.close()
             await loop.provider.close()
