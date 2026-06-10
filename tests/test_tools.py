@@ -157,6 +157,10 @@ def test_task_complete_blocks_self_drive_growth_without_evidence():
     asyncio.run(_task_complete_blocks_self_drive_growth_without_evidence())
 
 
+def test_task_complete_blocks_unresolved_workbench_next_verification():
+    asyncio.run(_task_complete_blocks_unresolved_workbench_next_verification())
+
+
 async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
     from store.task import TaskStore
     from tools.task import task_complete
@@ -209,6 +213,87 @@ async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
                 status="succeeded",
                 tool_name="web.fetch",
                 log_text="fetched ok",
+            )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_unresolved_workbench_next_verification():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    class _Registry:
+        def get(self, name: str):
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-verification-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "self_drive_growth",
+                "domain": "self_evolution",
+                "evidence": ["recent logs show route drift probe returns too much context"],
+                "next_verification": "优先定位 reasoner_route_drift_watch 探针定义，确认是否能压缩正常路径输出。",
+                "completion_checks": [
+                    "已形成一个明确的一行级改进候选。",
+                    "当前不直接修改核心代码，因为还未定位具体实现文件。",
+                ],
+            }
+            task_id = await store.add_task(
+                "自我进化日志优化",
+                goal="定位并减少无效探针日志注入",
+                source="self_drive",
+                status="in_progress",
+                result_json={"cortex": cortex},
+            )
+            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
+            ctx.registry = _Registry()
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="counted recent logs",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote next verification",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="memory.add_semantic",
+                log_text="stored observation",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "未验证的下一步" in blocked.summary
+            assert "reasoner_route_drift_watch" in blocked.summary
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="file.read",
+                log_text="read probe definition",
             )
             completed = await task_complete({"task_id": task_id}, ctx)
             assert completed.error is None

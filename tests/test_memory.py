@@ -487,6 +487,20 @@ def test_episodic_search_cross_task_returns_different_task():
         assert "衰减" in result, f"应从旧任务召回相关内容，result={result!r}"
 
 
+def test_episodic_search_respects_max_chars_for_huge_hits():
+    from store.episodic import EpisodicMemory
+
+    with tempfile.TemporaryDirectory() as d:
+        ep = EpisodicMemory(Path(d), max_events=0)
+        ep.record("assistant", "memory_system " + "X" * 10000, task_id="legacy")
+
+        text = ep.search("memory_system", max_chars=1000, exclude_task_id="current")
+
+        assert text
+        assert len(text) <= 1000
+        assert "X" * 2000 not in text
+
+
 def test_episodic_search_exclude_task_id_blocks_self_echo():
     """exclude_task_id 过滤：当前任务的 narrative 不应作为跨任务命中返回。
 

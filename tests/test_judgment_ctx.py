@@ -3937,6 +3937,10 @@ def test_assemble_context_keeps_cross_task_episodic_out_of_current_task_narrativ
     asyncio.run(_assemble_context_keeps_cross_task_episodic_out_of_current_task_narrative())
 
 
+def test_assemble_context_clips_oversized_cross_task_episodic(caplog):
+    asyncio.run(_assemble_context_clips_oversized_cross_task_episodic(caplog))
+
+
 def test_assemble_context_prefers_focus_fact_over_global_active():
     asyncio.run(_assemble_context_prefers_focus_fact_over_global_active())
 
@@ -4456,6 +4460,77 @@ async def _assemble_context_keeps_cross_task_episodic_out_of_current_task_narrat
             assert "旧任务昨天说过要先去读 README。" in text
             assert "[跨任务检索命中]" not in text
             assert text.index("当前任务里刚确认了 focus 路由。") < text.index("### 跨任务情节线索（仅作切换候选，不并入当前任务叙事）")
+        finally:
+            await store.close()
+
+
+async def _assemble_context_clips_oversized_cross_task_episodic(caplog):
+    from core.config import Config
+    from core.judgment import CognitionFrame, JudgmentLayer
+    from core.perception import EmotionState
+    from memory.working import WorkingMemory
+    from store.episodic import EpisodicMemory
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "mode": "copilot",
+                "base_url": "https://api.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            },
+        },
+        "model": "copilot/gpt-5.4",
+        "thinking": "low",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "ctx.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "当前任务",
+                goal="读取最近日志，寻找重复模式或可优化点",
+                status="in_progress",
+                next_step="读取最近日志，寻找重复模式或可优化点",
+            )
+            active_task = await store.get_task_by_id(task_id)
+            assert active_task is not None
+
+            episodic = EpisodicMemory(Path(d) / "memory")
+            huge_cross_task = "[task=legacy role=assistant] " + "X" * 20000
+            episodic.search = lambda query, max_chars=2000, exclude_task_id=None: huge_cross_task  # type: ignore[method-assign]
+
+            layer = JudgmentLayer(_DummyProvider(), ToolRegistry(), cfg)
+            caplog.set_level(logging.WARNING, logger="lingzhou.judgment")
+            text = await layer._assembler._assemble_context(
+                CognitionFrame(
+                    percept=cast("Any", SimpleNamespace(prediction_error=0.0, workspace_dirty=False)),
+                    wm=WorkingMemory(capacity=20),
+                    task_store=store,
+                    episodic=episodic,
+                    semantic=SemanticMemory(Path(d) / "memory", decay_lambda=0.0),
+                    emotion=EmotionState.from_config(cfg),
+                ),
+                active_task=active_task,
+                user_message="继续处理日志优化",
+            )
+
+            assert "### 跨任务情节线索（仅作切换候选，不并入当前任务叙事）" in text
+            assert "X" * 5000 not in text
+            assert any("episodic_cross_task_clipped" in record.message for record in caplog.records)
         finally:
             await store.close()
 

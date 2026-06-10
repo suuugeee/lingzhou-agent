@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from core.contracts.probe import ProbeConfig
+from core.contracts.probe import ProbeConfig, ProbeResult
 from core.judgment.context.skills import _fmt_blind_spots, _fmt_probe_sensors
-from core.probe.runner import _assess_confidence
+from core.probe.runner import _assess_confidence, _format_summary
 
 
 def _curl_probe() -> ProbeConfig:
@@ -68,3 +68,45 @@ def test_blind_spots_use_explicit_coverage_tags_not_free_text() -> None:
     cfg.coverage_tags = ["ops:channel_health"]
     blind_spots_with_tag = _fmt_blind_spots([cfg])
     assert "关键外部通道健康未监控" not in blind_spots_with_tag
+
+
+def test_probe_wm_summary_compacts_normal_large_output() -> None:
+    cfg = _curl_probe()
+    result = ProbeResult(
+        probe_name=cfg.name,
+        output="recent_hits=" + "X" * 5000,
+        error=None,
+        triggered_at="2026-06-10T19:34:00+00:00",
+        duration_ms=120,
+        alerted=False,
+        confidence=0.85,
+        confidence_reason="读数形态与执行状态正常",
+        deployment_suspect=False,
+    )
+
+    summary = _format_summary(cfg, result)
+
+    assert "正常读数已压缩" in summary
+    assert "output_chars=" in summary
+    assert "X" * 100 not in summary
+
+
+def test_probe_wm_summary_keeps_abnormal_output_but_clips() -> None:
+    cfg = _curl_probe()
+    result = ProbeResult(
+        probe_name=cfg.name,
+        output="recent_hits=" + "Y" * 5000,
+        error=None,
+        triggered_at="2026-06-10T19:34:00+00:00",
+        duration_ms=120,
+        alerted=True,
+        confidence=0.85,
+        confidence_reason="读数形态与执行状态正常",
+        deployment_suspect=False,
+    )
+
+    summary = _format_summary(cfg, result)
+
+    assert "recent_hits=" in summary
+    assert "探针输出已截断" in summary
+    assert len(summary) < 1800

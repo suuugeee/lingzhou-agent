@@ -81,6 +81,115 @@ def _self_drive_growth_completion_blockers(task: Any, recent_runs: list[Any]) ->
     return blockers
 
 
+_ACTIONABLE_VERIFICATION_MARKERS = (
+    "定位",
+    "查找",
+    "读取",
+    "检查",
+    "验证",
+    "确认",
+    "测试",
+    "运行",
+    "修改",
+    "修复",
+    "实现",
+    "改进",
+    "编辑",
+    "推送",
+    "提交",
+)
+_NON_VERIFICATION_TOOLS = {
+    "memory.add_semantic",
+    "memory.add_wm",
+    "memory.drop_wm",
+    "task.workbench",
+    "task.advance",
+    "task.complete",
+    "task.add",
+    "task.update",
+    "task.amend",
+}
+_VERIFICATION_TOOL_PREFIXES = (
+    "file.",
+    "shell.",
+    "exec.",
+    "process.",
+    "probe.",
+    "config.",
+    "browser.",
+    "web.",
+    "memory.search",
+    "memory.embed_backfill",
+    "subagent.run",
+)
+
+
+def _task_cortex(task: Any) -> dict[str, Any]:
+    result_json = getattr(task, "result_json", None)
+    cortex = result_json.get("cortex") if isinstance(result_json, dict) else None
+    return cortex if isinstance(cortex, dict) else {}
+
+
+def _has_actionable_next_verification(text: str) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    lowered = value.lower()
+    if any(marker in lowered for marker in ("无需", "不需要", "已完成", "完成该", "进入低频观察", "等待新用户")):
+        return False
+    return any(marker in value for marker in _ACTIONABLE_VERIFICATION_MARKERS)
+
+
+def _is_successful_verification_run(run: Any) -> bool:
+    if str(getattr(run, "status", "") or "").strip() != "succeeded":
+        return False
+    tool_name = str(getattr(run, "tool_name", "") or "").strip()
+    if not tool_name or tool_name in _NON_VERIFICATION_TOOLS or tool_name.startswith("task."):
+        return False
+    return tool_name in _VERIFICATION_TOOL_PREFIXES or any(
+        tool_name.startswith(prefix) for prefix in _VERIFICATION_TOOL_PREFIXES
+    )
+
+
+def _workbench_output_has_next_verification(run: Any) -> bool:
+    output_json = getattr(run, "output_json", None)
+    cortex = output_json.get("cortex") if isinstance(output_json, dict) else None
+    return isinstance(cortex, dict) and _has_actionable_next_verification(str(cortex.get("next_verification") or ""))
+
+
+def _unresolved_workbench_verification_blockers(task: Any, recent_runs: list[Any]) -> list[str]:
+    cortex = _task_cortex(task)
+    next_verification = str(cortex.get("next_verification") or "").strip()
+    if not _has_actionable_next_verification(next_verification):
+        return []
+
+    latest_workbench_idx: int | None = None
+    for idx, run in enumerate(recent_runs):
+        if str(getattr(run, "tool_name", "") or "") == "task.workbench" and _workbench_output_has_next_verification(run):
+            latest_workbench_idx = idx
+            break
+
+    if latest_workbench_idx is None:
+        return []
+
+    newer_runs = recent_runs[:latest_workbench_idx]
+    if any(_is_successful_verification_run(run) for run in newer_runs):
+        return []
+
+    intent = str(cortex.get("intent") or "").strip()
+    domain = str(cortex.get("domain") or "").strip()
+    is_growth = _is_self_drive_growth_task(task) or intent == "self_drive_growth" or domain in {"self_evolution", "runtime", "memory_system"}
+    if not is_growth:
+        return []
+
+    return [
+        (
+            "task.workbench 仍有未执行的 next_verification，不能把写 workbench/语义记忆当作完成："
+            f"{next_verification[:180]}"
+        )
+    ]
+
+
 async def _resolve_active_task(ctx: ToolContext):
     task = await ctx.get_active_task()
     if task is not None:
@@ -346,6 +455,22 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                     tool_name="task.complete",
                     log_summary=f"task.complete rejected SelfDriveGrowthIncomplete id={task.id}",
                     blockers=self_drive_growth_blockers,
+                ),
+            )
+        workbench_verification_blockers = _unresolved_workbench_verification_blockers(task, recent_runs)
+        if workbench_verification_blockers:
+            return ToolResult(
+                summary=(
+                    f"任务 [{task.id}] 暂不允许完成：任务皮层仍有未验证的下一步。"
+                    + " ".join(workbench_verification_blockers)
+                ),
+                error="WorkbenchVerificationPending",
+                skipped=True,
+                metadata=_task_metadata(
+                    task,
+                    tool_name="task.complete",
+                    log_summary=f"task.complete rejected WorkbenchVerificationPending id={task.id}",
+                    blockers=workbench_verification_blockers,
                 ),
             )
         action_first_blockers = action_first_completion_blockers(task=task, recent_runs=recent_runs)

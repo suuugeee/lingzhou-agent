@@ -578,6 +578,14 @@ def search(
     """全文检索情节记忆：narrative FTS5（O(log n)）+ .md 文件降级扫描。"""
     if not query.strip():
         return ""
+    max_chars = max(0, int(max_chars or 0))
+    if max_chars <= 0:
+        return ""
+
+    def _joined_hits() -> str:
+        text = "\n\n---\n\n".join(hits)
+        return text[:max_chars] if len(text) > max_chars else text
+
     hits: list[str] = []
     total = 0
     query_stripped = query.strip()
@@ -606,7 +614,7 @@ def search(
                     hits.append(snippet)
                     total += len(snippet)
                     if total >= max_chars:
-                        return "\n\n---\n\n".join(hits)
+                        return _joined_hits()
             except Exception:
                 pass
 
@@ -637,6 +645,6 @@ def search(
                     hits.append(snippet)
                     total += len(snippet)
                     if total >= max_chars:
-                        return "\n\n---\n\n".join(hits)
+                        return _joined_hits()
 
-    return "\n\n---\n\n".join(hits) if hits else ""
+    return _joined_hits() if hits else ""
