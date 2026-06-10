@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from core.loop.routing_overrides import normalize_routing_overrides, routing_overrides_meta
@@ -62,6 +63,14 @@ async def _execute_tick_action(
         current_task_id = str(active_task.id) if active_task else None
         for item in loop._behavior.on_act(tool_id, key_param, current_task_id, action.params):
             loop._wm.add(item)
+        _gate_signals = SimpleNamespace()
+        loop._behavior.apply_cognitive_probe(_gate_signals)
+        gate = getattr(loop._behavior, "apply_execution_gate", None)
+        if gate is not None:
+            action = gate(action, _gate_signals)
+        if action.decision != "act":
+            for item in loop._behavior.on_wait(action.decision, active_task is not None):
+                loop._wm.add(item)
     else:
         for item in loop._behavior.on_wait(action.decision, active_task is not None):
             loop._wm.add(item)

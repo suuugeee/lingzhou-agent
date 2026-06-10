@@ -163,6 +163,13 @@ async def _run_continue_phase(
                 loop._wm.add(behavior_item)
                 _wm_delta.append(behavior_item.to_dict())
             loop._behavior.apply_cognitive_probe(cognitive_signals)
+            gate = getattr(loop._behavior, "apply_execution_gate", None)
+            if gate is not None:
+                gated = gate(cont, cognitive_signals)
+                if gated is not cont:
+                    cont = gated
+                    tool_name = ""
+                    key_param = ""
         cont_result = None
 
         # 防止 decide_continue 返回 delegate_tasks 但无 chosen_action_id 时派发空工具

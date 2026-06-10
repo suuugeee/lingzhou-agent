@@ -275,8 +275,8 @@ def test_prefer_tier_for_task_uses_pending_then_task_default():
     ) == "reader"
 
 
-def test_behavior_gate_passthrough_and_logs_observation(caplog):
-    """重复信号只做感知和日志，不替 LLM 改 decision。"""
+def test_behavior_gate_blocks_repeating_same_action_and_logs_observation(caplog):
+    """重复信号达到阈值后，继续选择同一动作应被硬制动。"""
     from core.loop.drive.behavior import BehaviorTracker
 
     caplog.set_level(logging.INFO, logger="lingzhou.behavior_tracker")
@@ -297,9 +297,20 @@ def test_behavior_gate_passthrough_and_logs_observation(caplog):
         rationale="再搜一次",
     )
     gated = tracker.apply_execution_gate(action, _Signals())
-    assert gated.decision == "act"
-    assert gated is action
-    assert any("delegated to llm" in rec.message for rec in caplog.records)
+    assert gated.decision == "wait"
+    assert gated is not action
+    assert "行为门控制动" in gated.rationale
+    assert any("repeat action streak=3" in rec.message for rec in caplog.records)
+
+    switched_action = _judgment_output(
+        decision="act",
+        chosen_action_id="task.workbench",
+        params={"workbench": {"domain": "runtime"}},
+        rationale="改用工作台沉淀状态",
+    )
+    switched = tracker.apply_execution_gate(switched_action, _Signals())
+    assert switched.decision == "act"
+    assert switched is switched_action
 
     class _ReadSignals:
         repeat_action_count = 0

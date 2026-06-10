@@ -15,6 +15,7 @@ import logging
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
+from core.contracts.execution import action_key_param
 from tools.registry import tool_has_capability
 
 if TYPE_CHECKING:
@@ -103,19 +104,39 @@ class BehaviorTracker:
     # ── 状态接口 ──────────────────────────────────────────────────────────────
 
     def apply_execution_gate(self, action: JudgmentOutput, signals: Any) -> JudgmentOutput:
-        """感知重复信号并记录日志，不替 LLM 改 decision（纯观察门）。"""
+        """在明确重复同一低增量动作时硬制动，避免继续消耗上下文与工具轮次。"""
         repeat_action = getattr(signals, "repeat_action_count", 0)
         repeat_read = getattr(signals, "repeat_read_count", 0)
         if repeat_action >= self._streak_threshold:
+            repeat_tool = str(getattr(signals, "repeat_action_tool", "") or "")
+            repeat_key = str(getattr(signals, "repeat_action_key", "") or "")
             _log.info(
-                "[behavior.gate] repeat action streak=%d tool=%s key=%s → delegated to llm",
+                "[behavior.gate] repeat action streak=%d tool=%s key=%s",
                 repeat_action,
-                getattr(signals, "repeat_action_tool", ""),
-                getattr(signals, "repeat_action_key", ""),
+                repeat_tool,
+                repeat_key,
             )
+            if (
+                action.decision == "act"
+                and str(action.chosen_action_id or "") == repeat_tool
+                and action_key_param(action.params) == repeat_key
+            ):
+                from core.judgment.output import JudgmentOutput
+
+                return JudgmentOutput(
+                    decision="wait",
+                    rationale=(
+                        f"行为门控制动：{repeat_tool} {repeat_key or '（空参数）'} "
+                        f"已连续重复 {repeat_action} 次，继续执行没有新增证据；等待下一轮重新组装上下文或切换策略。"
+                    ),
+                    reflection=action.reflection,
+                    next_step=action.next_step,
+                    model_strategy=dict(action.model_strategy or {}),
+                    applied_skills=list(action.applied_skills or []),
+                )
         elif repeat_read >= self._streak_threshold:
             _log.info(
-                "[behavior.gate] repeat read streak=%d path=%s → delegated to llm",
+                "[behavior.gate] repeat read streak=%d path=%s",
                 repeat_read,
                 getattr(signals, "repeat_read_path", ""),
             )
