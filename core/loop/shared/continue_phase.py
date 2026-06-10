@@ -223,7 +223,7 @@ async def _run_continue_phase(
         action = cont
         result = cont_result
         _inner += 1
-        if action.speech_intent or not _should_continue_within_tick(action, registry=loop._registry):
+        if action.speech_intent or not _should_continue_within_tick(action, registry=loop._registry, result=result):
             break
         # PlanUnchanged：计划结构没变，继续循环只会死锁；跳出让下一 tick 直接执行具体工具。
         if cont_result.error == "PlanUnchanged":

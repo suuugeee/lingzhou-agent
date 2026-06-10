@@ -134,6 +134,7 @@ async def _maybe_run_tick_continue_phase(
         user_message=user_message,
         has_active_task=active_task is not None,
         registry=loop._registry,
+        result=result,
     ):
         return action, result
     return await _run_continue_phase(
