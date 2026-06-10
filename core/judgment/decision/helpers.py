@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import TYPE_CHECKING, Any
 
 from core.judgment.output import JudgmentOutput, ModelSelection
@@ -21,6 +22,90 @@ _PROMPT_OVERFLOW_OMIT_STUB = (
     "完整证据见本轮 WM、工具历史或 session 记录。]"
 )
 _PROMPT_OVERFLOW_TIGHT_STUB = "[省略]"
+_PROMPT_OVERFLOW_CAPSULE_HEADER = (
+    "[上下文超限压缩胶囊：保留任务皮层、守卫、近期动作和继续指令；外围材料已省略。]"
+)
+_PROMPT_OVERFLOW_CAPSULE_SECTIONS = (
+    "### 活跃任务",
+    "### 任务级皮层工作区",
+    "### 通用问题解决守卫",
+    "### 近期运行轨迹",
+    "### 认知信号（当前内部状态异常提示）",
+    "### 模型资源与路由真相（runtime 提供，不可臆造）",
+    "## 本轮新增工作记忆（WM 更新，初始上下文之后）",
+    "## 本轮执行状态（请据此决定措辞，不要凭推测）",
+    "## 结构化最近工具结果(JSON)",
+    "## 本轮已执行工具历史",
+)
+
+
+def _clip_capsule_section(text: str, limit: int) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 40)].rstrip() + "\n[本节已压缩，详见完整上下文/工具记录]"
+
+
+def _extract_markdown_section(text: str, heading: str) -> str:
+    pattern = re.compile(
+        rf"(?ms)^{re.escape(heading)}\s*\n(.*?)(?=^#{{1,3}}\s+|\Z)"
+    )
+    match = pattern.search(text)
+    if not match:
+        return ""
+    body = match.group(1).strip()
+    if not body:
+        return ""
+    return f"{heading}\n{body}"
+
+
+def _last_instruction_tail(text: str, *, limit: int) -> str:
+    markers = (
+        "请根据以上结果继续执行下一个必要工具",
+        "你现在处于最终回复阶段",
+        "decision 只能是 pause 或 wait",
+    )
+    starts = [text.rfind(marker) for marker in markers]
+    start = max(starts)
+    if start < 0:
+        return ""
+    tail = text[start:].strip()
+    return _clip_capsule_section(tail, limit)
+
+
+def _build_prompt_context_capsule(content: str, *, tight: bool = False) -> str:
+    """Compress a huge user context into a cortex-first survival capsule.
+
+    This is intentionally extractive: when the prompt is over budget, preserve
+    the task cortex/workbench and immediate continuation state instead of
+    replacing the whole user message with a generic omission stub.
+    """
+    text = str(content or "")
+    if not text.strip():
+        return _PROMPT_OVERFLOW_TIGHT_STUB if tight else _PROMPT_OVERFLOW_OMIT_STUB
+
+    per_section_limit = 900 if tight else 1400
+    tail_limit = 500 if tight else 900
+    sections: list[str] = []
+    for heading in _PROMPT_OVERFLOW_CAPSULE_SECTIONS:
+        section = _extract_markdown_section(text, heading)
+        if section:
+            sections.append(_clip_capsule_section(section, per_section_limit))
+
+    tail = _last_instruction_tail(text, limit=tail_limit)
+    if tail:
+        sections.append("## 继续指令\n" + tail)
+
+    if not sections:
+        return _PROMPT_OVERFLOW_TIGHT_STUB if tight else _PROMPT_OVERFLOW_OMIT_STUB
+
+    guard = (
+        "## 裁剪后硬约束\n"
+        "- 优先遵守任务级皮层工作区里的 recovery_state / next_verification / completion_checks。\n"
+        "- 若近期动作显示重复或未推进，不要继续重复同一低增量工具；先切换证据源、写 workbench，或进入 wait。\n"
+        "- 不要把本胶囊外的省略材料当成已验证事实。"
+    )
+    return "\n\n".join([_PROMPT_OVERFLOW_CAPSULE_HEADER, guard, *sections])
 
 
 def _role_drop_priority(role: str, *, is_last_message: bool) -> int:
@@ -206,7 +291,11 @@ def _trim_messages_for_prompt_limit_impl(
         droppable.sort(key=lambda item: (item[0], item[1]))
         _, drop_idx, _ = droppable[0]
         role = str(getattr(new_messages[drop_idx], "role", "") or "user")
-        replacement = _PROMPT_OVERFLOW_TIGHT_STUB if tight else _PROMPT_OVERFLOW_OMIT_STUB
+        original_content = getattr(new_messages[drop_idx], "content", "")
+        if role == "user" and drop_idx == last_index and isinstance(original_content, str):
+            replacement = _build_prompt_context_capsule(original_content, tight=tight)
+        else:
+            replacement = _PROMPT_OVERFLOW_TIGHT_STUB if tight else _PROMPT_OVERFLOW_OMIT_STUB
         if Message is not None:
             new_messages[drop_idx] = Message(role=role, content=replacement)
         else:

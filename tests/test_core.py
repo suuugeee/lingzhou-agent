@@ -1942,6 +1942,62 @@ def test_chat_with_retry_trims_before_first_call_when_budget_exceeded():
     asyncio.run(_chat_with_retry_trims_before_first_call_when_budget_exceeded())
 
 
+def test_prompt_trim_compresses_last_user_context_into_cortex_capsule():
+    from core.config import Config
+    from core.judgment.executor import JudgmentExecutor
+    from provider.base import Message
+
+    class _Provider:
+        model_ref = "copilot/adaptive-mini"
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "base_url": "https://api.individual.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            }
+        },
+        "model": "copilot/adaptive-mini",
+    })
+    executor = JudgmentExecutor(_Provider(), cfg)  # type: ignore[arg-type]
+
+    huge_context = (
+        "### 活跃任务\n"
+        "task#3366 status=in_progress\n\n"
+        "### 任务级皮层工作区\n"
+        "task_id=3366 status=in_progress\n"
+        "problem_solving:\n"
+        "- recovery_state=targeted_node_id_backfill_implemented_and_unit_verified\n"
+        "- next_verification=对 node-38d00406366b 执行 memory.embed_backfill(node_id)\n\n"
+        "### 认知信号（当前内部状态异常提示）\n"
+        "⚠️ 最近动作已连续重复 3 次：tool=task.list key=all。\n\n"
+        "### 相关长期记忆\n"
+        + ("外围证据 " * 30000)
+        + "\n\n## 结构化最近工具结果(JSON)\n"
+        '[{"tool":"task.list","result":"count=8"}]\n\n'
+        "请根据以上结果继续执行下一个必要工具，或生成最终回复（reply_to_user 非空）。"
+    )
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content=huge_context),
+    ]
+
+    trimmed = executor._trim_messages_for_prompt_limit(messages, 12000)
+
+    assert trimmed is not messages
+    content = str(trimmed[-1].content)
+    assert "上下文超限压缩胶囊" in content
+    assert "targeted_node_id_backfill_implemented_and_unit_verified" in content
+    assert "next_verification=对 node-38d00406366b 执行 memory.embed_backfill(node_id)" in content
+    assert "tool=task.list" in content
+    assert "不要继续重复同一低增量工具" in content
+    assert "外围证据 外围证据 外围证据" not in content
+
+
 async def _chat_with_retry_trims_before_first_call_when_budget_exceeded():
     from core.config import Config
     from core.judgment.executor import JudgmentExecutor
