@@ -26,6 +26,41 @@ if TYPE_CHECKING:
 
 WorkerHandler = Callable[["ToolEntry", "JudgmentOutput", ToolContext], Awaitable[ToolResult]]
 
+_WORKBENCH_PREFERENCE_FIELDS = {
+    "domain",
+    "intent",
+    "hypothesis",
+    "working_hypothesis",
+    "recovery_state",
+    "next_verification",
+    "capabilities",
+    "experiments",
+    "evidence",
+    "open_questions",
+    "completion_checks",
+    "progress",
+    "failures",
+}
+
+
+def _repair_task_workbench_params(entry: ToolEntry, params: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        return params
+    if entry.manifest.name != "task.workbench":
+        return params
+    if "workbench" in params:
+        return params
+
+    workbench_payload: dict[str, Any] = {
+        key: value for key, value in params.items() if key in _WORKBENCH_PREFERENCE_FIELDS
+    }
+    if not workbench_payload:
+        return params
+
+    repaired = dict(params)
+    repaired["workbench"] = workbench_payload
+    return repaired
+
 
 def _param_template_value(param_type: str) -> Any:
     if param_type == "string":
@@ -111,6 +146,7 @@ def _validate_required_params(entry: ToolEntry, params: dict[str, Any]) -> ToolR
 
 async def _call_handler(entry: ToolEntry, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     """调用工具 handler，兼容同步函数与 dict 返回值（进化工具可能产生这两种情况）。"""
+    params = _repair_task_workbench_params(entry, params)
     validation_error = _validate_required_params(entry, params)
     if validation_error is not None:
         return validation_error

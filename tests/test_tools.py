@@ -74,6 +74,53 @@ async def _worker_validates_required_tool_params_before_handler():
     assert "补齐必填参数 path" in result.state_delta["recovery_next_step"]
 
 
+def test_worker_rewrites_task_workbench_flat_fields_into_workbench_arg():
+    asyncio.run(_worker_rewrites_task_workbench_flat_fields_into_workbench_arg())
+
+
+async def _worker_rewrites_task_workbench_flat_fields_into_workbench_arg():
+    from core.execution import WorkerLayer
+    from core.judgment import JudgmentOutput
+    from tools.registry import ToolEntry, ToolManifest, ToolParam, ToolResult
+
+    async def _handler(params, ctx):
+        assert isinstance(params.get("workbench"), dict)
+        assert params["workbench"]["domain"] == "runtime"
+        assert params["workbench"]["intent"] == "bootstrap"
+        assert params["workbench"]["next_verification"] == "完成一次验证"
+        assert params["workbench"]["evidence"] == ["已重跑", "已归档"]
+        return ToolResult(summary="ok", state_delta={"seen": True})
+
+    entry = ToolEntry(
+        manifest=ToolManifest(
+            name="task.workbench",
+            description="demo",
+            params=[ToolParam("workbench", "object", "workbench patch", required=True)],
+        ),
+        handler=_handler,
+    )
+
+    result = await WorkerLayer(_test_config()).dispatch(
+        "tool-chain-worker",
+        entry,
+        JudgmentOutput(
+            decision="act",
+            chosen_action_id="task.workbench",
+            params={
+                "domain": "runtime",
+                "intent": "bootstrap",
+                "next_verification": "完成一次验证",
+                "evidence": ["已重跑", "已归档"],
+                "unknown": "ignored",
+            },
+        ),
+        _tool_ctx(),
+    )
+
+    assert result.error is None
+    assert result.state_delta["seen"] is True
+
+
 def test_task_store_get_active_prefers_started_task_over_pending():
     asyncio.run(_task_store_get_active_prefers_started_task_over_pending())
 
@@ -1243,6 +1290,51 @@ async def _subagent_task_store_view_exposes_local_state_to_subsequent_ticks():
 
 def test_task_workbench_merges_general_problem_solving_state():
     asyncio.run(_task_workbench_merges_general_problem_solving_state())
+
+
+def test_task_workbench_accepts_flattened_workbench_fields():
+    asyncio.run(_task_workbench_accepts_flattened_workbench_fields())
+
+
+async def _task_workbench_accepts_flattened_workbench_fields():
+    from store.task import TaskStore
+    from tools.workbench import task_workbench
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-flat.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "general problem solving",
+                goal="flattened workbench support",
+                status="in_progress",
+                result_json={"cortex": {}},
+            )
+            task = await store.get_task_by_id(task_id)
+            ctx = _tool_ctx(task_store=store, active_task=task)
+
+            result = await task_workbench(
+                {
+                    "domain": "runtime",
+                    "intent": "verify recovery",
+                    "next_verification": "检查结果是否收敛",
+                    "completion_checks": ["step done"],
+                },
+                ctx,
+            )
+
+            assert result.error is None
+            refreshed = await store.get_task_by_id(task_id)
+            assert refreshed is not None
+            cortex = refreshed.result_json["cortex"]
+            assert cortex["domain"] == "runtime"
+            assert cortex["intent"] == "verify recovery"
+            assert cortex["next_verification"] == "检查结果是否收敛"
+            assert cortex["completion_checks"] == ["step done"]
+            assert "已自动从顶层字段组装 workbench" in result.summary
+        finally:
+            await store.close()
 
 
 async def _task_workbench_merges_general_problem_solving_state():
