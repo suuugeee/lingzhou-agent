@@ -1990,12 +1990,51 @@ def test_prompt_trim_compresses_last_user_context_into_cortex_capsule():
 
     assert trimmed is not messages
     content = str(trimmed[-1].content)
+    assert executor._last_prompt_capsule == content
+    assert executor._last_prompt_capsule_source_tokens > 12000
     assert "上下文超限压缩胶囊" in content
     assert "targeted_node_id_backfill_implemented_and_unit_verified" in content
     assert "next_verification=对 node-38d00406366b 执行 memory.embed_backfill(node_id)" in content
     assert "tool=task.list" in content
     assert "不要继续重复同一低增量工具" in content
     assert "外围证据 外围证据 外围证据" not in content
+
+
+def test_prompt_trim_clears_stale_capsule_when_no_trim_needed():
+    from core.config import Config
+    from core.judgment.executor import JudgmentExecutor
+    from provider.base import Message
+
+    class _Provider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "base_url": "https://api.individual.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            }
+        },
+        "model": "copilot/adaptive-mini",
+    })
+    executor = JudgmentExecutor(_Provider(), cfg)  # type: ignore[arg-type]
+    executor._last_prompt_capsule = "STALE_CAPSULE"
+    executor._last_prompt_capsule_source_tokens = 999
+
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="short context"),
+    ]
+    trimmed = executor._trim_messages_for_prompt_limit(messages, 12000)
+
+    assert trimmed is messages
+    assert executor._last_prompt_capsule == ""
+    assert executor._last_prompt_capsule_source_tokens == 0
 
 
 async def _chat_with_retry_trims_before_first_call_when_budget_exceeded():

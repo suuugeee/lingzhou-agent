@@ -2841,6 +2841,58 @@ def test_continue_context_rebuilds_budgeted_working_set_not_raw_prompt():
     assert "结构化最近工具结果(JSON)" in text
 
 
+def test_continue_context_reuses_cached_compression_capsule():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    layer = JudgmentLayer(_DummyProvider(), ToolRegistry(), cfg)
+    asm = layer._assembler
+    asm._judgment_template = "{{user_message}}\n{{wm_section}}\n{{tools_section}}"
+    asm._last_context_text = "RAW_PREVIOUS_PROMPT" * 1000
+    asm._last_context_sections = {
+        "user_message": "继续",
+        "wm_section": "WM_FACT_SHOULD_NOT_RERENDER",
+        "tools_section": "TOOL_CATALOG_SHOULD_NOT_RERENDER",
+    }
+    asm._last_context_budget = 6000
+    asm._last_context_compression_capsule = "CORTEX_CAPSULE\nnext_verification=继续验证"
+
+    text = asm._build_continue_context(
+        [{"tool": "task.workbench", "params": {"workbench": {}}, "result": "ok"}],
+        user_message="继续",
+        reply_only=False,
+        wm_delta=None,
+    )
+
+    assert "CORTEX_CAPSULE" in text
+    assert "next_verification=继续验证" in text
+    assert "RAW_PREVIOUS_PROMPT" not in text
+    assert "WM_FACT_SHOULD_NOT_RERENDER" not in text
+    assert "TOOL_CATALOG_SHOULD_NOT_RERENDER" not in text
+    assert "结构化最近工具结果(JSON)" in text
+
+
 def test_reply_only_context_omits_tool_catalog_from_working_set():
     from core.config import Config
     from core.judgment import JudgmentLayer

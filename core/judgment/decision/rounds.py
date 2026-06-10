@@ -80,6 +80,12 @@ class JudgmentRoundDeps:
     cfg: Config
 
 
+def _sync_prompt_capsule(deps: JudgmentRoundDeps) -> None:
+    capsule = str(getattr(deps.executor, "_last_prompt_capsule", "") or "").strip()
+    if capsule:
+        deps.assembler._last_context_compression_capsule = capsule
+
+
 def finalize_continue_output(
     deps: JudgmentRoundDeps,
     output: JudgmentOutput,
@@ -186,6 +192,7 @@ async def decide_initial(
     if _ASSEMBLE_CONTEXT_ERROR_STATE:
         _ASSEMBLE_CONTEXT_ERROR_STATE.clear()
     deps.assembler._last_context_text = context_text
+    deps.assembler._last_context_compression_capsule = ""
     messages = deps.assembler._build_messages(context_text)
 
     selected_provider, selection = deps.executor._select_provider(
@@ -213,6 +220,7 @@ async def decide_initial(
         primary_skill_name=primary.name if primary else None,
         primary_skill_guidance=bool(primary and getattr(primary, "guidance", None)),
     )
+    _sync_prompt_capsule(deps)
     if raw is None:
         err = str(llm_error) or repr(llm_error) if llm_error is not None else "unknown error"
         return _simulate_safe_output_fn(
@@ -309,6 +317,7 @@ async def decide_continue(
         log_prefix="[judgment.continue]",
         skills=deps.executor._last_call_meta.get("skills") or "none",
     )
+    _sync_prompt_capsule(deps)
     if raw is None:
         if llm_error is not None:
             return JudgmentOutput.wait(reason=f"[inner-loop] LLM 不可用: {llm_error!r}")

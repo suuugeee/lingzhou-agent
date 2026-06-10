@@ -31,11 +31,27 @@ _PROMPT_OVERFLOW_CAPSULE_SECTIONS = (
     "### 通用问题解决守卫",
     "### 近期运行轨迹",
     "### 认知信号（当前内部状态异常提示）",
+    "### 可用工具",
+    "### Shell 执行能力真相（runtime 提供，不可臆造）",
     "### 模型资源与路由真相（runtime 提供，不可臆造）",
     "## 本轮新增工作记忆（WM 更新，初始上下文之后）",
     "## 本轮执行状态（请据此决定措辞，不要凭推测）",
     "## 结构化最近工具结果(JSON)",
     "## 本轮已执行工具历史",
+)
+_PROMPT_OVERFLOW_CRITICAL_TOOLS = (
+    "task.list",
+    "task.get",
+    "task.add",
+    "task.update",
+    "task.workbench",
+    "config.get",
+    "config.set",
+    "probe.run",
+    "shell.run",
+    "memory.search",
+    "memory.add_semantic",
+    "memory.embed_backfill",
 )
 
 
@@ -73,6 +89,22 @@ def _last_instruction_tail(text: str, *, limit: int) -> str:
     return _clip_capsule_section(tail, limit)
 
 
+def _compact_tools_capsule_section(section: str) -> str:
+    lines = str(section or "").splitlines()
+    if not lines:
+        return ""
+    kept: list[str] = []
+    if lines[0].startswith("### "):
+        kept.append(lines[0])
+    for line in lines[1:]:
+        stripped = line.strip()
+        if any(stripped.startswith(f"- `{name}`") for name in _PROMPT_OVERFLOW_CRITICAL_TOOLS):
+            kept.append(line)
+    if len(kept) <= 1:
+        return "\n".join(lines[:16])
+    return "\n".join(kept)
+
+
 def _build_prompt_context_capsule(content: str, *, tight: bool = False) -> str:
     """Compress a huge user context into a cortex-first survival capsule.
 
@@ -90,6 +122,8 @@ def _build_prompt_context_capsule(content: str, *, tight: bool = False) -> str:
     for heading in _PROMPT_OVERFLOW_CAPSULE_SECTIONS:
         section = _extract_markdown_section(text, heading)
         if section:
+            if heading == "### 可用工具":
+                section = _compact_tools_capsule_section(section)
             sections.append(_clip_capsule_section(section, per_section_limit))
 
     tail = _last_instruction_tail(text, limit=tail_limit)
@@ -246,6 +280,9 @@ def _trim_messages_for_prompt_limit_impl(
     if not content_slots:
         return messages
 
+    executor._last_prompt_capsule = ""
+    executor._last_prompt_capsule_source_tokens = 0
+
     target_prompt_budget = max(1024, int(prompt_limit * 0.82))
     current_total = prompt_count if prompt_count and prompt_count > 0 else approx_total
     if current_total <= target_prompt_budget and approx_total <= target_prompt_budget:
@@ -294,6 +331,9 @@ def _trim_messages_for_prompt_limit_impl(
         original_content = getattr(new_messages[drop_idx], "content", "")
         if role == "user" and drop_idx == last_index and isinstance(original_content, str):
             replacement = _build_prompt_context_capsule(original_content, tight=tight)
+            if replacement.startswith(_PROMPT_OVERFLOW_CAPSULE_HEADER):
+                executor._last_prompt_capsule = replacement
+                executor._last_prompt_capsule_source_tokens = current_total
         else:
             replacement = _PROMPT_OVERFLOW_TIGHT_STUB if tight else _PROMPT_OVERFLOW_OMIT_STUB
         if Message is not None:
@@ -328,6 +368,8 @@ async def _chat_with_retry_impl(
     last_error: Exception | None = None
     max_attempts = 3
     call_timeout = _configured_llm_timeout(executor._cfg)
+    executor._last_prompt_capsule = ""
+    executor._last_prompt_capsule_source_tokens = 0
     for _attempt in range(max_attempts):
         executor._set_last_call_meta(
             selection,

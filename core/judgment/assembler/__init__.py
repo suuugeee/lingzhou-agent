@@ -63,6 +63,7 @@ class JudgmentContextAssembler:
         self._last_context_text: str = ""
         self._last_context_sections: dict[str, Any] = {}
         self._last_context_budget: int = 0
+        self._last_context_compression_capsule: str = ""
         self._context_cache: dict[str, str] = {}
         self._probe_manager: Any = None
         self._last_selected_skills: list[Skill] = []

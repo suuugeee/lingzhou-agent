@@ -25,6 +25,10 @@ def _continuation_prompt_budget(assembler: Any) -> int:
 
 
 def _build_continue_base_context(assembler: Any, *, reserve_text: str, reply_only: bool) -> str:
+    capsule = str(getattr(assembler, "_last_context_compression_capsule", "") or "").strip()
+    if capsule:
+        return capsule
+
     sections = dict(getattr(assembler, "_last_context_sections", {}) or {})
     if not sections:
         return str(getattr(assembler, "_last_context_text", "") or "")
