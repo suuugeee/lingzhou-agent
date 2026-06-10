@@ -13,6 +13,7 @@ from core.cortex import build_action_first_cortex_patch, extract_action_first_si
 from core.immune import extract_constitution_boundaries, load_constitution
 from core.log_fields import tick_scope_fields
 from core.loop.runs.refresh import refresh_running_runs
+from core.loop.runtime.memory_hooks import build_task_anchor_item
 from core.loop.task.runtime import (
     _consume_task_runtime_hints,
     _ingest_actionable_meta_reflections,
@@ -197,11 +198,15 @@ async def _prepare_active_task_for_tick(loop: Any, user_message: str, chat_id: s
     )
     await _bind_chat_id(loop, active_task, chat_id)
     await claim_focus_task(loop, active_task, chat_id=chat_id, clear_current=not bool(str(chat_id or "").strip()))
+    if active_task is not None:
+        loop._wm.add(build_task_anchor_item(active_task))
 
     if not user_message:
         await loop._maybe_inject_self_drive()
         if active_task is None:
             active_task = await resolve_focus_task(loop, fallback_active=True)
+            if active_task is not None:
+                loop._wm.add(build_task_anchor_item(active_task))
         if loop._bootstrap_mode == "full":
             if active_task is not None:
                 content = (

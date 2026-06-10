@@ -386,6 +386,10 @@ async def _prepare_tick_adopts_auto_created_self_drive_task():
             assert active_task.source == "self_drive"
             assert active_task.result_json["cortex"]["intent"] == "self_drive_growth"
             assert active_task.next_step
+            anchors = [item for item in loop._wm.get_top(10) if item["kind"] == "task_anchor"]
+            assert len(anchors) == 1
+            assert active_task.title in anchors[0]["content"]
+            assert active_task.next_step in anchors[0]["content"]
         finally:
             await loop.task_store.close()
             await loop.provider.close()

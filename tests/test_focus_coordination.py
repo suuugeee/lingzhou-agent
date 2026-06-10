@@ -602,6 +602,10 @@ async def _prepare_active_task_creates_action_first_task_for_executable_user_mes
     assert active is not None
     assert active.source == "external"
     assert active.next_step
+    anchors = [item for item in loop._wm.get_top(10) if item["kind"] == "task_anchor"]
+    assert len(anchors) == 1
+    assert active.title in anchors[0]["content"]
+    assert active.next_step in anchors[0]["content"]
     cortex = active.result_json["cortex"]
     assert cortex["action_first"]["must_act"] is True
     assert {"kind": "url", "value": "https://example.com/config.yaml"} in cortex["captured_inputs"]
