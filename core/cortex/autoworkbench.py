@@ -168,7 +168,7 @@ def build_auto_cortex_patch(
         recovery_next_step = _clip_text(state.get("recovery_next_step") or state.get("next_verification") or "", limit=240)
         if not str(cortex.get("next_verification") or "").strip():
             cortex["next_verification"] = recovery_next_step or f"修正 {tool} 的失败原因后，用不同证据路径验证任务 #{int(task_id)} 是否推进。"
-    elif state.get("tool_input_invalid") or state.get("completion_blocked"):
+    if run_status == "succeeded" and (state.get("tool_input_invalid") or state.get("completion_blocked")):
         recovery_next_step = _clip_text(state.get("recovery_next_step") or state.get("next_verification") or "", limit=240)
         if recovery_next_step:
             runtime["phase"] = "recovering"

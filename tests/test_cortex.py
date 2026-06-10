@@ -372,6 +372,28 @@ def test_auto_cortex_patch_promotes_completion_block_recovery_hint():
     assert "run#8 task.complete failed" in cortex["failures"][0]
 
 
+def test_auto_cortex_patch_preserves_completion_blocker_when_run_succeeded():
+    patch = build_auto_cortex_patch(
+        existing_cortex={"domain": "self_evolution", "intent": "self_drive_growth"},
+        run_id=9,
+        task_id=13,
+        tool_name="task.workbench",
+        status="succeeded",
+        summary="",
+        state_delta={
+            "completion_blocked": True,
+            "completion_blocker": "WorkbenchVerificationPending",
+            "next_verification": "先执行 probe.run 确认 reasoner_route_drift_watch。",
+            "recovery_next_step": "先执行 probe.run 确认 reasoner_route_drift_watch。",
+        },
+    )
+
+    cortex = patch["cortex"]
+    assert cortex["problem_runtime"]["phase"] == "recovering"
+    assert cortex["recovery_state"] == "recovering_from_runtime_guard"
+    assert cortex["next_verification"] == "先执行 probe.run 确认 reasoner_route_drift_watch。"
+
+
 def test_auto_cortex_patch_skips_task_workbench_to_avoid_self_noise():
     assert build_auto_cortex_patch(
         existing_cortex={"domain": "git"},
