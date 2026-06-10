@@ -37,12 +37,17 @@ async def _run_cycle_impl(loop: Any, cycle: int) -> int:
                 )
                 return cycle
             active_task = await resolve_focus_task(loop)
+            if active_task is None and not getattr(loop, "_auto_tick_due", True):
+                _log.debug("[tick-dispatch] auto tick not due, wait for idle gap")
+                return cycle
             dispatch_cycle = await loop._next_dispatch_cycle()
             chain_key = loop._resolve_tick_chain_key(active_task=active_task, source="auto")
             accepted = await dispatcher.enqueue(
                 TickJob(cycle=dispatch_cycle, chain_key=chain_key, source="auto")
             )
             if accepted:
+                if active_task is None:
+                    loop._auto_tick_due = False
                 cycle = dispatch_cycle
             else:
                 _log.debug("[tick-dispatch] queue full, skip auto tick")
@@ -70,6 +75,8 @@ async def _wait_after_cycle_impl(loop: Any) -> None:
         else:
             gap = cfg.loop.max_idle_gap / 1000.0 * _arousal_factor
         await _wait_for_event_impl(loop, gap, after_task)
+        if not has_work and after_task is None:
+            loop._auto_tick_due = True
         await _maybe_hot_reload_provider_impl(loop)
         return
 

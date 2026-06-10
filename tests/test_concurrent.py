@@ -155,6 +155,10 @@ def test_run_cycle_does_not_enqueue_auto_tick_when_dispatcher_has_work():
     asyncio.run(_run_cycle_does_not_enqueue_auto_tick_when_dispatcher_has_work())
 
 
+def test_run_cycle_does_not_enqueue_global_auto_tick_before_idle_due():
+    asyncio.run(_run_cycle_does_not_enqueue_global_auto_tick_before_idle_due())
+
+
 async def _run_cycle_does_not_enqueue_auto_tick_when_dispatcher_has_work():
     from core.loop.cycle.driver import _run_cycle_impl
 
@@ -192,6 +196,50 @@ async def _run_cycle_does_not_enqueue_auto_tick_when_dispatcher_has_work():
     cycle = await _run_cycle_impl(loop, 12)
 
     assert cycle == 12
+
+
+async def _run_cycle_does_not_enqueue_global_auto_tick_before_idle_due():
+    from core.loop.cycle.driver import _run_cycle_impl
+
+    class _FakeStore:
+        async def pop_pending_chat_message(self):
+            return None
+
+        async def get_active(self):
+            return None
+
+    class _FakeDispatcher:
+        enabled = True
+        pending_count = 0
+        running_count = 0
+
+        def can_accept(self) -> bool:
+            return True
+
+        def has_running(self) -> bool:
+            return False
+
+        def has_pending(self) -> bool:
+            return False
+
+        async def enqueue(self, job):
+            raise AssertionError("global auto tick 未到期时不应继续入队")
+
+    class _FakeRunDriver:
+        async def poll_pending_runs(self, loop, cycle: int):
+            return None
+
+    loop = SimpleNamespace(
+        _task_store=_FakeStore(),
+        _tick_dispatcher=_FakeDispatcher(),
+        _run_driver=_FakeRunDriver(),
+        _auto_tick_due=False,
+    )
+
+    cycle = await _run_cycle_impl(loop, 12)
+
+    assert cycle == 12
+
 
 def test_scoped_task_store_get_active_returns_pinned():
     """_ScopedTaskStore.get_active() 必须始终返回构造时传入的 pinned task。"""
