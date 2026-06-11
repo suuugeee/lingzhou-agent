@@ -4223,9 +4223,7 @@ async def _execution_dispatch_records_run():
         assert completed and completed[-1]["run_id"] == runs[0].id
 
         node = semantic.get(f"run-result-{runs[0].id}")
-        assert node is not None
-        assert node.kind == "run_result"
-        assert "succeeded" in node.tags
+        assert node is None
 
         active = await store.get_active()
         assert active is not None

@@ -63,6 +63,47 @@ def test_compact_tool_history_uses_evidence_pointers_for_old_large_results():
     assert "/workspace/core.py" in history[0]["result"]
 
 
+def test_compact_repeated_tool_history_keeps_latest_full_record():
+    """重复低价值工具结果应提前压缩，避免 continue 阶段反复回灌同一大块素材。"""
+    from core.loop.shared.continue_phase import _compact_repeated_tool_history
+
+    large_result = "same file body\n" * 2000
+    history = [
+        {
+            "tool": "file.read",
+            "params": {"path": "/workspace/core.py"},
+            "result": large_result,
+            "summary": large_result,
+            "status": "ok",
+            "error": "",
+            "metadata": {"log_summary": "file.read path=/workspace/core.py chars=30000"},
+        },
+        {"tool": "task.update", "params": {}, "result": "recent", "status": "ok", "error": ""},
+        {
+            "tool": "file.read",
+            "params": {"path": "/workspace/core.py"},
+            "result": large_result,
+            "summary": large_result,
+            "status": "ok",
+            "error": "",
+            "metadata": {"log_summary": "file.read path=/workspace/core.py chars=30000"},
+        },
+    ]
+    original_id = id(history)
+
+    compacted = _compact_repeated_tool_history(history)
+
+    assert compacted is history
+    assert id(history) == original_id
+    assert len(history) == 3
+    assert history[0]["tool"] == "task.update"
+    assert history[1]["tool"] == "[repeat-compacted]"
+    assert "重复低价值工具调用已压缩" in history[1]["result"]
+    assert large_result not in history[1]["result"]
+    assert history[2]["tool"] == "file.read"
+    assert history[2]["result"] == large_result
+
+
 def test_process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch, caplog):
     asyncio.run(_process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch, caplog))
 

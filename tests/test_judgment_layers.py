@@ -319,6 +319,40 @@ async def test_recovery_wait_falls_back_to_task_list_when_probe_not_available() 
 
 
 @pytest.mark.asyncio
+async def test_recovery_wait_uses_memory_search_top_k_param() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "memory.search" else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "problem_solving:\n"
+        "- recovery_state=recovering_from_previous_wait_loop\n"
+        "- next_verification=搜索历史记录，确认上一次失败参数。\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="当前无用户输入且无外部任务"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "memory.search"
+    assert out.params == {"query": "搜索历史记录，确认上一次失败参数。", "top_k": 5}
+
+
+@pytest.mark.asyncio
 async def test_recovery_wait_does_not_trigger_for_default_placeholders() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput

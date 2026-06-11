@@ -70,7 +70,7 @@ def _build_recovery_fallback_action(
         )
         and _has_tool("memory.search")
     ):
-        return "memory.search", {"query": next_verification[:420], "limit": 5}
+        return "memory.search", {"query": next_verification[:420], "top_k": 5}
     if "task.list" in lowered and _has_tool("task.list"):
         return "task.list", {"status": "all", "limit": 8}
     if _has_tool("task.list"):

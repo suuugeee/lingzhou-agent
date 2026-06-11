@@ -27,6 +27,16 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger("lingzhou.loop")
 
+_REPEAT_COMPACT_TOOLS = frozenset({
+    "file.read",
+    "file.list",
+    "memory.search",
+    "task.list",
+    "probe.run",
+    "web.fetch",
+    "shell.run",
+})
+
 
 def _compact_history_line(entry: dict[str, Any]) -> str:
     tool = str(entry.get("tool") or "?")
@@ -81,6 +91,67 @@ def _compact_history_line(entry: dict[str, Any]) -> str:
     return json.dumps(facts, ensure_ascii=False, sort_keys=True)
 
 
+def _repeat_history_signature(entry: dict[str, Any]) -> str:
+    tool = str(entry.get("tool") or "")
+    if tool not in _REPEAT_COMPACT_TOOLS:
+        return ""
+    if entry.get("error") or entry.get("skipped") or str(entry.get("status") or "") not in {"", "ok"}:
+        return ""
+    params = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+    params_text = json.dumps(params, ensure_ascii=False, sort_keys=True, default=str)
+    result = str(entry.get("result") or entry.get("summary") or "")
+    if not result:
+        return ""
+    result_hash = hashlib.md5(result.encode("utf-8", errors="replace")).hexdigest()[:16]
+    return f"{tool}|{params_text}|{result_hash}"
+
+
+def _compact_repeated_tool_history(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """原地合并本 tick 内重复的低价值成功工具结果，保留最新一次完整记录。"""
+    if len(history) < 2:
+        return history
+    counts: dict[str, int] = {}
+    latest_index: dict[str, int] = {}
+    for index, entry in enumerate(history):
+        sig = _repeat_history_signature(entry)
+        if not sig:
+            continue
+        counts[sig] = counts.get(sig, 0) + 1
+        latest_index[sig] = index
+    repeated = {sig for sig, count in counts.items() if count > 1}
+    if not repeated:
+        return history
+
+    old_lines: dict[str, list[str]] = {sig: [] for sig in repeated}
+    rebuilt: list[dict[str, Any]] = []
+    emitted: set[str] = set()
+    for index, entry in enumerate(history):
+        sig = _repeat_history_signature(entry)
+        if sig not in repeated:
+            rebuilt.append(entry)
+            continue
+        if index != latest_index[sig]:
+            old_lines[sig].append(_compact_history_line(entry))
+            continue
+        if sig not in emitted:
+            omitted = counts[sig] - 1
+            rebuilt.append({
+                "tool": "[repeat-compacted]",
+                "params": {},
+                "result": (
+                    f"（本 tick 内 {omitted} 条重复低价值工具调用已压缩；"
+                    "最新一次完整结果保留在下一条，原始记录保留在 run/artifact 中）\n"
+                    + "\n".join(old_lines.get(sig) or [])
+                ),
+                "status": "compacted",
+                "error": "",
+            })
+            emitted.add(sig)
+        rebuilt.append(entry)
+    history[:] = rebuilt
+    return history
+
+
 def _compact_tool_history(history: list[dict[str, Any]], *, keep_last: int) -> list[dict[str, Any]]:
     """原地压缩早期 tool_history，避免上下文爆炸且不丢失外层列表引用。"""
     keep_last = max(1, int(keep_last))
@@ -132,6 +203,7 @@ async def _run_continue_phase(
             break
 
         # 工具历史超长时压缩早期条目，避免上下文窗口爆炸
+        _compact_repeated_tool_history(tool_history)
         if len(tool_history) >= compact_threshold and len(tool_history) > keep_last:
             _compact_tool_history(tool_history, keep_last=keep_last)
 
