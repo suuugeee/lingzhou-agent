@@ -2259,8 +2259,7 @@ def test_fallback_reply_for_user_describes_waiting_state():
     task = Task(id=27, title="等待路径", status="in_progress", priority="normal", created_at="2026-05-15T14:00:00+00:00")
 
     reply = _fallback_reply_for_user(action, result, task)
-    assert reply.startswith("状态: waiting")
-    assert "waiting" in reply
+    assert reply.startswith("当前任务已转入等待")
     assert "external/source-path" in reply
     assert "等用户补充路径后重新验证目录" in reply
 
@@ -2273,8 +2272,7 @@ def test_fallback_reply_for_user_uses_real_error_instead_of_background_ack():
     result = ToolResult(summary="路径不存在: /root/.legacy-runtime/source", error="FileNotFound")
 
     reply = _fallback_reply_for_user(action, result, None)
-    assert reply.startswith("状态: error")
-    assert "detail:" in reply
+    assert reply.startswith("这轮工具执行失败")
     assert "路径不存在" in reply
     assert "后台继续处理" not in reply
     assert "我这轮" not in reply
@@ -2288,8 +2286,8 @@ def test_fallback_reply_for_user_does_not_echo_tool_summary_on_success():
     result = ToolResult(summary="/tmp/a.py\n/tmp/b.py")
 
     reply = _fallback_reply_for_user(action, result, None)
-    assert reply.startswith("状态: progressed")
-    assert "basis:" in reply
+    assert reply.startswith("我已完成本轮处理")
+    assert "关键证据" in reply
     assert "/tmp/a.py" not in reply
 
 
@@ -2393,7 +2391,8 @@ async def test_finalize_tick_user_reply_keeps_disaster_fallback_for_reply_only_f
         chat_id=None,
     )
 
-    assert action.reply_to_user.startswith("状态: progressed")
+    assert action.reply_to_user.startswith("我已完成本轮处理")
+    assert "状态:" not in action.reply_to_user
 
 
 @pytest.mark.asyncio
