@@ -32,6 +32,31 @@ class _EmptyRegistry:
         return None
 
 
+class _ReplyStore:
+    def __init__(self) -> None:
+        self.messages: list[tuple[str, str, str]] = []
+
+    async def get_fact(self, key: str):
+        return "", False
+
+    async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
+        self.messages.append((role, content, chat_id))
+        return len(self.messages)
+
+
+def _tick_reply_loop(judgment: Any, store: _ReplyStore | None = None) -> tuple[Any, _ReplyStore]:
+    reply_store = store or _ReplyStore()
+    return cast("Any", SimpleNamespace(
+        _cfg=SimpleNamespace(
+            thinking="off",
+            loop=SimpleNamespace(chat_thinking="low", autonomous_thinking="minimal"),
+        ),
+        _judgment=judgment,
+        _pending_routing_overrides=None,
+        _task_store=reply_store,
+    )), reply_store
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SemanticMemory — 多锚点情境召回（ACT-R 收敛激活）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3013,28 +3038,7 @@ async def test_finalize_tick_user_reply_falls_back_when_reply_only_empty_for_use
         async def decide_continue(self, *args, **kwargs):
             return _judgment_output(decision="wait", rationale="继续等待更多证据")
 
-    class _Store:
-        def __init__(self) -> None:
-            self.messages: list[tuple[str, str, str]] = []
-
-        async def get_fact(self, key: str):
-            return "", False
-
-        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
-            self.messages.append((role, content, chat_id))
-            return len(self.messages)
-
-    cfg = cast("Any", SimpleNamespace(
-        thinking="off",
-        loop=SimpleNamespace(chat_thinking="low", autonomous_thinking="minimal"),
-    ))
-    store = _Store()
-    loop = cast("Any", SimpleNamespace(
-        _cfg=cfg,
-        _judgment=_Judgment(),
-        _pending_routing_overrides=None,
-        _task_store=store,
-    ))
+    loop, store = _tick_reply_loop(_Judgment())
     action = _judgment_output(
         decision="act",
         chosen_action_id="file.read",
@@ -3072,28 +3076,7 @@ async def test_finalize_tick_user_reply_uses_medium_thinking_for_active_task_rep
             captured.update(kwargs)
             return _judgment_output(decision="wait", reply_to_user="已根据执行结果回复。")
 
-    class _Store:
-        def __init__(self) -> None:
-            self.messages: list[tuple[str, str, str]] = []
-
-        async def get_fact(self, key: str):
-            return "", False
-
-        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
-            self.messages.append((role, content, chat_id))
-            return len(self.messages)
-
-    cfg = cast("Any", SimpleNamespace(
-        thinking="off",
-        loop=SimpleNamespace(chat_thinking="low", autonomous_thinking="minimal"),
-    ))
-    store = _Store()
-    loop = cast("Any", SimpleNamespace(
-        _cfg=cfg,
-        _judgment=_Judgment(),
-        _pending_routing_overrides=None,
-        _task_store=store,
-    ))
+    loop, _store = _tick_reply_loop(_Judgment())
     action = _judgment_output(decision="act", chosen_action_id="file.read", rationale="已读取关键文件。")
     result = ToolResult(summary="读取完成")
 
@@ -3121,19 +3104,7 @@ async def test_finalize_tick_user_reply_keeps_direct_pause_reply_without_reply_o
         async def decide_continue(self, *args, **kwargs):
             raise AssertionError("direct pause reply should not invoke reply-only continuation")
 
-    class _Store:
-        def __init__(self) -> None:
-            self.messages: list[tuple[str, str, str]] = []
-
-        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
-            self.messages.append((role, content, chat_id))
-            return len(self.messages)
-
-    store = _Store()
-    loop = cast("Any", SimpleNamespace(
-        _judgment=_Judgment(),
-        _task_store=store,
-    ))
+    loop, store = _tick_reply_loop(_Judgment())
     action = _judgment_output(
         decision="pause",
         rationale="已经得到结论",
@@ -3163,28 +3134,7 @@ async def test_finalize_tick_user_reply_keeps_disaster_fallback_for_reply_only_f
         async def decide_continue(self, *args, **kwargs):
             return _judgment_output(decision="wait", rationale="[reply-only] reply_to_user 不能为空")
 
-    class _Store:
-        def __init__(self) -> None:
-            self.messages: list[tuple[str, str, str]] = []
-
-        async def get_fact(self, key: str):
-            return "", False
-
-        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
-            self.messages.append((role, content, chat_id))
-            return len(self.messages)
-
-    cfg = cast("Any", SimpleNamespace(
-        thinking="off",
-        loop=SimpleNamespace(chat_thinking="low", autonomous_thinking="minimal"),
-    ))
-    store = _Store()
-    loop = cast("Any", SimpleNamespace(
-        _cfg=cfg,
-        _judgment=_Judgment(),
-        _pending_routing_overrides=None,
-        _task_store=store,
-    ))
+    loop, _store = _tick_reply_loop(_Judgment())
     action = _judgment_output(
         decision="act",
         chosen_action_id="file.read",
@@ -3225,28 +3175,7 @@ async def test_finalize_tick_user_reply_rejects_internal_json_payload():
                 reply_to_user=leaked_reply,
             )
 
-    class _Store:
-        def __init__(self) -> None:
-            self.messages: list[tuple[str, str, str]] = []
-
-        async def get_fact(self, key: str):
-            return "", False
-
-        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
-            self.messages.append((role, content, chat_id))
-            return len(self.messages)
-
-    cfg = cast("Any", SimpleNamespace(
-        thinking="off",
-        loop=SimpleNamespace(chat_thinking="low", autonomous_thinking="minimal"),
-    ))
-    store = _Store()
-    loop = cast("Any", SimpleNamespace(
-        _cfg=cfg,
-        _judgment=_Judgment(),
-        _pending_routing_overrides=None,
-        _task_store=store,
-    ))
+    loop, _store = _tick_reply_loop(_Judgment())
     action = _judgment_output(
         decision="act",
         chosen_action_id="shell.run",
