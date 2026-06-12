@@ -191,27 +191,16 @@ def _build_continue_context(
             "请只基于已有证据生成对用户的最终 reply_to_user。"
             "decision 只能是 pause 或 wait，chosen_action_id 必须留空。"
         )
-        base_context = _build_continue_base_context(
-            assembler,
-            reserve_text=common_tail + final_instruction,
-            reply_only=True,
+    else:
+        hint = "用户正在等待回复，尽快在本轮设置 reply_to_user 字段。" if user_message else ""
+        final_instruction = (
+            "优先依据结构化结果判断当前状态，不要只凭模糊回忆续写。\n\n"
+            f"请根据以上结果继续执行下一个必要工具，或生成最终回复（reply_to_user 非空）。{hint}"
         )
-        return (
-            f"{base_context}\n\n"
-            "---\n"
-            f"{common_tail}"
-            f"{final_instruction}"
-        )
-
-    hint = "用户正在等待回复，尽快在本轮设置 reply_to_user 字段。" if user_message else ""
-    final_instruction = (
-        "优先依据结构化结果判断当前状态，不要只凭模糊回忆续写。\n\n"
-        f"请根据以上结果继续执行下一个必要工具，或生成最终回复（reply_to_user 非空）。{hint}"
-    )
     base_context = _build_continue_base_context(
         assembler,
         reserve_text=common_tail + final_instruction,
-        reply_only=False,
+        reply_only=reply_only,
     )
     return (
         f"{base_context}\n\n"

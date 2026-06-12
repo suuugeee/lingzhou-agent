@@ -40,18 +40,14 @@ def _compact_tools_section(text: str) -> str:
     names = _unique_ordered(re.findall(r"`([^`]+)`", text or ""), limit=96)
     if not names:
         return _clip_for_context(text, 1600)
-    required_lines: list[str] = []
-    for line in str(text or "").splitlines():
-        match = re.match(r"\s*-\s*`([^`]+)`:\s*(.*?)\s+参数:\s*\[(.*)\]\s*$", line)
-        if not match:
+    required_lines = []
+    critical_tools = {"task.workbench", "memory.add_semantic", "memory.search", "task.complete"}
+    for name, params in re.findall(r"\s*-\s*`([^`]+)`:.*?\s+参数:\s*\[(.*)\]\s*$", text, flags=re.MULTILINE):
+        if name.strip() not in critical_tools:
             continue
-        name = match.group(1).strip()
-        if name not in {"task.workbench", "memory.add_semantic", "memory.search", "task.complete"}:
-            continue
-        params = match.group(3)
         required = re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\(\*\)", params)
         if required:
-            required_lines.append(f"- `{name}` required: " + ", ".join(required[:8]))
+            required_lines.append(f"- `{name.strip()}` required: " + ", ".join(required[:8]))
     lines = [
         "**TOOL CATALOG COMPACTED** — 上下文超预算，保留工具名索引；参数细节以 manifest/schema 校验为准。",
         f"available_tools({len(names)} shown): " + ", ".join(f"`{name}`" for name in names),
@@ -103,25 +99,27 @@ def _compact_model_routing_section(text: str) -> str:
         return _clip_for_context(text, 1800)
     if not isinstance(payload, dict):
         return _clip_for_context(text, 1800)
-    compact: dict[str, Any] = {}
-    for key in (
-        "active_overrides",
-        "available_models",
-        "current_action_capabilities",
-        "continue_phase_policy",
-        "budget_state",
-        "routing_hint",
-        "reference_resolution",
-        "primary_provider",
+    compact = {
+        key: payload[key]
+        for key in (
+            "active_overrides",
+            "available_models",
+            "current_action_capabilities",
+            "continue_phase_policy",
+            "budget_state",
+            "routing_hint",
+            "reference_resolution",
+            "primary_provider",
+        )
+        if key in payload
+    }
+    for key, out_key in (
+        ("tool_tier_mapping", "tool_tier_mapping_keys"),
+        ("tool_capability_mapping", "tool_capability_mapping_keys"),
     ):
-        if key in payload:
-            compact[key] = payload[key]
-    tier_mapping = payload.get("tool_tier_mapping")
-    if isinstance(tier_mapping, dict):
-        compact["tool_tier_mapping_keys"] = sorted(str(key) for key in tier_mapping)[:96]
-    capability_mapping = payload.get("tool_capability_mapping")
-    if isinstance(capability_mapping, dict):
-        compact["tool_capability_mapping_keys"] = sorted(str(key) for key in capability_mapping)[:96]
+        mapping = payload.get(key)
+        if isinstance(mapping, dict):
+            compact[out_key] = sorted(str(item) for item in mapping)[:96]
     return "**MODEL ROUTING COMPACTED**\n" + json.dumps(compact, ensure_ascii=False, sort_keys=True, indent=2)
 
 
