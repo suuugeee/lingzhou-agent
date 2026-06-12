@@ -15,6 +15,18 @@ _RECOVERY_GATE_ACTIVE_MARKER = re.compile(
 )
 
 
+_RECOVERY_PLACEHOLDER_TEXTS = {
+    "未指定",
+    "未进入恢复状态",
+    "无",
+    "none",
+    "null",
+    "n/a",
+    "na",
+    "",
+}
+
+
 def _coalesce_recovery_text(*candidates: str) -> str:
     """从候选文本中取第一个有效恢复文本。"""
     for candidate in candidates:
@@ -23,9 +35,13 @@ def _coalesce_recovery_text(*candidates: str) -> str:
             continue
         if (value.startswith("（") and value.endswith("）")) or (value.startswith("(") and value.endswith(")")):
             inner = value[1:-1].strip()
-            if inner in {"未指定", "未进入恢复状态", "无", "none", ""}:
+            if not inner:
                 continue
             value = inner
+        normalized = value.strip().lower().replace("　", "").replace("\u2002", "")
+        normalized = re.sub(r"\s+", "", normalized)
+        if normalized in _RECOVERY_PLACEHOLDER_TEXTS:
+            continue
         return value
     return ""
 
