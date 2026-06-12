@@ -10,8 +10,10 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from core.cortex.actions import build_workbench_action
 from core.judgment.context.utils import _clip_for_context
 from memory.working import WMItem
+from tools.registry import registry_has_tool
 
 from .common import (
     _maybe_reconcile_bootstrap,
@@ -36,16 +38,6 @@ _REPEAT_COMPACT_TOOLS = frozenset({
     "web.fetch",
     "shell.run",
 })
-
-
-def _registry_has_tool(registry: Any | None, tool_name: str) -> bool:
-    getter = getattr(registry, "get", None)
-    if getter is None:
-        return False
-    try:
-        return getter(tool_name) is not None
-    except Exception:
-        return False
 
 
 def _compact_history_line(entry: dict[str, Any]) -> str:
@@ -155,39 +147,32 @@ def _build_continue_repeat_workbench_action(
     key_param: str,
     repeat_count: int,
 ) -> JudgmentOutput:
-    from core.judgment import JudgmentOutput  # noqa: PLC0415
-
-    return JudgmentOutput(
-        decision="act",
-        chosen_action_id="task.workbench",
-        params={
-            "workbench": {
-                "domain": "runtime-loop",
-                "intent": "continue 阶段停止重复同一取证动作",
-                "evidence": [
-                    f"本 tick 内 {tool_name} {key_param or '（空参数）'} 已连续出现 {repeat_count} 次。",
-                    "继续执行同一工具和同一关键参数不会增加有效证据，只会扩大上下文和工具历史。",
-                ],
-                "hypothesis": "当前卡点不是缺少再次读取，而是需要综合已有结果或切换到更高信息增量的验证方式。",
-                "recovery_state": "continue_repeat_action_gated",
-                "next_verification": (
-                    f"不要再重复执行 {tool_name} {key_param or ''}；"
-                    "先总结已有证据，或换用不同工具/参数验证同一假设。"
-                ),
-                "completion_checks": [
-                    "已停止本 tick 内重复工具调用。",
-                    "已把重复动作转化为明确的下一步验证约束。",
-                ],
-            }
-        },
+    workbench = {
+        "domain": "runtime-loop",
+        "intent": "continue 阶段停止重复同一取证动作",
+        "evidence": [
+            f"本 tick 内 {tool_name} {key_param or '（空参数）'} 已连续出现 {repeat_count} 次。",
+            "继续执行同一工具和同一关键参数不会增加有效证据，只会扩大上下文和工具历史。",
+        ],
+        "hypothesis": "当前卡点不是缺少再次读取，而是需要综合已有结果或切换到更高信息增量的验证方式。",
+        "recovery_state": "continue_repeat_action_gated",
+        "next_verification": (
+            f"不要再重复执行 {tool_name} {key_param or ''}；"
+            "先总结已有证据，或换用不同工具/参数验证同一假设。"
+        ),
+        "completion_checks": [
+            "已停止本 tick 内重复工具调用。",
+            "已把重复动作转化为明确的下一步验证约束。",
+        ],
+    }
+    return build_workbench_action(
+        workbench=workbench,
         rationale=(
             f"continue 行为门控改道：{tool_name} {key_param or '（空参数）'} "
             f"在同一 tick 内已连续重复 {repeat_count} 次，先写工作台收敛。"
         ),
-        reflection=action.reflection,
+        source_action=action,
         next_step="先综合已有证据；仍需验证时换不同证据源。",
-        model_strategy=dict(action.model_strategy or {}),
-        applied_skills=list(action.applied_skills or []),
     )
 
 
@@ -271,34 +256,28 @@ async def _record_continue_round_limit(
     tool_history: list[dict[str, Any]],
     max_inner_rounds: int,
 ) -> tuple[JudgmentOutput | None, Any | None]:
-    if active_task is None or not _registry_has_tool(loop._registry, "task.workbench"):
+    if active_task is None or not registry_has_tool(loop._registry, "task.workbench"):
         return None, None
-    from core.judgment import JudgmentOutput
-
     recent_tools = [
         str(entry.get("tool") or "")
         for entry in tool_history[-max(1, min(6, len(tool_history))):]
         if str(entry.get("tool") or "")
     ]
-    action = JudgmentOutput(
-        decision="act",
-        chosen_action_id="task.workbench",
-        params={
-            "workbench": {
-                "domain": "runtime-loop",
-                "intent": "continue 阶段达到单 tick 工具续判上限，收敛到下一轮验证",
-                "evidence": [
-                    f"本 tick continue 阶段已执行 {max_inner_rounds} 轮工具续判。",
-                    f"最近工具序列: {', '.join(recent_tools) if recent_tools else '（无）'}",
-                ],
-                "hypothesis": "当前任务仍需推进，但继续留在同一 tick 内追加工具会削弱总结与用户可见收敛。",
-                "recovery_state": "continue_round_limit_reached",
-                "next_verification": "下一轮先综合本 tick 工具结果，确认是否已经足够回答/完成；若不足，再选择一个最高信息增量的验证动作。",
-                "completion_checks": [
-                    "已停止在同一 tick 内继续追加工具调用。",
-                    "已把本轮工具结果收敛为下一轮的验证入口。",
-                ],
-            }
+    action = build_workbench_action(
+        workbench={
+            "domain": "runtime-loop",
+            "intent": "continue 阶段达到单 tick 工具续判上限，收敛到下一轮验证",
+            "evidence": [
+                f"本 tick continue 阶段已执行 {max_inner_rounds} 轮工具续判。",
+                f"最近工具序列: {', '.join(recent_tools) if recent_tools else '（无）'}",
+            ],
+            "hypothesis": "当前任务仍需推进，但继续留在同一 tick 内追加工具会削弱总结与用户可见收敛。",
+            "recovery_state": "continue_round_limit_reached",
+            "next_verification": "下一轮先综合本 tick 工具结果，确认是否已经足够回答/完成；若不足，再选择一个最高信息增量的验证动作。",
+            "completion_checks": [
+                "已停止在同一 tick 内继续追加工具调用。",
+                "已把本轮工具结果收敛为下一轮的验证入口。",
+            ],
         },
         rationale=(
             f"continue 阶段达到 {max_inner_rounds} 轮上限，先写入任务皮层收敛状态，"
@@ -384,7 +363,7 @@ async def _run_continue_phase(
             cont.decision == "act"
             and cont.chosen_action_id
             and cont.chosen_action_id != "task.workbench"
-            and _registry_has_tool(loop._registry, "task.workbench")
+            and registry_has_tool(loop._registry, "task.workbench")
         ):
             tool_name, key_param = _action_history_key(cont)
             repeat_count = _trailing_same_action_count(tool_history, tool_name, key_param) + 1

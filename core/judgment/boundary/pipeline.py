@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from core.cortex.actions import build_workbench_action
 from core.judgment.boundary.normalize import normalize_action_shape, normalize_reply_pseudo_tool
 from core.judgment.output import JudgmentOutput
 
@@ -316,37 +317,31 @@ def enforce_problem_solving_guard(
             model_strategy=dict(output.model_strategy or {}),
             applied_skills=list(output.applied_skills or []),
         )
-    return JudgmentOutput(
-        decision="act",
-        chosen_action_id="task.workbench",
-        params={
-            "workbench": {
-                "domain": "problem-solving",
-                "intent": "补齐问题解决工作台，恢复可验证闭环",
-                "hypothesis": "当前问题解决缺少结构化工作台，继续旧动作或直接回复会放大误解、重复失败或跨轮丢失承诺。",
-                "evidence": [
-                    f"guard signals: {guard_values.get('signals') or 'unknown'}",
-                    f"missing fields: {guard_values.get('missing_fields') or 'unknown'}",
-                ],
-                "next_verification": (
-                    guard_values.get("required_next_action")
-                    or "补齐工作台后，基于 domain/intent/hypothesis 选择一个不同证据源执行最小验证。"
-                ),
-                "completion_checks": [
-                    "domain/intent/hypothesis 已明确。",
-                    "experiments_or_evidence 已包含当前证据。",
-                    "next_verification 指向一个可执行验证动作。",
-                ],
-            }
+    return build_workbench_action(
+        workbench={
+            "domain": "problem-solving",
+            "intent": "补齐问题解决工作台，恢复可验证闭环",
+            "hypothesis": "当前问题解决缺少结构化工作台，继续旧动作或直接回复会放大误解、重复失败或跨轮丢失承诺。",
+            "evidence": [
+                f"guard signals: {guard_values.get('signals') or 'unknown'}",
+                f"missing fields: {guard_values.get('missing_fields') or 'unknown'}",
+            ],
+            "next_verification": (
+                guard_values.get("required_next_action")
+                or "补齐工作台后，基于 domain/intent/hypothesis 选择一个不同证据源执行最小验证。"
+            ),
+            "completion_checks": [
+                "domain/intent/hypothesis 已明确。",
+                "experiments_or_evidence 已包含当前证据。",
+                "next_verification 指向一个可执行验证动作。",
+            ],
         },
         rationale=(
             "通用问题解决守卫已触发：本轮不能继续旧动作或直接回复，"
             "先用 task.workbench 固化问题定义、证据、假设和下一步验证。"
         ),
-        reflection=output.reflection,
+        source_action=output,
         next_step=output.next_step,
-        model_strategy=dict(output.model_strategy or {}),
-        applied_skills=list(output.applied_skills or []),
     )
 
 

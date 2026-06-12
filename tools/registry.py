@@ -193,6 +193,15 @@ def tool_has_capability(registry: ToolRegistry | None, tool_name: str, capabilit
     return manifest_has_capability(entry.manifest if entry else None, capability)
 
 
+def registry_has_tool(registry: ToolRegistry | None, tool_name: str) -> bool:
+    if not tool_name:
+        return False
+    try:
+        return (registry or default_tool_registry()).get(tool_name) is not None
+    except Exception:
+        return False
+
+
 def tool_name_has_capability(tool_name: str, capability: str) -> bool:
     return tool_has_capability(default_tool_registry(), tool_name, capability)
 

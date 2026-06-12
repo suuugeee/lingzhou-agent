@@ -17,8 +17,9 @@ from typing import TYPE_CHECKING, Any
 
 from core.contracts.execution import action_key_param
 from core.cortex import intent as cortex_intent
+from core.cortex.actions import build_workbench_action
 from core.judgment.output import JudgmentOutput
-from tools.registry import tool_has_capability
+from tools.registry import registry_has_tool, tool_has_capability
 
 if TYPE_CHECKING:
     from memory.working import WMItem
@@ -169,7 +170,7 @@ class BehaviorTracker:
                 and str(action.chosen_action_id or "") == repeat_tool
                 and action_key_param(action.params) == repeat_key
             ):
-                if repeat_tool != "task.workbench" and self._has_tool("task.workbench"):
+                if repeat_tool != "task.workbench" and registry_has_tool(self._registry, "task.workbench"):
                     return self._build_repetition_workbench_gate(
                         action=action,
                         repeat_tool=repeat_tool,
@@ -201,7 +202,7 @@ class BehaviorTracker:
                 and str(action.chosen_action_id or "") == "file.read"
                 and action_key_param(action.params) == repeat_path
             ):
-                if self._has_tool("task.workbench"):
+                if registry_has_tool(self._registry, "task.workbench"):
                     return self._build_repeat_path_workbench_gate(
                         action=action,
                         kind="read",
@@ -227,7 +228,7 @@ class BehaviorTracker:
                 and str(action.chosen_action_id or "") == "file.list"
                 and action_key_param(action.params) == repeat_path
             ):
-                if self._has_tool("task.workbench"):
+                if registry_has_tool(self._registry, "task.workbench"):
                     return self._build_repeat_path_workbench_gate(
                         action=action,
                         kind="list",
@@ -248,7 +249,7 @@ class BehaviorTracker:
             next_tool = str(action.chosen_action_id or "")
             next_key = action_key_param(action.params)
             reason = str(getattr(signals, "last_action_progress_reason", "") or "")
-            if self._has_tool("task.workbench"):
+            if registry_has_tool(self._registry, "task.workbench"):
                 return self._build_unprogressful_probe_gate(
                     action=action,
                     last_tool=last_tool,
@@ -291,15 +292,11 @@ class BehaviorTracker:
         }
         if recovery_state:
             workbench["recovery_state"] = recovery_state
-        return JudgmentOutput(
-            decision="act",
-            chosen_action_id="task.workbench",
-            params={"workbench": workbench},
+        return build_workbench_action(
+            workbench=workbench,
             rationale=rationale,
-            reflection=action.reflection,
+            source_action=action,
             next_step=next_step,
-            model_strategy=dict(action.model_strategy or {}),
-            applied_skills=list(action.applied_skills or []),
         )
 
     def _build_wait_fallback(self, *, action: JudgmentOutput, rationale: str) -> JudgmentOutput:
@@ -475,7 +472,7 @@ class BehaviorTracker:
     def _should_gate_evidence_task_wait(self, action: JudgmentOutput, signals: Any) -> bool:
         if action.decision not in {"wait", "pause"}:
             return False
-        if not self._has_tool("task.workbench"):
+        if not registry_has_tool(self._registry, "task.workbench"):
             return False
         source = str(getattr(signals, "active_task_source", "") or "").strip()
         if source != "self_drive":
@@ -493,22 +490,6 @@ class BehaviorTracker:
         if cortex_intent.contains_wait_dependency(next_step) and not has_evidence:
             return wait_streak >= 3
         return has_evidence
-
-    def _has_tool(self, name: str) -> bool:
-        if not name:
-            return False
-        registry = self._registry
-        if registry is None:
-            try:
-                from tools.registry import default_tool_registry
-
-                registry = default_tool_registry()
-            except Exception:
-                return False
-        get = getattr(registry, "get", None)
-        if not callable(get):
-            return False
-        return get(name) is not None
 
     def apply_cognitive_probe(self, signals: Any) -> None:
         """将当前循环探针状态写入 cognitive_signals 对象（原地修改）。"""

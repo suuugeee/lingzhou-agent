@@ -5,6 +5,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from core.cortex.actions import build_workbench_action
 from core.judgment.boundary import (
     coerce_reply_only_output as _coerce_reply_only_output_fn,
 )
@@ -17,6 +18,7 @@ from core.judgment.boundary import (
 from core.judgment.frame import CognitionFrame
 from core.judgment.output import JudgmentOutput, ModelSelection
 from core.log_fields import judgment_outcome_fields
+from tools.registry import registry_has_tool
 
 if TYPE_CHECKING:
     from core.config import Config
@@ -66,32 +68,6 @@ def _assemble_context_failure_backoff_ms(repeat_count: int) -> int:
     return min(60_000, 2_000 * (repeat_count - 1))
 
 
-def _registry_has_tool(registry: Any | None, tool_name: str) -> bool:
-    getter = getattr(registry, "get", None)
-    if getter is None:
-        return False
-    try:
-        return getter(tool_name) is not None
-    except Exception:
-        return False
-
-
-def _workbench_recovery_output(
-    *,
-    workbench: dict[str, Any],
-    rationale: str,
-    model_strategy: dict[str, Any] | None = None,
-) -> JudgmentOutput:
-    return JudgmentOutput(
-        decision="act",
-        chosen_action_id="task.workbench",
-        params={"workbench": workbench},
-        rationale=rationale,
-        next_step=str(workbench.get("next_verification") or ""),
-        model_strategy=dict(model_strategy or {}),
-    )
-
-
 def _assemble_context_failure_output(
     *,
     exc: BaseException,
@@ -103,7 +79,7 @@ def _assemble_context_failure_output(
 ) -> JudgmentOutput:
     reason = f"上下文组装异常: {exc}"
     backoff_ms = _assemble_context_failure_backoff_ms(repeat_count)
-    if active_task is not None and _registry_has_tool(registry, "task.workbench"):
+    if active_task is not None and registry is not None and registry_has_tool(registry, "task.workbench"):
         task_id = getattr(active_task, "id", "")
         workbench = {
             "domain": "runtime-context",
@@ -123,7 +99,7 @@ def _assemble_context_failure_output(
         model_strategy: dict[str, Any] = {}
         if backoff_ms > 0:
             model_strategy["next_idle_gap_ms"] = backoff_ms
-        return _workbench_recovery_output(
+        return build_workbench_action(
             workbench=workbench,
             rationale=(
                 "上下文组装异常不能只 wait；当前有活跃任务，先把异常转成任务皮层恢复态，"
@@ -155,7 +131,7 @@ def _llm_unavailable_output(
     if reply_only:
         return JudgmentOutput.wait(reason=f"[inner-loop] LLM 不可用: {err}")
 
-    if active_task is not None and _registry_has_tool(registry, "task.workbench"):
+    if active_task is not None and registry is not None and registry_has_tool(registry, "task.workbench"):
         task_id = getattr(active_task, "id", "")
         workbench = {
             "domain": "runtime-provider",
@@ -173,7 +149,7 @@ def _llm_unavailable_output(
                 "provider 恢复后已回到原任务的下一步验证，而不是直接 wait/complete。",
             ],
         }
-        return _workbench_recovery_output(
+        return build_workbench_action(
             workbench=workbench,
             rationale=(
                 "LLM 不可用不能被解释成任务无事可做；当前有活跃任务，"
