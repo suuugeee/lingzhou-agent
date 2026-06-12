@@ -3052,7 +3052,8 @@ async def test_finalize_tick_user_reply_falls_back_when_reply_only_empty_for_use
         chat_id=None,
     )
 
-    assert action.reply_to_user.startswith("我已完成本轮处理")
+    assert action.reply_to_user.startswith("我需要先停一下")
+    assert action.decision == "wait"
     assert "已拿到证据" in action.reply_to_user
     assert store.messages == []
 
@@ -3199,7 +3200,8 @@ async def test_finalize_tick_user_reply_keeps_disaster_fallback_for_reply_only_f
         chat_id=None,
     )
 
-    assert action.reply_to_user.startswith("我已完成本轮处理")
+    assert action.reply_to_user.startswith("我需要先停一下")
+    assert action.decision == "wait"
     assert "状态:" not in action.reply_to_user
 
 
@@ -3260,7 +3262,8 @@ async def test_finalize_tick_user_reply_rejects_internal_json_payload():
         chat_id=None,
     )
 
-    assert action.reply_to_user.startswith("我已完成本轮处理")
+    assert action.reply_to_user.startswith("我需要先停一下")
+    assert action.decision == "wait"
     assert '{"command"' not in action.reply_to_user
     assert '{"tool"' not in action.reply_to_user
 

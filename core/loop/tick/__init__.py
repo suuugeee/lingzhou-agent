@@ -80,11 +80,26 @@ async def _finalize_tick_user_reply(
         action.reply_to_user = ""
         reply_only = await _maybe_fill_tick_user_reply(loop, action, tool_history, user_message, active_task, result)
         reply_only_rationale = str(getattr(reply_only, "rationale", "") or "").strip()
+        if reply_only and getattr(reply_only, "decision", "") in {"wait", "pause"}:
+            # reply-only 语义上必须是可见响应态，不应在最终状态里保留 act。
+            action.decision = reply_only.decision
+            if not action.rationale and reply_only.rationale:
+                action.rationale = reply_only.rationale
+            if not action.next_step and reply_only.next_step:
+                action.next_step = reply_only.next_step
+            if not action.reflection and reply_only.reflection:
+                action.reflection = reply_only.reflection
+            if not action.speech_intent and reply_only.speech_intent:
+                action.speech_intent = reply_only.speech_intent
         if not action.reply_to_user:
             fallback = _fallback_reply_for_user(action, result, active_task)
             can_reuse_draft = bool(reply_draft) and action.decision in {"wait", "pause"} and not result.error
             action.reply_to_user = reply_draft if can_reuse_draft else fallback
             if not action.reply_to_user:
+                action.reply_to_user = (
+                    "已完成本轮处理，接下来我会基于证据继续执行闭环验证。"
+                    if not user_message else "我先整理本轮结果，随后继续推进。"
+                )
                 _log.warning(
                     "[oral-bypass] reply_only与fallback均未生成可见回复（rationale=%s）",
                     (reply_only_rationale[:80] if reply_only_rationale else "empty"),
