@@ -62,26 +62,36 @@ _WAIT_MARKERS = (
 _EVIDENCE_MARKERS = (
     "读取",
     "查询",
+    "自检",
     "检查",
+    "核验",
     "验证",
     "查看",
     "确认",
     "核对",
     "核实",
+    "排查",
     "定位",
     "列出",
     "分析",
+    "梳理",
+    "追踪",
+    "对比",
     "运行",
     "执行",
+    "复现",
     "修复",
     "实现",
     "测试",
+    "调试",
+    "调研",
     "日志",
     "schema",
     "read",
     "query",
     "check",
     "verify",
+    "diagnose",
     "inspect",
     "list",
     "analyze",
@@ -90,11 +100,46 @@ _EVIDENCE_MARKERS = (
     "fix",
     "implement",
     "test",
+    "debug",
     "log",
 )
 
 
+def _normalize_next_step(next_step: str) -> str:
+    """标准化 next_step 文本，减少标点干扰导致的关键词 miss。"""
+    cleaned = str(next_step or "").strip()
+    for ch in (
+        "　",
+        "	",
+        "\n",
+        "（",
+        "）",
+        "【",
+        "】",
+        "(",
+        ")",
+        "[",
+        "]",
+        "，",
+        "。",
+        ",",
+        ".",
+        ";",
+        "；",
+        "：",
+        ":",
+    ):
+        cleaned = cleaned.replace(ch, " ")
+    return " ".join(cleaned.split()).lower()
+
+
+def _contains_evidence_intent(text: str) -> bool:
+    normalized = _normalize_next_step(text)
+    return any(marker in normalized for marker in _EVIDENCE_MARKERS)
+
+
 class BehaviorTracker:
+
     """行为模式追踪器：检测循环并把信号交给 LLM。"""
 
     def __init__(
@@ -524,12 +569,12 @@ class BehaviorTracker:
         next_step = str(getattr(signals, "active_task_next_step", "") or "").strip()
         if not next_step:
             return False
-        lowered = next_step.lower()
+        has_evidence = _contains_evidence_intent(next_step)
+        wait_text = _normalize_next_step(next_step)
         wait_streak = int(getattr(signals, "wait_streak", 0) or 0)
-        has_evidence = any(marker in lowered for marker in _EVIDENCE_MARKERS)
         if status == "waiting" and not has_evidence:
             return False
-        if any(marker in lowered for marker in _WAIT_MARKERS) and not has_evidence:
+        if any(marker in wait_text for marker in _WAIT_MARKERS) and not has_evidence:
             return wait_streak >= 3
         return has_evidence
 

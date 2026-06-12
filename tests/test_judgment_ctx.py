@@ -547,6 +547,39 @@ def test_behavior_gate_forces_self_drive_waiting_task_with_viewing_action():
     assert "查看最近 10 次失败记录" in gated.params["workbench"]["next_verification"]
 
 
+def test_contains_evidence_intent_normalizes_punctuation_and_newlines():
+    from core.loop.drive.behavior import _contains_evidence_intent, _normalize_next_step
+
+    assert _contains_evidence_intent("先做最小范围自检：读取日志并复现失败场景。") is True
+    assert _contains_evidence_intent("先做最小范围复现,提取回归链路") is True
+    assert _contains_evidence_intent("先做最小范围，debug 最近失败样例") is True
+    assert _contains_evidence_intent("先做最小范围的外部观察，准备等待外部输入。") is False
+
+    assert _normalize_next_step("先做最小范围\n自检：读取日志(10 次)") == "先做最小范围 自检 读取日志 10 次"
+
+
+def test_behavior_gate_applies_on_implicit_evidence_phrase_variants():
+    from core.loop.drive.behavior import BehaviorTracker
+
+    class _Signals:
+        active_task_id = 48
+        active_task_source = "self_drive"
+        active_task_status = "in_progress"
+        active_task_next_step = "先做最小范围自检：读取最近 10 条日志，调研异常时间窗口。"
+        repeat_action_count = 0
+        repeat_read_count = 0
+        wait_streak = 1
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
+    action = _judgment_output(decision="wait", rationale="等待外部输入")
+
+    gated = tracker.apply_execution_gate(action, _Signals())
+
+    assert gated.decision == "act"
+    assert gated.chosen_action_id == "task.workbench"
+    assert "先做最小范围自检" in gated.params["workbench"]["next_verification"]
+
+
 def test_cognitive_signals_include_last_action_feedback_and_repeat_list():
     from core.perception import CognitiveSignals
 
