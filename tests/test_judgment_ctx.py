@@ -57,6 +57,21 @@ def _tick_reply_loop(judgment: Any, store: _ReplyStore | None = None) -> tuple[A
     )), reply_store
 
 
+def _self_drive_signals(**overrides: Any) -> SimpleNamespace:
+    data = {
+        "active_task_id": 42,
+        "active_task_source": "self_drive",
+        "active_task_status": "in_progress",
+        "active_task_next_step": "",
+        "repeat_action_count": 0,
+        "repeat_read_count": 0,
+        "repeat_list_count": 0,
+        "wait_streak": 0,
+    }
+    data.update(overrides)
+    return SimpleNamespace(**data)
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SemanticMemory — 多锚点情境召回（ACT-R 收敛激活）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -450,18 +465,13 @@ def test_behavior_gate_blocks_repeating_same_action_and_logs_observation(caplog)
 def test_behavior_gate_redirects_self_drive_evidence_wait_to_workbench():
     from core.loop.drive.behavior import BehaviorTracker
 
-    class _EvidenceSignals:
-        active_task_id = 42
-        active_task_source = "self_drive"
-        active_task_status = "in_progress"
-        active_task_next_step = "读取最近日志，寻找重复模式或可优化点"
-        repeat_action_count = 0
-        repeat_read_count = 0
-
     tracker = BehaviorTracker(registry=_WorkbenchRegistry())
     action = _judgment_output(decision="wait", rationale="当前无用户输入，先等待")
 
-    gated = tracker.apply_execution_gate(action, _EvidenceSignals())
+    gated = tracker.apply_execution_gate(
+        action,
+        _self_drive_signals(active_task_next_step="读取最近日志，寻找重复模式或可优化点"),
+    )
 
     assert gated.decision == "act"
     assert gated.chosen_action_id == "task.workbench"
@@ -475,36 +485,27 @@ def test_behavior_gate_redirects_self_drive_evidence_wait_to_workbench():
 def test_behavior_gate_allows_self_drive_external_wait():
     from core.loop.drive.behavior import BehaviorTracker
 
-    class _ExternalSignals:
-        active_task_id = 43
-        active_task_source = "self_drive"
-        active_task_status = "in_progress"
-        active_task_next_step = "等待外部输入或下一次日记同步信号"
-        repeat_action_count = 0
-        repeat_read_count = 0
-
     tracker = BehaviorTracker(registry=_WorkbenchRegistry())
     action = _judgment_output(decision="wait", rationale="等待外部信号")
 
-    assert tracker.apply_execution_gate(action, _ExternalSignals()) is action
+    signals = _self_drive_signals(active_task_id=43, active_task_next_step="等待外部输入或下一次日记同步信号")
+    assert tracker.apply_execution_gate(action, signals) is action
 
 
 def test_behavior_gate_forces_repeated_self_drive_wait_to_evidence():
     from core.loop.drive.behavior import BehaviorTracker
 
-    class _RepeatedWaitSignals:
-        active_task_id = 44
-        active_task_source = "self_drive"
-        active_task_status = "in_progress"
-        active_task_next_step = "等待外部输入或下一次日记同步信号"
-        repeat_action_count = 0
-        repeat_read_count = 0
-        wait_streak = 3
-
     tracker = BehaviorTracker(registry=_WorkbenchRegistry())
     action = _judgment_output(decision="wait", rationale="等待外部信号")
 
-    gated = tracker.apply_execution_gate(action, _RepeatedWaitSignals())
+    gated = tracker.apply_execution_gate(
+        action,
+        _self_drive_signals(
+            active_task_id=44,
+            active_task_next_step="等待外部输入或下一次日记同步信号",
+            wait_streak=3,
+        ),
+    )
 
     assert gated.decision == "act"
     assert gated.chosen_action_id == "task.workbench"
@@ -515,34 +516,30 @@ def test_behavior_gate_forces_repeated_self_drive_wait_to_evidence():
 def test_behavior_gate_resumes_self_drive_waiting_task_if_no_evidence_hint():
     from core.loop.drive.behavior import BehaviorTracker
 
-    class _Signals:
-        active_task_id = 45
-        active_task_source = "self_drive"
-        active_task_status = "waiting"
-        active_task_next_step = "等待外部输入或下一次同步信号"
-        repeat_action_count = 0
-        repeat_read_count = 0
-
     tracker = BehaviorTracker(registry=_WorkbenchRegistry())
     action = _judgment_output(decision="wait", rationale="等待外部输入")
-    assert tracker.apply_execution_gate(action, _Signals()) is action
+    signals = _self_drive_signals(
+        active_task_id=45,
+        active_task_status="waiting",
+        active_task_next_step="等待外部输入或下一次同步信号",
+    )
+    assert tracker.apply_execution_gate(action, signals) is action
 
 
 def test_behavior_gate_forces_self_drive_waiting_task_with_evidence():
     from core.loop.drive.behavior import BehaviorTracker
 
-    class _Signals:
-        active_task_id = 46
-        active_task_source = "self_drive"
-        active_task_status = "waiting"
-        active_task_next_step = "读取最近日志，寻找下一步可执行动作"
-        repeat_action_count = 0
-        repeat_read_count = 0
-
     tracker = BehaviorTracker(registry=_WorkbenchRegistry())
     action = _judgment_output(decision="wait", rationale="等待外部输入")
 
-    gated = tracker.apply_execution_gate(action, _Signals())
+    gated = tracker.apply_execution_gate(
+        action,
+        _self_drive_signals(
+            active_task_id=46,
+            active_task_status="waiting",
+            active_task_next_step="读取最近日志，寻找下一步可执行动作",
+        ),
+    )
 
     assert gated.decision == "act"
     assert gated.chosen_action_id == "task.workbench"
@@ -553,18 +550,17 @@ def test_behavior_gate_forces_self_drive_waiting_task_with_evidence():
 def test_behavior_gate_forces_self_drive_waiting_task_with_viewing_action():
     from core.loop.drive.behavior import BehaviorTracker
 
-    class _Signals:
-        active_task_id = 47
-        active_task_source = "self_drive"
-        active_task_status = "waiting"
-        active_task_next_step = "查看最近 10 次失败记录并提取异常模式"
-        repeat_action_count = 0
-        repeat_read_count = 0
-
     tracker = BehaviorTracker(registry=_WorkbenchRegistry())
     action = _judgment_output(decision="wait", rationale="等待外部输入")
 
-    gated = tracker.apply_execution_gate(action, _Signals())
+    gated = tracker.apply_execution_gate(
+        action,
+        _self_drive_signals(
+            active_task_id=47,
+            active_task_status="waiting",
+            active_task_next_step="查看最近 10 次失败记录并提取异常模式",
+        ),
+    )
 
     assert gated.decision == "act"
     assert gated.chosen_action_id == "task.workbench"
@@ -586,19 +582,17 @@ def test_contains_evidence_intent_normalizes_punctuation_and_newlines():
 def test_behavior_gate_applies_on_implicit_evidence_phrase_variants():
     from core.loop.drive.behavior import BehaviorTracker
 
-    class _Signals:
-        active_task_id = 48
-        active_task_source = "self_drive"
-        active_task_status = "in_progress"
-        active_task_next_step = "先做最小范围自检：读取最近 10 条日志，调研异常时间窗口。"
-        repeat_action_count = 0
-        repeat_read_count = 0
-        wait_streak = 1
-
     tracker = BehaviorTracker(registry=_WorkbenchRegistry())
     action = _judgment_output(decision="wait", rationale="等待外部输入")
 
-    gated = tracker.apply_execution_gate(action, _Signals())
+    gated = tracker.apply_execution_gate(
+        action,
+        _self_drive_signals(
+            active_task_id=48,
+            active_task_next_step="先做最小范围自检：读取最近 10 条日志，调研异常时间窗口。",
+            wait_streak=1,
+        ),
+    )
 
     assert gated.decision == "act"
     assert gated.chosen_action_id == "task.workbench"

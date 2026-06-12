@@ -156,6 +156,7 @@ class BehaviorTracker:
         repeat_action = getattr(signals, "repeat_action_count", 0)
         repeat_read = getattr(signals, "repeat_read_count", 0)
         repeat_list = getattr(signals, "repeat_list_count", 0)
+        path_gate: tuple[str, int, str, str, str] | None = None
         if repeat_action >= self._streak_threshold:
             repeat_tool = str(getattr(signals, "repeat_action_tool", "") or "")
             repeat_key = str(getattr(signals, "repeat_action_key", "") or "")
@@ -191,54 +192,35 @@ class BehaviorTracker:
                     ),
                 )
         elif repeat_read >= self._streak_threshold:
-            repeat_path = str(getattr(signals, "repeat_read_path", "") or "")
-            _log.info(
-                "[behavior.gate] repeat read streak=%d path=%s",
-                repeat_read,
-                repeat_path,
-            )
-            if (
-                action.decision == "act"
-                and str(action.chosen_action_id or "") == "file.read"
-                and action_key_param(action.params) == repeat_path
-            ):
-                if registry_has_tool(self._registry, "task.workbench"):
-                    return self._build_repeat_path_workbench_gate(
-                        action=action,
-                        kind="read",
-                        repeat_path=repeat_path,
-                        repeat_count=repeat_read,
-                    )
-                return self._build_wait_fallback(
-                    action=action,
-                    rationale=(
-                        f"行为门控改道：{repeat_path} 已连续重复读取 {repeat_read} 次，"
-                        "继续执行没有新增证据；等待下一轮重新组装上下文或切换策略。"
-                    ),
-                )
+            path_gate = ("read", repeat_read, str(getattr(signals, "repeat_read_path", "") or ""), "file.read", "读取")
         elif repeat_list >= self._streak_threshold:
-            repeat_path = str(getattr(signals, "repeat_list_path", "") or "")
-            _log.info(
-                "[behavior.gate] repeat list streak=%d path=%s",
+            path_gate = (
+                "list",
                 repeat_list,
-                repeat_path,
+                str(getattr(signals, "repeat_list_path", "") or ""),
+                "file.list",
+                "列表枚举",
             )
+
+        if path_gate:
+            kind, repeat_count, repeat_path, tool_id, fallback_verb = path_gate
+            _log.info("[behavior.gate] repeat %s streak=%d path=%s", kind, repeat_count, repeat_path)
             if (
                 action.decision == "act"
-                and str(action.chosen_action_id or "") == "file.list"
+                and str(action.chosen_action_id or "") == tool_id
                 and action_key_param(action.params) == repeat_path
             ):
                 if registry_has_tool(self._registry, "task.workbench"):
                     return self._build_repeat_path_workbench_gate(
                         action=action,
-                        kind="list",
+                        kind=kind,
                         repeat_path=repeat_path,
-                        repeat_count=repeat_list,
+                        repeat_count=repeat_count,
                     )
                 return self._build_wait_fallback(
                     action=action,
                     rationale=(
-                        f"行为门控改道：{repeat_path} 已连续重复列表枚举 {repeat_list} 次，"
+                        f"行为门控改道：{repeat_path} 已连续重复{fallback_verb} {repeat_count} 次，"
                         "继续执行没有新增证据；等待下一轮重新组装上下文或切换策略。"
                     ),
                 )
@@ -356,57 +338,53 @@ class BehaviorTracker:
         repeat_count: int,
     ) -> JudgmentOutput:
         if kind == "list":
-            return self._build_workbench_gate(
-                action=action,
-                domain="runtime-loop",
-                intent="停止重复目录枚举并恢复问题解决闭环",
-                evidence=[
-                    f"file.list 已连续 {repeat_count} 次列出相同目录结果: {repeat_path}",
-                    "继续列同一目录无法提供新增证据，应先基于已有目录结果选择具体文件、命令或结论。",
-                ],
-                hypothesis="当前循环不是缺少目录信息，而是缺少从目录清单到具体验证对象的收敛。",
-                next_verification=(
-                    f"不要再列出 {repeat_path}；从已有目录结果中选择最相关文件读取，"
-                    "或改用 grep/测试/配置查询等更具体证据源。"
-                ),
-                completion_checks=[
-                    "已停止重复枚举同一目录。",
-                    "已把目录结果转化为具体文件读取、验证命令或可回答结论。",
-                ],
-                rationale=(
-                    f"行为门控改道：{repeat_path} 已连续重复列表枚举 {repeat_count} 次，"
-                    "本轮先沉淀证据并要求切换到具体验证对象。"
-                ),
-                next_step=(
-                    f"停止重复列出 {repeat_path}，先选择具体文件/命令验证；"
-                    "仍需目录信息时换更精确路径。"
-                ),
+            intent = "停止重复目录枚举并恢复问题解决闭环"
+            evidence = [
+                f"file.list 已连续 {repeat_count} 次列出相同目录结果: {repeat_path}",
+                "继续列同一目录无法提供新增证据，应先基于已有目录结果选择具体文件、命令或结论。",
+            ]
+            hypothesis = "当前循环不是缺少目录信息，而是缺少从目录清单到具体验证对象的收敛。"
+            next_verification = (
+                f"不要再列出 {repeat_path}；从已有目录结果中选择最相关文件读取，"
+                "或改用 grep/测试/配置查询等更具体证据源。"
             )
+            completion_checks = [
+                "已停止重复枚举同一目录。",
+                "已把目录结果转化为具体文件读取、验证命令或可回答结论。",
+            ]
+            rationale = (
+                f"行为门控改道：{repeat_path} 已连续重复列表枚举 {repeat_count} 次，"
+                "本轮先沉淀证据并要求切换到具体验证对象。"
+            )
+            next_step = f"停止重复列出 {repeat_path}，先选择具体文件/命令验证；仍需目录信息时换更精确路径。"
+        else:
+            intent = "停止重复读取并恢复问题解决闭环"
+            evidence = [
+                f"file.read 已连续 {repeat_count} 次读取同一路径: {repeat_path}",
+                "继续读取同一路径无法提供新增证据，应先总结已读内容或切换验证手段。",
+            ]
+            hypothesis = "当前循环不是缺少读取能力，而是缺少读取后的证据综合和下一步改道。"
+            next_verification = f"不要再读取 {repeat_path}；基于已读结果写出判断，或改用 grep/测试/配置查询等不同证据源验证。"
+            completion_checks = [
+                "已停止重复读取同一路径。",
+                "已把已有读取结果转化为结论或新的验证动作。",
+            ]
+            rationale = (
+                f"行为门控改道：{repeat_path} 已连续重复读取 {repeat_count} 次，"
+                "本轮先沉淀证据并要求切换验证策略。"
+            )
+            next_step = f"停止重复读取 {repeat_path}，先总结已读证据；仍需验证时改用不同证据源。"
+
         return self._build_workbench_gate(
             action=action,
             domain="runtime-loop",
-            intent="停止重复读取并恢复问题解决闭环",
-            evidence=[
-                f"file.read 已连续 {repeat_count} 次读取同一路径: {repeat_path}",
-                "继续读取同一路径无法提供新增证据，应先总结已读内容或切换验证手段。",
-            ],
-            hypothesis="当前循环不是缺少读取能力，而是缺少读取后的证据综合和下一步改道。",
-            next_verification=(
-                f"不要再读取 {repeat_path}；基于已读结果写出判断，"
-                "或改用 grep/测试/配置查询等不同证据源验证。"
-            ),
-            completion_checks=[
-                "已停止重复读取同一路径。",
-                "已把已有读取结果转化为结论或新的验证动作。",
-            ],
-            rationale=(
-                f"行为门控改道：{repeat_path} 已连续重复读取 {repeat_count} 次，"
-                "本轮先沉淀证据并要求切换验证策略。"
-            ),
-            next_step=(
-                f"停止重复读取 {repeat_path}，先总结已读证据；"
-                "仍需验证时改用不同证据源。"
-            ),
+            intent=intent,
+            evidence=evidence,
+            hypothesis=hypothesis,
+            next_verification=next_verification,
+            completion_checks=completion_checks,
+            rationale=rationale,
+            next_step=next_step,
         )
 
     def _build_unprogressful_probe_gate(
