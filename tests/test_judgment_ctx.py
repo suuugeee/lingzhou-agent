@@ -3054,6 +3054,8 @@ async def test_finalize_tick_user_reply_falls_back_when_reply_only_empty_for_use
 
     assert action.reply_to_user.startswith("我需要先停一下")
     assert action.decision == "wait"
+    assert action.chosen_action_id == ""
+    assert action.params == {}
     assert "已拿到证据" in action.reply_to_user
     assert store.messages == []
 

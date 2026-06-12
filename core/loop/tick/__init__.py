@@ -83,6 +83,10 @@ async def _finalize_tick_user_reply(
         if reply_only and getattr(reply_only, "decision", "") in {"wait", "pause"}:
             # reply-only 语义上必须是可见响应态，不应在最终状态里保留 act。
             action.decision = reply_only.decision
+            action.chosen_action_id = ""
+            action.params = {}
+            action.parallel_actions = []
+            action.delegate_tasks = []
             if not action.rationale and reply_only.rationale:
                 action.rationale = reply_only.rationale
             if not action.next_step and reply_only.next_step:
