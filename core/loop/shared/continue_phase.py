@@ -108,6 +108,10 @@ def _repeat_history_signature(entry: dict[str, Any]) -> str:
     return f"{tool}|{params_text}|{result_hash}"
 
 
+def _compacted_history_entry(tool: str, result: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+    return {"tool": tool, "params": params or {}, "result": result, "status": "compacted", "error": ""}
+
+
 def _action_history_key(action: JudgmentOutput) -> tuple[str, str]:
     return str(action.chosen_action_id or ""), action_key_param(action.params)
 
@@ -206,21 +210,19 @@ def _compact_repeated_tool_history(history: list[dict[str, Any]]) -> list[dict[s
         if sig not in emitted:
             omitted = counts[sig] - 1
             params = entry.get("params") if isinstance(entry.get("params"), dict) else {}
-            rebuilt.append({
-                "tool": "[repeat-compacted]",
-                "params": {
-                    "repeat_tool": str(entry.get("tool") or ""),
-                    "repeat_key": action_key_param(params),
-                    "repeat_count": omitted,
-                },
-                "result": (
+            rebuilt.append(_compacted_history_entry(
+                "[repeat-compacted]",
+                (
                     f"（本 tick 内 {omitted} 条重复低价值工具调用已压缩；"
                     "最新一次完整结果保留在下一条，原始记录保留在 run/artifact 中）\n"
                     + "\n".join(old_lines.get(sig) or [])
                 ),
-                "status": "compacted",
-                "error": "",
-            })
+                {
+                    "repeat_tool": str(entry.get("tool") or ""),
+                    "repeat_key": action_key_param(params),
+                    "repeat_count": omitted,
+                },
+            ))
             emitted.add(sig)
         rebuilt.append(entry)
     history[:] = rebuilt
@@ -234,16 +236,11 @@ def _compact_tool_history(history: list[dict[str, Any]], *, keep_last: int) -> l
         return history
     older = history[:-keep_last]
     recent = history[-keep_last:]
-    summary_lines = []
-    for entry in older:
-        summary_lines.append(_compact_history_line(entry))
-    compact: dict[str, Any] = {
-        "tool": "[compacted]",
-        "params": {},
-        "result": f"（早期 {len(older)} 条工具调用已结构化压缩；原始结果保留在 run/artifact 中）\n" + "\n".join(summary_lines),
-        "status": "compacted",
-        "error": "",
-    }
+    summary_lines = [_compact_history_line(entry) for entry in older]
+    compact = _compacted_history_entry(
+        "[compacted]",
+        f"（早期 {len(older)} 条工具调用已结构化压缩；原始结果保留在 run/artifact 中）\n" + "\n".join(summary_lines),
+    )
     history[:] = [compact] + recent
     return history
 
