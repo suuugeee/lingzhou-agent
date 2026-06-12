@@ -525,6 +525,28 @@ def test_behavior_gate_forces_self_drive_waiting_task_with_evidence():
     assert "读取最近日志" in gated.params["workbench"]["next_verification"]
 
 
+def test_behavior_gate_forces_self_drive_waiting_task_with_viewing_action():
+    from core.loop.drive.behavior import BehaviorTracker
+
+    class _Signals:
+        active_task_id = 47
+        active_task_source = "self_drive"
+        active_task_status = "waiting"
+        active_task_next_step = "查看最近 10 次失败记录并提取异常模式"
+        repeat_action_count = 0
+        repeat_read_count = 0
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
+    action = _judgment_output(decision="wait", rationale="等待外部输入")
+
+    gated = tracker.apply_execution_gate(action, _Signals())
+
+    assert gated.decision == "act"
+    assert gated.chosen_action_id == "task.workbench"
+    assert gated.params["workbench"]["recovery_state"] == "evidence_required_before_wait"
+    assert "查看最近 10 次失败记录" in gated.params["workbench"]["next_verification"]
+
+
 def test_cognitive_signals_include_last_action_feedback_and_repeat_list():
     from core.perception import CognitiveSignals
 
