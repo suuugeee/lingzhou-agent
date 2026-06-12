@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from core.judgment import JudgmentOutput
@@ -66,20 +68,26 @@ async def _finalize_tick_user_reply(
     """口腔器官：基于执行结果生成真正的对外回复。"""
     if user_message:
         reply_draft = str(action.reply_to_user or "").strip()
+        if (
+            reply_draft
+            and action.decision in {"wait", "pause"}
+            and not tool_history
+            and not result.error
+            and not result.skipped
+        ):
+            await _persist_tick_user_reply(loop, action, active_task, chat_id, user_message)
+            return
         action.reply_to_user = ""
         reply_only = await _maybe_fill_tick_user_reply(loop, action, tool_history, user_message, active_task, result)
         reply_only_rationale = str(getattr(reply_only, "rationale", "") or "").strip()
-        reply_only_failed = (
-            bool(result.error)
-            or not reply_only_rationale
-            or reply_only_rationale.startswith(("[reply-only]", "[inner-loop]"))
-        )
-        if not action.reply_to_user and reply_only_failed:
-            _log.warning(
-                "[oral-bypass] reply_only失败，绕过口腔器官回落 draft rationale=%s",
+        if not action.reply_to_user:
+            _log.debug(
+                "[oral-bypass] reply_only未生成可见回复，使用本地 fallback 回落 draft rationale=%s",
                 (reply_only_rationale[:80] if reply_only_rationale else "empty"),
             )
-            action.reply_to_user = reply_draft or _fallback_reply_for_user(action, result, active_task)
+            fallback = _fallback_reply_for_user(action, result, active_task)
+            can_reuse_draft = bool(reply_draft) and action.decision in {"wait", "pause"} and not result.error
+            action.reply_to_user = reply_draft if can_reuse_draft else fallback
     elif action.speech_intent and not action.reply_to_user:
         if action.decision != "act":
             action.reply_to_user = action.speech_intent
@@ -123,7 +131,7 @@ async def _maybe_fill_tick_user_reply(
                 user_message=user_message,
                 model_strategy=action.model_strategy,
             ),
-            "low",
+            "medium" if active_task is not None else "low",
         ),
         routing_overrides=loop._pending_routing_overrides,
         reply_only=True,
@@ -133,7 +141,15 @@ async def _maybe_fill_tick_user_reply(
     if not reply_only.reply_to_user:
         return reply_only
 
-    action.reply_to_user = reply_only.reply_to_user
+    reply_text = str(reply_only.reply_to_user or "").strip()
+    if _reply_looks_like_internal_payload(reply_text):
+        _log.warning(
+            "[mouth-check] reply_only produced internal tool payload; falling back to natural reply preview=%s",
+            _clip_reply_for_log(reply_text, 120),
+        )
+        return JudgmentOutput.wait(reason="[reply-only] reply_to_user 包含内部工具载荷")
+
+    action.reply_to_user = reply_text
     if reply_only.rationale:
         action.rationale = reply_only.rationale
     if reply_only.reflection and not action.reflection:
@@ -142,6 +158,54 @@ async def _maybe_fill_tick_user_reply(
         action.next_step = reply_only.next_step
     _check_mouth_consistency(action.reply_to_user, _ar)
     return reply_only
+
+
+def _json_like_internal_payload(value: Any) -> bool:
+    if isinstance(value, dict):
+        internal_keys = {
+            "command",
+            "tool",
+            "params",
+            "chosen_action_id",
+            "parallel_actions",
+            "stdout",
+            "stderr",
+            "exit_code",
+            "workdir",
+        }
+        if any(key in value for key in internal_keys):
+            return True
+        return any(_json_like_internal_payload(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_json_like_internal_payload(item) for item in value)
+    return False
+
+
+def _reply_looks_like_internal_payload(reply: str) -> bool:
+    text = str(reply or "").strip()
+    if not text:
+        return False
+    fenced = re.fullmatch(r"```(?:json|bash|sh)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if _json_like_internal_payload(parsed):
+        return True
+
+    json_lines = [line.strip() for line in text.splitlines() if line.strip().startswith(("{", "["))]
+    for line in json_lines[:4]:
+        try:
+            parsed_line = json.loads(line)
+        except Exception:
+            continue
+        if _json_like_internal_payload(parsed_line):
+            return True
+
+    return bool(re.search(r'^\s*\{[^}\n]*"(?:command|tool|chosen_action_id|params|workdir)"\s*:', text, flags=re.DOTALL))
 
 
 def _check_mouth_consistency(reply: str, action_result: _ActionResultSummary) -> None:

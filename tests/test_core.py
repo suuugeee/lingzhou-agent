@@ -663,6 +663,25 @@ def test_coerce_reply_only_output_demotes_act_to_wait():
     assert out.reply_to_user == "这是最终回复。"
 
 
+def test_coerce_reply_only_output_fills_empty_reply():
+    from core.judgment import JudgmentOutput
+    from core.judgment.boundary import coerce_reply_only_output
+
+    out = coerce_reply_only_output(
+        JudgmentOutput(
+            decision="act",
+            chosen_action_id="file.read",
+            params={"path": "/tmp/demo.txt"},
+            rationale="已读取最近日志。",
+        )
+    )
+
+    assert out.decision == "wait"
+    assert out.chosen_action_id == ""
+    assert out.reply_to_user.startswith("已完成本轮执行：")
+    assert "已读取最近日志。" in out.reply_to_user
+
+
 def test_judgment_prompt_includes_runtime_hint_rules():
     # 详细规则已外化到 runtime-hints skill，judgment.md 保留 skill 指针摘要
     prompt = (_proj_root() / "prompts" / "judgment.md").read_text(encoding="utf-8")
@@ -888,13 +907,19 @@ def test_chat_print_input_prompt_when_tty(monkeypatch):
     assert fake_stdout.getvalue() == "小懒> "
 
 
-def test_loop_logging_reply_not_truncated():
+def test_loop_logging_reply_honors_limit():
     from core.loop.shared.logging import _clip_reply_for_log
+
+    assert _clip_reply_for_log("short reply") == "short reply"
 
     text = "x" * 600
 
-    assert _clip_reply_for_log(text) == text
-    assert _clip_reply_for_log(text, limit=10) == text
+    default_clipped = _clip_reply_for_log(text)
+    assert len(default_clipped) == 240
+    assert default_clipped.endswith("...")
+    clipped = _clip_reply_for_log(text, limit=10)
+    assert clipped == "xxxxxxx..."
+    assert len(clipped) == 10
 
 
 def test_cli_help_includes_onboard_command():
@@ -1813,6 +1838,95 @@ def test_judgment_context_budget_trims_low_priority_sections():
     assert len(budgeted["memories_section"]) <= len(ctx["memories_section"])
     assert len(budgeted["episodic_section"]) <= len(ctx["episodic_section"])
     assert len(budgeted["wm_section"]) <= len(ctx["wm_section"])
+
+
+def test_judgment_context_budget_compacts_static_noise_before_dropping():
+    from core.judgment.context.budget import apply_context_budget
+    from core.judgment.context.utils import _estimate_tokens
+
+    tool_lines = "\n".join([
+        "- `task.workbench`: 更新任务工作台  参数: [workbench(*): 工作台对象, task_id(?): 任务 id]",
+        "- `memory.add_semantic`: 写语义记忆  参数: [title(*): 标题, body(*): 内容, kind(?): 类型]",
+        "- `memory.search`: 搜索语义记忆  参数: [query(*): 查询, top_k(?): 数量]",
+        *[f"- `tool.{i}`: description  参数: [value(?): " + ("x" * 120) + "]" for i in range(120)],
+    ])
+    probe_lines = "\n".join(
+        f"  ✓ [probe-{i}] shell/interval:60 →wm confidence=0.85\n  └ 目的: " + ("p" * 80)
+        for i in range(80)
+    )
+    route_payload = {
+        "active_overrides": {},
+        "available_models": {"reader": "m1", "reasoner": "m2"},
+        "tool_tier_mapping": {f"tool.{i}": "reasoner" for i in range(120)},
+        "tool_capability_mapping": {f"tool.{i}": ["read", "inspect"] for i in range(120)},
+        "current_action_capabilities": ["read"],
+        "continue_phase_policy": {"max_inner_rounds": 4},
+        "budget_state": {"repeat_action_count": 2, "global_cost_posture": "conserve"},
+        "routing_hint": {"phase": "initial"},
+    }
+    wm_lines = "\n".join("- [kind|p=0.9] " + ("w" * 300) for _ in range(40))
+    ctx = {
+        "task_section": "active task",
+        "cortex_workspace_section": "next_verification=读取最近日志",
+        "tools_section": tool_lines,
+        "probe_sensors_section": probe_lines,
+        "model_routing_section": json.dumps(route_payload, ensure_ascii=False, indent=2),
+        "wm_section": "[40/20 条，~20000 tokens / 12000 预算，166%]\n" + wm_lines,
+        "user_message": "",
+    }
+
+    budgeted = apply_context_budget(ctx, token_budget=9000)
+
+    assert _estimate_tokens("".join(budgeted.values())) <= 9000
+    assert "TOOL CATALOG COMPACTED" in budgeted["tools_section"]
+    assert "`tool.0`" in budgeted["tools_section"]
+    assert "`task.workbench` required: workbench" in budgeted["tools_section"]
+    assert "`memory.add_semantic` required: title, body" in budgeted["tools_section"]
+    assert "`memory.search` required: query" in budgeted["tools_section"]
+    assert "PROBE SENSORS COMPACTED" in budgeted["probe_sensors_section"]
+    assert "MODEL ROUTING COMPACTED" in budgeted["model_routing_section"]
+    assert "tool_tier_mapping_keys" in budgeted["model_routing_section"]
+    assert "WM COMPACTED" in budgeted["wm_section"]
+
+
+def test_judgment_context_budget_reserves_prompt_headroom_before_llm_trim():
+    from core.judgment.context.budget import apply_context_budget
+    from core.judgment.context.utils import _estimate_tokens
+
+    tool_lines = "\n".join([
+        "- `task.workbench`: 更新任务工作台  参数: [workbench(*): 工作台对象]",
+        *[f"- `tool.{i}`: description  参数: [value(?): " + ("x" * 140) + "]" for i in range(110)],
+    ])
+    probe_lines = "\n".join(
+        f"  ✓ [probe-{i}] shell/interval:60 →wm confidence=0.85\n  └ 目的: " + ("p" * 60)
+        for i in range(80)
+    )
+    ctx = {
+        "task_section": "active task",
+        "tools_section": tool_lines,
+        "probe_sensors_section": probe_lines,
+        "model_routing_section": json.dumps({
+            "available_models": {"reader": "m1", "reasoner": "m2"},
+            "tool_tier_mapping": {f"tool.{i}": "reasoner" for i in range(120)},
+            "tool_capability_mapping": {f"tool.{i}": ["read", "inspect", "evidence"] for i in range(120)},
+            "budget_state": {"global_cost_posture": "conserve"},
+        }),
+        "wm_section": "[30/20 条，~18000 tokens / 12000 预算，150%]\n"
+        + "\n".join("- [kind|p=0.9] " + ("w" * 300) for _ in range(25)),
+        "user_message": "",
+    }
+
+    hard_budget = 15_000
+    assert _estimate_tokens("".join(ctx.values())) <= hard_budget
+    assert _estimate_tokens("".join(ctx.values())) > int(hard_budget * 0.82)
+
+    budgeted = apply_context_budget(ctx, token_budget=hard_budget)
+
+    assert _estimate_tokens("".join(budgeted.values())) <= int(hard_budget * 0.82)
+    assert "TOOL CATALOG COMPACTED" in budgeted["tools_section"]
+    assert "PROBE SENSORS COMPACTED" in budgeted["probe_sensors_section"]
+    assert "MODEL ROUTING COMPACTED" in budgeted["model_routing_section"]
+    assert "WM COMPACTED" in budgeted["wm_section"]
 
 
 def test_judgment_error_classification_and_cooldown():
