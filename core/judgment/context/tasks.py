@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from .utils import (
     _cache_put,
-    _clip_text,
     _clip_for_context,
+    _clip_text,
     _context_fmt_cache,
     _format_fact_value,
     _run_summary,

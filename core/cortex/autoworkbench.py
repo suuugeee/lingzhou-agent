@@ -65,10 +65,12 @@ def _meaningful_detail(*values: Any) -> str:
 
 
 def _should_auto_record(tool_name: str, status: str, *, summary: str, error: str, evidence: str, state_delta: dict[str, Any], artifact_paths: list[str]) -> bool:
-    if tool_name in _SKIP_AUTO_TOOLS and status not in {"failed", "cancelled"} and not error:
-        return False
     if status in {"failed", "cancelled"} or error:
         return True
+    if state_delta.get("completion_blocked") or state_delta.get("tool_input_invalid"):
+        return True
+    if tool_name in _SKIP_AUTO_TOOLS:
+        return False
     if evidence or state_delta or artifact_paths:
         return True
     return bool(summary and tool_name)
@@ -99,6 +101,7 @@ def build_auto_cortex_patch(
     tool = _clip_text(tool_name or "unknown", limit=80)
     run_status = _clip_text(status or "unknown", limit=40)
     err = _clip_text(error or "", limit=220)
+    runtime_guard_recovery = bool(state.get("tool_input_invalid") or state.get("completion_blocked"))
     detail = _meaningful_detail(progress, evidence, summary, err, _compact_json(state), ", ".join(artifacts))
     if not _should_auto_record(tool, run_status, summary=summary, error=err, evidence=evidence, state_delta=state, artifact_paths=artifacts):
         return {}
@@ -166,9 +169,11 @@ def build_auto_cortex_patch(
         )
         cortex["recovery_state"] = "recovering_from_run_failure"
         recovery_next_step = _clip_text(state.get("recovery_next_step") or state.get("next_verification") or "", limit=240)
-        if not str(cortex.get("next_verification") or "").strip():
+        if recovery_next_step and runtime_guard_recovery:
+            cortex["next_verification"] = recovery_next_step
+        elif not str(cortex.get("next_verification") or "").strip():
             cortex["next_verification"] = recovery_next_step or f"修正 {tool} 的失败原因后，用不同证据路径验证任务 #{int(task_id)} 是否推进。"
-    if run_status == "succeeded" and (state.get("tool_input_invalid") or state.get("completion_blocked")):
+    if run_status == "succeeded" and runtime_guard_recovery:
         recovery_next_step = _clip_text(state.get("recovery_next_step") or state.get("next_verification") or "", limit=240)
         if recovery_next_step:
             runtime["phase"] = "recovering"

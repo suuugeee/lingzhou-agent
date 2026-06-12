@@ -14,7 +14,6 @@ from tools.registry import (
     tool_metadata,
 )
 
-
 _TEXT_FIELDS = {
     "domain",
     "intent",

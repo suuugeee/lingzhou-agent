@@ -165,6 +165,14 @@ def test_finalize_focus_task_keeps_wait_with_next_step_runnable():
     asyncio.run(_finalize_focus_task_keeps_wait_with_next_step_runnable())
 
 
+def test_finalize_focus_task_clears_terminal_self_drive_attention():
+    asyncio.run(_finalize_focus_task_clears_terminal_self_drive_attention())
+
+
+def test_finalize_focus_task_keeps_waiting_task_attention():
+    asyncio.run(_finalize_focus_task_keeps_waiting_task_attention())
+
+
 async def _finalize_focus_task_parks_user_facing_pause_into_waiting():
     from core.judgment import JudgmentOutput
     from core.loop.cycle.focus import claim_focus_task, finalize_focus_task
@@ -213,6 +221,91 @@ async def _finalize_focus_task_parks_user_facing_pause_into_waiting():
         assert current_focus == str(task_id)
         assert chat_exists is True
         assert chat_focus == str(task_id)
+        await store.close()
+
+
+async def _finalize_focus_task_clears_terminal_self_drive_attention():
+    from core.judgment import JudgmentOutput
+    from core.loop.cycle.focus import claim_focus_task, finalize_focus_task
+    from memory.working import WMItem, WorkingMemory
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "focus-finalize-terminal-cleanup.db")
+        await store.open()
+        task_id = await store.add_task(
+            "已完成自驱任务",
+            goal="完成后不再占用注意力",
+            status="done",
+            source="self_drive",
+        )
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        wm = WorkingMemory(capacity=10)
+        wm.add(WMItem(kind="task_anchor", content="旧任务锚点", priority=0.95))
+        wm.add(WMItem(kind="self_drive", content="旧自驱信号", priority=0.9))
+        wm.add(WMItem(kind="bootstrap_identity", content="身份锚点", priority=1.0))
+        loop = SimpleNamespace(_task_store=store, _wm=wm)
+        await claim_focus_task(loop, task, clear_current=True)
+
+        finalized = await finalize_focus_task(
+            loop,
+            action=JudgmentOutput(decision="act", chosen_action_id="task.complete"),
+            active_task=task,
+            chat_id=None,
+            user_message="",
+        )
+
+        assert finalized is not None
+        remaining = {item["kind"] for item in wm.get_top(10)}
+        assert "task_anchor" not in remaining
+        assert "self_drive" not in remaining
+        assert "bootstrap_identity" in remaining
+
+        current_focus, current_exists = await store.get_fact("focus:current_task_id")
+        assert current_exists is False or current_focus == ""
+        await store.close()
+
+
+async def _finalize_focus_task_keeps_waiting_task_attention():
+    from core.judgment import JudgmentOutput
+    from core.loop.cycle.focus import finalize_focus_task
+    from memory.working import WMItem, WorkingMemory
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "focus-finalize-waiting-keep-wm.db")
+        await store.open()
+        task_id = await store.add_task(
+            "等待用户任务",
+            goal="等待外部输入时仍需要注意力锚点",
+            status="waiting",
+            wait_kind="external",
+            wait_key="chat:test",
+            source="self_drive",
+        )
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        wm = WorkingMemory(capacity=10)
+        wm.add(WMItem(kind="task_anchor", content="等待任务锚点", priority=0.95))
+        wm.add(WMItem(kind="self_drive", content="等待自驱信号", priority=0.9))
+        loop = SimpleNamespace(_task_store=store, _wm=wm)
+
+        finalized = await finalize_focus_task(
+            loop,
+            action=JudgmentOutput(decision="wait"),
+            active_task=task,
+            chat_id="chat:test",
+            user_message="",
+        )
+
+        assert finalized is not None
+        assert finalized.status == "waiting"
+        remaining = {item["kind"] for item in wm.get_top(10)}
+        assert "task_anchor" in remaining
+        assert "self_drive" in remaining
         await store.close()
 
 
@@ -587,6 +680,7 @@ async def _prepare_active_task_creates_action_first_task_for_executable_user_mes
                 _task_store=store,
                 _wm=WorkingMemory(),
                 _metabolic=None,
+                _recent_action_feedback=["tool=file.read | key=/tmp/a.py | status=ok | progressful=False"],
             )
             active = await prep_module._prepare_active_task_for_tick(
                 loop,
@@ -606,6 +700,7 @@ async def _prepare_active_task_creates_action_first_task_for_executable_user_mes
     assert len(anchors) == 1
     assert active.title in anchors[0]["content"]
     assert active.next_step in anchors[0]["content"]
+    assert "上一动作反馈: tool=file.read | key=/tmp/a.py | status=ok | progressful=False" in anchors[0]["content"]
     cortex = active.result_json["cortex"]
     assert cortex["action_first"]["must_act"] is True
     assert {"kind": "url", "value": "https://example.com/config.yaml"} in cortex["captured_inputs"]

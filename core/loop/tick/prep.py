@@ -29,7 +29,12 @@ from core.perception import (
 from memory.working import WMItem
 
 from ..cycle.chat import _bind_chat_id
-from ..cycle.focus import claim_focus_task, prepare_focus_task, resolve_focus_task, task_matches_chat
+from ..cycle.focus import (
+    claim_focus_task,
+    prepare_focus_task,
+    resolve_focus_task,
+    task_matches_chat,
+)
 from ..shared.common import (
     _perception_replay_fallback,
     _prefer_tier_for_task,
@@ -168,6 +173,15 @@ async def _maybe_create_action_first_task_from_user_message(
 
 
 async def _prepare_active_task_for_tick(loop: Any, user_message: str, chat_id: str | None) -> Any:
+    def _last_feedback() -> str:
+        feedback = getattr(loop, "_recent_action_feedback", None)
+        if not feedback:
+            return ""
+        try:
+            return str(feedback[-1] or "")
+        except Exception:
+            return ""
+
     active_task = await prepare_focus_task(loop, user_message=user_message, chat_id=chat_id)
     if (
         active_task is not None
@@ -199,14 +213,14 @@ async def _prepare_active_task_for_tick(loop: Any, user_message: str, chat_id: s
     await _bind_chat_id(loop, active_task, chat_id)
     await claim_focus_task(loop, active_task, chat_id=chat_id, clear_current=not bool(str(chat_id or "").strip()))
     if active_task is not None:
-        loop._wm.add(build_task_anchor_item(active_task))
+        loop._wm.add(build_task_anchor_item(active_task, action_feedback=_last_feedback()))
 
     if not user_message:
         await loop._maybe_inject_self_drive()
         if active_task is None:
             active_task = await resolve_focus_task(loop, fallback_active=True)
             if active_task is not None:
-                loop._wm.add(build_task_anchor_item(active_task))
+                loop._wm.add(build_task_anchor_item(active_task, action_feedback=_last_feedback()))
         if loop._bootstrap_mode == "full":
             if active_task is not None:
                 content = (
@@ -383,6 +397,7 @@ async def _prepare_tick_judgment_state(
     cognitive_signals.last_action_progressful = loop._last_act_progressful if loop._last_action_status else None
     cognitive_signals.last_action_progress_reason = loop._last_act_progress_reason if loop._last_action_status else ""
     cognitive_signals.recent_action_history = list(loop._recent_action_feedback)
+    cognitive_signals.wait_streak = getattr(loop._behavior, "wait_streak", 0)
 
     (failures_recent,) = await asyncio.gather(
         loop._task_store.list_failures(limit=5),
@@ -504,6 +519,8 @@ async def _decide_initial_action(
         user_message=user_message,
         pending_override=pending_initial_thinking,
     )
+    if active_task is not None:
+        thinking_override = _thinking_floor(thinking_override, "medium")
     from core.loop.runtime.life import collect_runtime_life_snapshot
 
     runtime_life_snapshot = collect_runtime_life_snapshot(loop).as_dict()
@@ -535,6 +552,16 @@ async def _decide_initial_action(
     loop._pending_tier = None
     loop._pending_thinking_override = None
     loop._ticks_since_judge = 0
+    behavior = getattr(loop, "_behavior", None)
+    gate = getattr(behavior, "apply_execution_gate", None)
+    if gate is not None and prep.cognitive_signals is not None:
+        prep.cognitive_signals.active_task_id = getattr(active_task, "id", "") if active_task is not None else ""
+        prep.cognitive_signals.active_task_source = getattr(active_task, "source", "") if active_task is not None else ""
+        prep.cognitive_signals.active_task_status = getattr(active_task, "status", "") if active_task is not None else ""
+        prep.cognitive_signals.active_task_next_step = (
+            getattr(active_task, "next_step", "") if active_task is not None else ""
+        )
+        action = gate(action, prep.cognitive_signals)
     return action
 
 

@@ -113,10 +113,13 @@ def analyze_tool_history_budget(
 
 def continue_phase_policy_payload(cfg: Config, tool_history_count: int) -> dict[str, Any]:
     compact_threshold, keep_last = tool_history_compact_limits(cfg)
+    max_inner_rounds = max(1, int(cfg.thresholds.continue_max_inner_rounds))
     return {
         "tool_history_count": tool_history_count,
         "tool_history_compact_threshold": compact_threshold,
         "tool_history_keep_last": keep_last,
+        "max_inner_rounds": max_inner_rounds,
+        "will_hit_inner_round_limit_next": tool_history_count >= max_inner_rounds,
         "tool_history_will_compact_next": (
             tool_history_count >= compact_threshold and tool_history_count > keep_last
         ),

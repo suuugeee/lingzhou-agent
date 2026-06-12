@@ -87,12 +87,22 @@ class MemoryContextScrubber:
 
 def _clip_reply_for_log(text: str, limit: int = DEFAULT_LOG_REPLY_CHARS) -> str:
     cleaned = _strip_memory_context(text).replace("\n", "\\n").strip()
-    return cleaned
+    limit = max(1, int(limit or 1))
+    if len(cleaned) <= limit:
+        return cleaned
+    if limit <= 3:
+        return cleaned[:limit]
+    return cleaned[: limit - 3].rstrip() + "..."
 
 
 def _clip_signal_text(text: str, limit: int = 160) -> str:
     cleaned = " ".join((text or "").split())
-    return cleaned
+    limit = max(1, int(limit or 1))
+    if len(cleaned) <= limit:
+        return cleaned
+    if limit <= 3:
+        return cleaned[:limit]
+    return cleaned[: limit - 3].rstrip() + "..."
 
 
 def _summarize_state_delta(state_delta: dict[str, Any] | None, limit: int = 120) -> str:
@@ -130,11 +140,17 @@ def _format_action_feedback_line(
 
 
 def _fallback_reply_for_user(action: JudgmentOutput, result: ToolResult, active_task: Task | None) -> str:
-    next_step = str(action.next_step or (active_task.next_step if active_task else "") or "").strip()
+    state_delta = result.state_delta if isinstance(result.state_delta, dict) else {}
+    recovery_next_step = str(
+        state_delta.get("recovery_next_step")
+        or state_delta.get("next_verification")
+        or ""
+    ).strip()
+    next_step = str(action.next_step or recovery_next_step or (active_task.next_step if active_task else "") or "").strip()
     next_clause = f"下一步我会先处理：{_clip_signal_text(next_step, 80)}" if next_step else ""
     if result.error:
         detail = _clip_signal_text(result.summary or result.error, 120)
-        return " ".join(part for part in [f"这轮工具执行失败：{detail}。", next_clause] if part).strip()
+        return " ".join(part for part in [f"这轮工具执行失败（状态: error）：{detail}。", next_clause] if part).strip()
 
     if action.decision in {"wait", "pause"}:
         raw_basis = action.rationale or ""

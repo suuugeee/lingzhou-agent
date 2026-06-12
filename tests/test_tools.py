@@ -214,6 +214,34 @@ def test_task_complete_blocks_unresolved_workbench_next_verification():
     asyncio.run(_task_complete_blocks_unresolved_workbench_next_verification())
 
 
+def test_task_complete_blocks_real_workbench_state_delta_next_verification():
+    asyncio.run(_task_complete_blocks_real_workbench_state_delta_next_verification())
+
+
+def test_task_complete_blocks_external_workbench_next_verification():
+    asyncio.run(_task_complete_blocks_external_workbench_next_verification())
+
+
+def test_task_complete_blocks_english_workbench_next_verification():
+    asyncio.run(_task_complete_blocks_english_workbench_next_verification())
+
+
+def test_task_next_verification_completed_word_does_not_hide_actionable_check():
+    from tools.task import _has_actionable_next_verification
+
+    assert _has_actionable_next_verification("确认已完成测试并读取最新 pytest 结果") is True
+    assert _has_actionable_next_verification("已完成，无需继续验证") is False
+    assert _has_actionable_next_verification("already done; no need to rerun") is False
+
+
+def test_task_complete_blocks_semantic_memory_next_verification_until_memory_written():
+    asyncio.run(_task_complete_blocks_semantic_memory_next_verification_until_memory_written())
+
+
+def test_task_complete_blocks_self_drive_deferred_implementation_candidate():
+    asyncio.run(_task_complete_blocks_self_drive_deferred_implementation_candidate())
+
+
 async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
     from store.task import TaskStore
     from tools.task import task_complete
@@ -359,6 +387,356 @@ async def _task_complete_blocks_unresolved_workbench_next_verification():
             assert completed.error is None
             assert completed.skipped is False
             assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_real_workbench_state_delta_next_verification():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    class _Registry:
+        def get(self, name: str):
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "real-workbench-state-delta-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "debug_runtime_issue",
+                "domain": "runtime",
+                "evidence": ["真实 tool result 会把 workbench 皮层写在 state_delta.cortex。"],
+                "next_verification": "执行 shell.run 读取最近 runs，确认 workbench 后有真实验证工具。",
+                "completion_checks": ["已确认完成门能读取真实 ToolResult 持久化形态。"],
+            }
+            task_id = await store.add_task(
+                "验证真实 workbench 输出形态",
+                goal="完成门必须识别 output_json.state_delta.cortex",
+                source="external",
+                status="in_progress",
+                result_json={"cortex": cortex},
+            )
+            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
+            ctx.registry = _Registry()
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={
+                    "summary": "工作台已更新",
+                    "state_delta": {"cortex": cortex, "run_id": 1},
+                    "metadata": {},
+                },
+                log_text="wrote real ToolResult-shaped next verification",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "shell.run" in blocked.state_delta["next_verification"]
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="runs verified",
+            )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_external_workbench_next_verification():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    class _Registry:
+        def get(self, name: str):
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "external-workbench-verification-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "debug_runtime_issue",
+                "domain": "user_problem",
+                "evidence": ["用户反馈同模型下问题解决能力弱，当前已定位到完成门可能过早放行。"],
+                "next_verification": "运行 pytest 验证 task.complete 未执行 workbench 下一步时会被拦截。",
+                "completion_checks": [
+                    "已确认普通外部任务也受 workbench 验证门约束。",
+                    "已确认验证工具成功后才允许完成。",
+                ],
+            }
+            task_id = await store.add_task(
+                "修复普通问题任务过早完成",
+                goal="确保普通用户问题也不能把 workbench 当完成证据",
+                source="external",
+                status="in_progress",
+                current_step="已写入 workbench，等待执行 next_verification",
+                result_json={"cortex": cortex},
+            )
+            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
+            ctx.registry = _Registry()
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote next verification",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="memory.add_semantic",
+                log_text="stored observation",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "未验证的下一步" in blocked.summary
+            assert "pytest" in blocked.state_delta["next_verification"]
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="pytest passed",
+            )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_english_workbench_next_verification():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    class _Registry:
+        def get(self, name: str):
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "english-workbench-verification-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "verify remote",
+                "domain": "git",
+                "evidence": ["remote push failed once"],
+                "next_verification": "run git ls-remote to verify remote connectivity.",
+                "completion_checks": ["remote connectivity verified"],
+            }
+            task_id = await store.add_task(
+                "验证远程连接",
+                goal="English next_verification should still block completion",
+                source="external",
+                status="in_progress",
+                current_step="已写入 workbench，等待执行英文 next_verification",
+                result_json={"cortex": cortex},
+            )
+            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
+            ctx.registry = _Registry()
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote english next verification",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "git ls-remote" in blocked.state_delta["next_verification"]
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="git ls-remote ok",
+            )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_semantic_memory_next_verification_until_memory_written():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    class _Registry:
+        def get(self, name: str):
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "semantic-memory-workbench-verification-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "self_drive_growth",
+                "domain": "self_evolution",
+                "evidence": ["已完成一次日志取证并形成可复用经验。"],
+                "next_verification": "沉淀一条语义记忆：自驱取证任务不应 wait；随后完成本次轻量探索任务。",
+                "completion_checks": ["经验已进入长期语义记忆。"],
+            }
+            task_id = await store.add_task(
+                "沉淀自驱经验",
+                goal="语义记忆沉淀必须先执行",
+                source="self_drive",
+                status="in_progress",
+                result_json={"cortex": cortex},
+            )
+            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
+            ctx.registry = _Registry()
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="collected log evidence",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote semantic memory next verification",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "沉淀一条语义记忆" in blocked.state_delta["next_verification"]
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="memory.add_semantic",
+                log_text="stored self-drive lesson",
+            )
+
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_self_drive_deferred_implementation_candidate():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    class _Registry:
+        def get(self, name: str):
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "self-drive-deferred-implementation-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "self_drive_growth",
+                "domain": "self_evolution",
+                "evidence": [
+                    "日志统计发现 wait_no_progress=7。",
+                    "脚本给出的改进候选：加强守卫，当 self_drive 任务 next_step 要求取证时优先低成本取证而不是 wait。",
+                ],
+                "hypothesis": "最低成本的一行级改进方向是强化守卫。",
+                "next_verification": "沉淀一条语义记忆：自驱取证任务不应 wait；随后完成本次轻量探索任务。",
+                "open_questions": [
+                    "这个守卫应落在 judgment 层，还是通过现有 anti-loop/task-continuity skill 强化即可？",
+                    "是否值得直接改代码，还是先沉淀为经验并观察下一次自驱任务表现？",
+                ],
+                "completion_checks": [
+                    "已提出一条具体、低风险、可实现的一行级改进候选。",
+                    "下一步无需立即改核心代码；先固化经验并在后续重复出现时再改守卫代码。",
+                ],
+            }
+            task_id = await store.add_task(
+                "自驱取证任务不应空转",
+                goal="从日志中定位可落地的自我进化修复点",
+                source="self_drive",
+                status="in_progress",
+                result_json={"cortex": cortex},
+            )
+            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
+            ctx.registry = _Registry()
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="counted wait_no_progress and repeated reads",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote implementation candidate but deferred code change",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="memory.add_semantic",
+                log_text="stored self-drive lesson",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "SelfDriveImplementationDecisionPending"
+            assert "是否修改" in blocked.summary
+            assert blocked.state_delta["completion_blocked"] is True
+            assert blocked.state_delta["completion_blocker"] == "SelfDriveImplementationDecisionPending"
+            assert "定位文件" in blocked.state_delta["recovery_next_step"]
+            assert blocked.state_delta["suggested_tools"] == ["file.read", "shell.run", "task.workbench"]
         finally:
             await store.close()
 
@@ -3079,6 +3457,50 @@ def test_file_read_max_chars():
     """file.read max_chars 参数正确截断。"""
     asyncio.run(_file_read_max_chars())
 
+
+def test_file_read_missing_path_returns_recovery_state():
+    asyncio.run(_file_read_missing_path_returns_recovery_state())
+
+
+async def _file_read_missing_path_returns_recovery_state():
+    from tools.file import file_read
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        existing_parent = root / "core"
+        existing_parent.mkdir()
+        ctx = _tool_ctx(workspace_dir=d)
+
+        result = await file_read({"path": str(existing_parent / "missing.py")}, ctx)
+
+        assert result.error == "FileNotFound"
+        assert result.state_delta["tool_input_invalid"] is True
+        assert result.state_delta["recovery_reason"] == "path_not_found"
+        assert result.state_delta["nearest_existing_parent"] == str(existing_parent)
+        assert result.state_delta["suggested_tools"] == ["file.list", "shell.run"]
+        assert "file.list" in result.state_delta["recovery_next_step"]
+
+
+def test_file_list_missing_path_returns_recovery_state():
+    asyncio.run(_file_list_missing_path_returns_recovery_state())
+
+
+async def _file_list_missing_path_returns_recovery_state():
+    from tools.file import file_list
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        ctx = _tool_ctx(workspace_dir=d)
+
+        result = await file_list({"path": str(root / "missing" / "child")}, ctx)
+
+        assert result.error == "FileNotFound"
+        assert result.state_delta["tool_input_invalid"] is True
+        assert result.state_delta["expected"] == "directory"
+        assert result.state_delta["nearest_existing_parent"] == str(root)
+        assert "确认真实路径" in result.summary
+
+
 async def _file_read_max_chars():
     from tools.file import file_read, file_write
 
@@ -3090,3 +3512,26 @@ async def _file_read_max_chars():
 
         r = await file_read({"path": str(fpath), "max_chars": 20}, ctx)
         assert len(r.summary) == 20
+        assert r.state_delta["has_more"] is True
+        assert r.state_delta["truncated"] is True
+        assert r.state_delta["truncation_reason"] == "max_chars"
+        assert r.state_delta["next_start"] == 20
+        assert r.state_delta["next_params"] == {"path": str(fpath), "start": 20, "max_chars": 20}
+        assert "继续读取同一文件剩余内容" in r.state_delta["recovery_next_step"]
+        assert r.metadata["truncated"] is True
+        assert r.metadata["next_params"] == {"path": str(fpath), "start": 20, "max_chars": 20}
+
+        ranged = await file_read({"path": str(fpath), "start": 10, "end": 80, "max_chars": 15}, ctx)
+        assert len(ranged.summary) == 15
+        assert ranged.state_delta["next_start"] == 25
+        assert ranged.state_delta["next_params"] == {"path": str(fpath), "start": 25, "end": 80, "max_chars": 15}
+
+        lines = root / "lines.txt"
+        await file_write({"path": str(lines), "content": "\n".join(f"line-{i}-" + ("x" * 20) for i in range(1, 8))}, ctx)
+        line_window = await file_read({"path": str(lines), "offset": 2, "limit": 3, "max_chars": 25}, ctx)
+        assert len(line_window.summary) == 25
+        assert line_window.state_delta["truncated"] is True
+        assert line_window.state_delta["next_params"]["offset"] == 2
+        assert line_window.state_delta["next_params"]["limit"] == 3
+        assert line_window.state_delta["next_params"]["max_chars"] > 25
+        assert "扩大 max_chars" in line_window.state_delta["recovery_next_step"]

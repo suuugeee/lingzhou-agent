@@ -63,6 +63,8 @@ class JudgmentContextAssembler:
         self._last_context_text: str = ""
         self._last_context_sections: dict[str, Any] = {}
         self._last_context_budget: int = 0
+        self._last_context_used_tokens: int = 0
+        self._last_context_section_tokens: dict[str, int] = {}
         self._last_context_compression_capsule: str = ""
         self._context_cache: dict[str, str] = {}
         self._probe_manager: Any = None
@@ -220,3 +222,7 @@ class JudgmentContextAssembler:
             registry_override=registry_override,
             runtime_life_snapshot=runtime_life_snapshot,
         )
+
+
+# 兼容层：保留旧入口名，避免外部调用与历史测试兼容性回归。
+ContextAssembler = JudgmentContextAssembler

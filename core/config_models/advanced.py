@@ -249,6 +249,10 @@ class ThresholdsConfig(BaseModel):
         default=3, ge=1,
         description="continue phase 压缩 tool_history 时保留最近多少条完整记录，其余折叠为 [compacted] 摘要",
     )
+    continue_max_inner_rounds: int = Field(
+        default=4, ge=1,
+        description="单个 tick 内 continue 工具续判的最大轮数；达到后写入收敛工作台并退出本 tick",
+    )
     continue_context_reserve_tokens: int = Field(
         default=4096, ge=512,
         description="continue/reply phase 为本轮工具结果、执行状态和最终指令预留的输入 token 预算",

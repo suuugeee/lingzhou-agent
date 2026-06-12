@@ -89,7 +89,7 @@ async def test_normalize_judgment_output_unknown_tool_becomes_wait() -> None:
 
 
 @pytest.mark.asyncio
-async def test_problem_solving_guard_blocks_non_workbench_actions() -> None:
+async def test_problem_solving_guard_redirects_non_workbench_actions_to_workbench() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput
 
@@ -123,9 +123,10 @@ async def test_problem_solving_guard_blocks_non_workbench_actions() -> None:
         registry=_Registry(),
     )
 
-    assert out.decision == "wait"
-    assert out.chosen_action_id == ""
-    assert out.params == {}
+    assert out.decision == "act"
+    assert out.chosen_action_id == "task.workbench"
+    assert out.params["workbench"]["domain"] == "problem-solving"
+    assert "missing fields: domain, intent" in out.params["workbench"]["evidence"]
     assert out.reply_to_user == ""
     assert "通用问题解决守卫已触发" in out.rationale
     assert "task.workbench" in out.rationale
@@ -421,6 +422,18 @@ def test_context_sections_module() -> None:
     assert _fmt_current_time() == from_sections()
 
 
+def test_context_token_usage_uses_estimated_tokens_not_chars() -> None:
+    from core.judgment.assembler.sections import _context_token_usage, _top_context_section_tokens
+
+    text = "a" * 1000
+    used, section_tokens = _context_token_usage({"ascii_section": text, "cjk_section": "灵" * 100})
+
+    assert section_tokens["ascii_section"] == 300
+    assert section_tokens["cjk_section"] == 180
+    assert used == 480
+    assert _top_context_section_tokens(section_tokens) == [("ascii_section", 300), ("cjk_section", 180)]
+
+
 def test_trim_messages_omits_whole_messages_not_slices() -> None:
     from types import SimpleNamespace
 
@@ -504,9 +517,13 @@ def test_continue_phase_policy_payload_uses_shared_limits(monkeypatch: pytest.Mo
             "thresholds": {
                 "continue_tool_history_compact_threshold": 10,
                 "continue_tool_history_keep_last": 3,
+                "continue_max_inner_rounds": 5,
             },
         }
     )
     payload = continue_phase_policy_payload(cfg, tool_history_count=10)
     assert payload["tool_history_compact_threshold"] == 10
+    assert payload["tool_history_keep_last"] == 3
+    assert payload["max_inner_rounds"] == 5
+    assert payload["will_hit_inner_round_limit_next"] is True
     assert payload["tool_history_will_compact_next"] is True

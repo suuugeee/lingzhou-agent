@@ -10,8 +10,8 @@ from core.config import Config
 from core.evolution import EvolutionEngine
 from core.execution import ExecutionLayer
 from core.judgment import JudgmentLayer
-from core.loop.routing_overrides import normalize_routing_overrides
 from core.log_fields import format_log_fields
+from core.loop.routing_overrides import normalize_routing_overrides
 from core.perception import PerceptionLayer
 from provider import create_provider
 

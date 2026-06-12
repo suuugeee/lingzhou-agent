@@ -81,13 +81,14 @@ async def _finalize_tick_user_reply(
         reply_only = await _maybe_fill_tick_user_reply(loop, action, tool_history, user_message, active_task, result)
         reply_only_rationale = str(getattr(reply_only, "rationale", "") or "").strip()
         if not action.reply_to_user:
-            _log.debug(
-                "[oral-bypass] reply_only未生成可见回复，使用本地 fallback 回落 draft rationale=%s",
-                (reply_only_rationale[:80] if reply_only_rationale else "empty"),
-            )
             fallback = _fallback_reply_for_user(action, result, active_task)
             can_reuse_draft = bool(reply_draft) and action.decision in {"wait", "pause"} and not result.error
             action.reply_to_user = reply_draft if can_reuse_draft else fallback
+            if not action.reply_to_user:
+                _log.warning(
+                    "[oral-bypass] reply_only与fallback均未生成可见回复（rationale=%s）",
+                    (reply_only_rationale[:80] if reply_only_rationale else "empty"),
+                )
     elif action.speech_intent and not action.reply_to_user:
         if action.decision != "act":
             action.reply_to_user = action.speech_intent

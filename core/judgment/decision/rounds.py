@@ -37,6 +37,15 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger("lingzhou.judgment")
 _ASSEMBLE_CONTEXT_ERROR_STATE: dict[str, Any] = {}
+_THINKING_ORDER = {"off": 0, "minimal": 1, "low": 2, "medium": 3, "high": 4}
+
+
+def _thinking_floor(value: str | None, floor: str | None) -> str | None:
+    if floor is None:
+        return value
+    if value is None:
+        return floor
+    return value if _THINKING_ORDER.get(value, -1) >= _THINKING_ORDER.get(floor, -1) else floor
 
 
 def _track_assemble_context_failure(exc: BaseException) -> int:
@@ -55,6 +64,130 @@ def _assemble_context_failure_backoff_ms(repeat_count: int) -> int:
     if repeat_count <= 1:
         return 0
     return min(60_000, 2_000 * (repeat_count - 1))
+
+
+def _registry_has_tool(registry: Any | None, tool_name: str) -> bool:
+    getter = getattr(registry, "get", None)
+    if getter is None:
+        return False
+    try:
+        return getter(tool_name) is not None
+    except Exception:
+        return False
+
+
+def _workbench_recovery_output(
+    *,
+    workbench: dict[str, Any],
+    rationale: str,
+    model_strategy: dict[str, Any] | None = None,
+) -> JudgmentOutput:
+    return JudgmentOutput(
+        decision="act",
+        chosen_action_id="task.workbench",
+        params={"workbench": workbench},
+        rationale=rationale,
+        next_step=str(workbench.get("next_verification") or ""),
+        model_strategy=dict(model_strategy or {}),
+    )
+
+
+def _assemble_context_failure_output(
+    *,
+    exc: BaseException,
+    repeat_count: int,
+    judgment_signals: JudgmentSignals | None,
+    hard_boundaries: list[str] | None,
+    active_task: Any | None,
+    registry: Any | None,
+) -> JudgmentOutput:
+    reason = f"上下文组装异常: {exc}"
+    backoff_ms = _assemble_context_failure_backoff_ms(repeat_count)
+    if active_task is not None and _registry_has_tool(registry, "task.workbench"):
+        task_id = getattr(active_task, "id", "")
+        workbench = {
+            "domain": "runtime-context",
+            "intent": "恢复上下文组装异常并继续任务闭环",
+            "evidence": [
+                f"任务 {task_id or '-'} 的判断上下文组装失败: {type(exc).__name__}: {exc}",
+                f"同一异常连续出现 {repeat_count} 次。",
+            ],
+            "hypothesis": "当前不行动不是模型放弃，而是运行时上下文材料构建失败，需要先定位异常来源。",
+            "recovery_state": "recovering_from_context_assembly_failure",
+            "next_verification": "读取最新异常栈或相关上下文组装实现，修复后重新触发同一任务验证判断链路恢复。",
+            "completion_checks": [
+                "已定位上下文组装异常的具体实现位置。",
+                "已完成修复或规避，并确认下一轮不再因同一异常直接 wait。",
+            ],
+        }
+        model_strategy: dict[str, Any] = {}
+        if backoff_ms > 0:
+            model_strategy["next_idle_gap_ms"] = backoff_ms
+        return _workbench_recovery_output(
+            workbench=workbench,
+            rationale=(
+                "上下文组装异常不能只 wait；当前有活跃任务，先把异常转成任务皮层恢复态，"
+                "保留下轮可执行验证入口。"
+            ),
+            model_strategy=model_strategy,
+        )
+
+    safe_output = _simulate_safe_output_fn(
+        failure_count=0,
+        signals=judgment_signals,
+        hard_boundaries=hard_boundaries or [],
+        reason=reason,
+    )
+    if backoff_ms > 0:
+        safe_output.model_strategy["next_idle_gap_ms"] = backoff_ms
+    return safe_output
+
+
+def _llm_unavailable_output(
+    *,
+    err: str,
+    active_task: Any | None,
+    registry: Any | None,
+    judgment_signals: JudgmentSignals | None = None,
+    hard_boundaries: list[str] | None = None,
+    reply_only: bool = False,
+) -> JudgmentOutput:
+    if reply_only:
+        return JudgmentOutput.wait(reason=f"[inner-loop] LLM 不可用: {err}")
+
+    if active_task is not None and _registry_has_tool(registry, "task.workbench"):
+        task_id = getattr(active_task, "id", "")
+        workbench = {
+            "domain": "runtime-provider",
+            "intent": "恢复 LLM/provider 不可用导致的任务中断",
+            "evidence": [
+                f"任务 {task_id or '-'} 判断阶段未拿到 LLM 输出。",
+                f"provider/模型调用错误: {err}",
+            ],
+            "hypothesis": "当前任务不是自然完成或主动放弃，而是被模型/provider 可用性阻断。",
+            "recovery_state": "recovering_from_llm_unavailable",
+            "next_verification": "检查 provider 健康状态、路由模型与最近 LLM 错误；若 provider 恢复，继续执行原任务的下一步验证。",
+            "completion_checks": [
+                "已确认 LLM/provider 是否仍不可用。",
+                "已记录或修复 provider/路由问题。",
+                "provider 恢复后已回到原任务的下一步验证，而不是直接 wait/complete。",
+            ],
+        }
+        return _workbench_recovery_output(
+            workbench=workbench,
+            rationale=(
+                "LLM 不可用不能被解释成任务无事可做；当前有活跃任务，"
+                "先把 provider 故障写入任务皮层恢复态，保留下轮验证入口。"
+            ),
+            model_strategy={"next_idle_gap_ms": 2000},
+        )
+
+    return _simulate_safe_output_fn(
+        failure_count=0,
+        signals=judgment_signals,
+        hard_boundaries=hard_boundaries or [],
+        reason=err,
+    )
 
 
 def _log_assemble_context_failure(exc: BaseException, repeat_count: int) -> None:
@@ -82,8 +215,7 @@ class JudgmentRoundDeps:
 
 def _sync_prompt_capsule(deps: JudgmentRoundDeps) -> None:
     capsule = str(getattr(deps.executor, "_last_prompt_capsule", "") or "").strip()
-    if capsule:
-        deps.assembler._last_context_compression_capsule = capsule
+    deps.assembler._last_context_compression_capsule = capsule
 
 
 def finalize_continue_output(
@@ -177,16 +309,14 @@ async def decide_initial(
     except Exception as ctx_exc:
         repeat_count = _track_assemble_context_failure(ctx_exc)
         _log_assemble_context_failure(ctx_exc, repeat_count)
-        safe_output = _simulate_safe_output_fn(
-            failure_count=0,
-            signals=judgment_signals,
-            hard_boundaries=hard_boundaries or [],
-            reason=f"上下文组装异常: {ctx_exc}",
+        return _assemble_context_failure_output(
+            exc=ctx_exc,
+            repeat_count=repeat_count,
+            judgment_signals=judgment_signals,
+            hard_boundaries=hard_boundaries,
+            active_task=active_task,
+            registry=registry_override or deps.assembler._registry,
         )
-        backoff_ms = _assemble_context_failure_backoff_ms(repeat_count)
-        if backoff_ms > 0:
-            safe_output.model_strategy["next_idle_gap_ms"] = backoff_ms
-        return safe_output
 
     # 上下文组装成功：清零聚合状态，确保下一波相同异常能重新触发 error 日志
     if _ASSEMBLE_CONTEXT_ERROR_STATE:
@@ -223,11 +353,12 @@ async def decide_initial(
     _sync_prompt_capsule(deps)
     if raw is None:
         err = str(llm_error) or repr(llm_error) if llm_error is not None else "unknown error"
-        return _simulate_safe_output_fn(
-            failure_count=0,
-            signals=judgment_signals,
+        return _llm_unavailable_output(
+            err=err,
+            active_task=active_task,
+            registry=registry_override or deps.assembler._registry,
+            judgment_signals=judgment_signals,
             hard_boundaries=hard_boundaries or [],
-            reason=err,
         )
 
     output = JudgmentOutput.from_llm(raw)
@@ -301,8 +432,11 @@ async def decide_continue(
         routing_overrides=routing_overrides,
     )
     resolved_thinking = thinking_override
-    if resolved_thinking is None and selection.tier == "reasoner" and user_message:
-        resolved_thinking = "low"
+    if selection.tier == "reasoner":
+        if active_task is not None:
+            resolved_thinking = _thinking_floor(resolved_thinking, "medium")
+        elif user_message:
+            resolved_thinking = _thinking_floor(resolved_thinking, "low")
     raw, selection, llm_error = await deps.executor._chat_with_retry(
         selected_provider=selected_provider,
         selection=selection,
@@ -320,8 +454,15 @@ async def decide_continue(
     _sync_prompt_capsule(deps)
     if raw is None:
         if llm_error is not None:
-            return JudgmentOutput.wait(reason=f"[inner-loop] LLM 不可用: {llm_error!r}")
-        return JudgmentOutput.wait(reason="[inner-loop] LLM returned None")
+            err = str(llm_error) or repr(llm_error)
+        else:
+            err = "LLM returned None"
+        return _llm_unavailable_output(
+            err=err,
+            active_task=active_task,
+            registry=deps.assembler._registry,
+            reply_only=reply_only,
+        )
 
     output = JudgmentOutput.from_llm(raw)
     output = await _normalize_judgment_output_fn(

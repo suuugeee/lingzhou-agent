@@ -87,6 +87,23 @@ def _problem_solving_guard_active(context_text: str) -> bool:
     return "guard=active" in section
 
 
+def _problem_solving_guard_values(context_text: str) -> dict[str, str]:
+    marker_index = context_text.find(_PROBLEM_SOLVING_GUARD_ACTIVE)
+    if marker_index < 0:
+        return {}
+    next_section = context_text.find("\n### ", marker_index + len(_PROBLEM_SOLVING_GUARD_ACTIVE))
+    section = context_text[marker_index:] if next_section < 0 else context_text[marker_index:next_section]
+    values: dict[str, str] = {}
+    for line in section.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key in {"guard", "signals", "missing_fields", "required_next_action", "rationale"}:
+            values[key] = value.strip()
+    return values
+
+
 def _enforce_recovery_continuation(
     output: JudgmentOutput,
     *,
@@ -242,7 +259,12 @@ def _action_allowed_by_problem_solving_guard(output: JudgmentOutput) -> bool:
     return False
 
 
-def enforce_problem_solving_guard(output: JudgmentOutput, *, context_text: str) -> JudgmentOutput:
+def enforce_problem_solving_guard(
+    output: JudgmentOutput,
+    *,
+    context_text: str,
+    registry: Any | None = None,
+) -> JudgmentOutput:
     """Prevent non-workbench actions while the generic problem-solving guard is active."""
     if not _problem_solving_guard_active(context_text):
         return output
@@ -250,13 +272,45 @@ def enforce_problem_solving_guard(output: JudgmentOutput, *, context_text: str) 
         return output
     if _action_allowed_by_problem_solving_guard(output):
         return output
+    guard_values = _problem_solving_guard_values(context_text)
+    if not _registry_has(registry, "task.workbench"):
+        return JudgmentOutput(
+            decision="wait",
+            rationale=(
+                "通用问题解决守卫已触发，但 registry 中没有 task.workbench；"
+                "无法安全固化问题解决工作台。"
+            ),
+            reflection=output.reflection,
+            next_step=output.next_step,
+            model_strategy=dict(output.model_strategy or {}),
+            applied_skills=list(output.applied_skills or []),
+        )
     return JudgmentOutput(
-        decision="wait",
+        decision="act",
+        chosen_action_id="task.workbench",
+        params={
+            "workbench": {
+                "domain": "problem-solving",
+                "intent": "补齐问题解决工作台，恢复可验证闭环",
+                "hypothesis": "当前问题解决缺少结构化工作台，继续旧动作或直接回复会放大误解、重复失败或跨轮丢失承诺。",
+                "evidence": [
+                    f"guard signals: {guard_values.get('signals') or 'unknown'}",
+                    f"missing fields: {guard_values.get('missing_fields') or 'unknown'}",
+                ],
+                "next_verification": (
+                    guard_values.get("required_next_action")
+                    or "补齐工作台后，基于 domain/intent/hypothesis 选择一个不同证据源执行最小验证。"
+                ),
+                "completion_checks": [
+                    "domain/intent/hypothesis 已明确。",
+                    "experiments_or_evidence 已包含当前证据。",
+                    "next_verification 指向一个可执行验证动作。",
+                ],
+            }
+        },
         rationale=(
-            "通用问题解决守卫已触发：继续执行或直接回复前，必须先用 "
-            "task.workbench 固化 domain/intent/hypothesis/capabilities/"
-            "experiments_or_evidence/next_verification/completion_checks；"
-            "若用户纠正改变了任务定义，先 task.amend。"
+            "通用问题解决守卫已触发：本轮不能继续旧动作或直接回复，"
+            "先用 task.workbench 固化问题定义、证据、假设和下一步验证。"
         ),
         reflection=output.reflection,
         next_step=output.next_step,
@@ -285,7 +339,7 @@ async def normalize_judgment_output(
 
     output = normalize_reply_pseudo_tool(output)
     output = enforce_action_first_progress(output, context_text=context_text, registry=registry)
-    output = enforce_problem_solving_guard(output, context_text=context_text)
+    output = enforce_problem_solving_guard(output, context_text=context_text, registry=registry)
     output = _enforce_recovery_continuation(output, context_text=context_text, registry=registry)
     return normalize_action_shape(
         output,

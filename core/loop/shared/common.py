@@ -104,7 +104,10 @@ def _should_continue_within_tick(
     if action.decision != "act":
         return False
     tool_name = action.chosen_action_id or ""
-    if result is not None and result.skipped and str(result.error or "") == "ToolInputInvalid":
+    if result is not None and result.skipped and (
+        str(result.error or "") == "ToolInputInvalid"
+        or bool((result.state_delta or {}).get("tool_input_invalid"))
+    ):
         return True
     if tool_name == "task.complete":
         recoverable_errors = {
@@ -115,9 +118,7 @@ def _should_continue_within_tick(
             "MutationWithoutVerification",
             "UserInboxPending",
         }
-        if result is not None and result.skipped and str(result.error or "") in recoverable_errors:
-            return True
-        return False
+        return result is not None and result.skipped and str(result.error or "") in recoverable_errors
     if tool_name == "task.fail":
         return False
     # mutation tool in a user-prompted tick with active task: don't auto-continue

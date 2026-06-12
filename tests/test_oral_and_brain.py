@@ -576,6 +576,68 @@ class TestContinuePhaseAndAutonomousReplyGuard:
         assert final_result.summary == "分析完成"
 
     @pytest.mark.asyncio
+    async def test_continue_phase_stops_after_user_prompted_mutation(self):
+        from conftest import _tool_registry
+
+        from core.loop.shared.continue_phase import _run_continue_phase
+
+        first = _make_judgment_output(decision="act")
+        first.chosen_action_id = "file.write"
+        first.params = {"path": "/tmp/a.txt", "content": "ok"}
+        second = _make_judgment_output(decision="act")
+        second.chosen_action_id = "file.read"
+        second.params = {"path": "/tmp/a.txt"}
+
+        decide_continue = AsyncMock(side_effect=[first, second])
+        dispatch = AsyncMock(return_value=_make_tool_result(summary="写入完成"))
+
+        loop = SimpleNamespace(
+            _cfg=SimpleNamespace(
+                thinking=None,
+                loop=SimpleNamespace(chat_thinking=None, autonomous_thinking=None),
+                thresholds=SimpleNamespace(
+                    continue_tool_history_compact_threshold=8,
+                    continue_tool_history_keep_last=4,
+                    continue_max_inner_rounds=4,
+                    wm_pri_insight=0.8,
+                )
+            ),
+            _emotion=SimpleNamespace(valence=0.1, arousal=0.2),
+            _task_store=SimpleNamespace(has_pending_chat_message=AsyncMock(return_value=False)),
+            _judgment=SimpleNamespace(decide_continue=decide_continue),
+            _behavior=SimpleNamespace(
+                on_act=lambda *args, **kwargs: [],
+                apply_cognitive_probe=lambda *args, **kwargs: None,
+                apply_execution_gate=lambda action, signals: action,
+                on_act_result=lambda *args, **kwargs: None,
+                on_edit_failure=lambda *args, **kwargs: [],
+            ),
+            _execution=SimpleNamespace(dispatch=dispatch),
+            _wm=SimpleNamespace(add=lambda *args, **kwargs: None),
+            _episodic=SimpleNamespace(record=lambda *args, **kwargs: None),
+            _registry=_tool_registry(),
+            _pending_routing_overrides=None,
+            _bootstrap_mode="none",
+        )
+
+        with patch("core.loop.shared.continue_phase._maybe_reconcile_bootstrap", new=AsyncMock()):
+            final_action, final_result = await _run_continue_phase(
+                loop=loop,
+                ctx=MagicMock(),
+                user_message="请修改这个文件",
+                active_task=SimpleNamespace(id=42),
+                cognitive_signals=MagicMock(),
+                action=_make_judgment_output(decision="act"),
+                result=_make_tool_result(),
+                tool_history=[],
+            )
+
+        assert final_action.chosen_action_id == "file.write"
+        assert final_result.summary == "写入完成"
+        assert decide_continue.await_count == 1
+        assert dispatch.await_count == 1
+
+    @pytest.mark.asyncio
     async def test_duplicate_autonomous_reply_is_suppressed(self):
         from core.loop.tick import _persist_tick_user_reply
 

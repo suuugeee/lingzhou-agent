@@ -65,6 +65,23 @@ async def _execute_tick_action(
             loop._wm.add(item)
         _gate_signals = SimpleNamespace()
         loop._behavior.apply_cognitive_probe(_gate_signals)
+        _gate_signals.last_action_tool = getattr(loop, "_last_action_tool", "")
+        _gate_signals.last_action_key = getattr(loop, "_last_action_key", "")
+        _gate_signals.last_action_status = getattr(loop, "_last_action_status", "")
+        _gate_signals.last_action_progressful = (
+            getattr(loop, "_last_act_progressful", None)
+            if getattr(loop, "_last_action_status", "")
+            else None
+        )
+        _gate_signals.last_action_progress_reason = (
+            getattr(loop, "_last_act_progress_reason", "")
+            if getattr(loop, "_last_action_status", "")
+            else ""
+        )
+        _gate_signals.active_task_id = getattr(active_task, "id", "") if active_task is not None else ""
+        _gate_signals.active_task_source = getattr(active_task, "source", "") if active_task is not None else ""
+        _gate_signals.active_task_status = getattr(active_task, "status", "") if active_task is not None else ""
+        _gate_signals.active_task_next_step = getattr(active_task, "next_step", "") if active_task is not None else ""
         gate = getattr(loop._behavior, "apply_execution_gate", None)
         if gate is not None:
             action = gate(action, _gate_signals)

@@ -372,6 +372,31 @@ def test_auto_cortex_patch_promotes_completion_block_recovery_hint():
     assert "run#8 task.complete failed" in cortex["failures"][0]
 
 
+def test_auto_cortex_patch_runtime_guard_failure_overrides_stale_next_verification():
+    patch = build_auto_cortex_patch(
+        existing_cortex={
+            "domain": "runtime",
+            "intent": "fix tool call",
+            "next_verification": "继续读取旧日志。",
+        },
+        run_id=10,
+        task_id=13,
+        tool_name="task.workbench",
+        status="failed",
+        summary="工具参数缺失: task.workbench requires workbench",
+        error="ToolInputInvalid",
+        state_delta={
+            "tool_input_invalid": True,
+            "recovery_next_step": "按 task.workbench 的 manifest 重新调用工具；补齐必填参数 workbench。",
+        },
+    )
+
+    cortex = patch["cortex"]
+    assert cortex["problem_runtime"]["phase"] == "recovering"
+    assert cortex["recovery_state"] == "recovering_from_run_failure"
+    assert cortex["next_verification"] == "按 task.workbench 的 manifest 重新调用工具；补齐必填参数 workbench。"
+
+
 def test_auto_cortex_patch_preserves_completion_blocker_when_run_succeeded():
     patch = build_auto_cortex_patch(
         existing_cortex={"domain": "self_evolution", "intent": "self_drive_growth"},

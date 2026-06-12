@@ -36,6 +36,23 @@ def _task_is_runnable(task: Task | None) -> bool:
     return task is not None and str(getattr(task, "status", "") or "") in _RUNNABLE_STATUSES
 
 
+def _clear_terminal_task_attention(loop: Any, task: Task | None) -> None:
+    if task is None:
+        return
+    wm = getattr(loop, "_wm", None)
+    clearer = getattr(wm, "clear", None)
+    if not callable(clearer):
+        return
+    source = str(getattr(task, "source", "") or "")
+    kinds = {"task_anchor"}
+    if source == "self_drive":
+        kinds.add("self_drive")
+    try:
+        clearer(kinds=kinds)
+    except Exception:
+        _log.debug("[focus] terminal attention cleanup failed task=%s", getattr(task, "id", "-"), exc_info=True)
+
+
 async def _safe_get_fact(task_store: Any, key: str) -> tuple[str, bool]:
     getter = getattr(task_store, "get_fact", None)
     if getter is not None:
@@ -458,5 +475,6 @@ async def finalize_focus_task(
     if _task_is_runnable(active_task) or str(getattr(active_task, "status", "") or "") == "waiting":
         await claim_focus_task(loop, active_task, chat_id=resolved_chat_id or None, clear_current=True)
     else:
+        _clear_terminal_task_attention(loop, active_task)
         await claim_focus_task(loop, None, chat_id=resolved_chat_id or None, clear_current=True)
     return active_task

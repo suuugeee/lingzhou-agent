@@ -8,8 +8,6 @@ from typing import Any
 
 from tools.registry import ToolContext, ToolResult
 
-from ..shared.logging import _clip_signal_text
-
 _log = logging.getLogger("lingzhou.loop")
 _TASK_REPLY_STATS_EVERY = 20
 
@@ -71,7 +69,7 @@ def _build_action_result_summary(
         action_ran=True,
         action_succeeded=succeeded,
         tool_name=tool_name,
-        summary=_clip_signal_text(result.summary or "", 300),
+        summary=result.summary or "",
         error=(result.error or ""),
     )
 

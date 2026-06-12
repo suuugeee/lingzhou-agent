@@ -443,6 +443,14 @@ def test_continue_phase_uses_configured_tool_history_compaction_threshold():
     asyncio.run(_continue_phase_uses_configured_tool_history_compaction_threshold())
 
 
+def test_continue_phase_records_workbench_when_inner_round_limit_reached():
+    asyncio.run(_continue_phase_records_workbench_when_inner_round_limit_reached())
+
+
+def test_continue_phase_gates_repeated_same_action_before_dispatch():
+    asyncio.run(_continue_phase_gates_repeated_same_action_before_dispatch())
+
+
 async def _continue_phase_uses_configured_tool_history_compaction_threshold():
     from core.config import Config
     from core.loop.shared.continue_phase import _run_continue_phase
@@ -531,6 +539,239 @@ async def _continue_phase_uses_configured_tool_history_compaction_threshold():
     assert "早期 1 条工具调用已" in seen_histories[0][0]["result"]
     assert "压缩" in seen_histories[0][0]["result"]
     assert seen_histories[0][1]["tool"] == "task.list"
+
+
+async def _continue_phase_records_workbench_when_inner_round_limit_reached():
+    from core.config import Config
+    from core.loop.shared.continue_phase import _run_continue_phase
+    from memory.working import WorkingMemory
+    from tools.registry import ToolEntry, ToolManifest, ToolResult
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+        "thresholds": {
+            "continue_max_inner_rounds": 2,
+            "continue_tool_history_compact_threshold": 20,
+            "continue_tool_history_keep_last": 10,
+        },
+    })
+
+    class _Store:
+        async def has_pending_chat_message(self) -> bool:
+            return False
+
+    class _Judgment:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def decide_continue(self, tool_history, **kwargs):
+            self.calls += 1
+            return _judgment_output(
+                decision="act",
+                chosen_action_id="file.read",
+                params={"path": f"/tmp/{self.calls}.txt"},
+                rationale="继续读取",
+            )
+
+    class _Registry:
+        def get(self, name: str):
+            if name != "task.workbench":
+                return None
+            return ToolEntry(
+                manifest=ToolManifest(name="task.workbench", description="demo"),
+                handler=lambda params, ctx: None,  # type: ignore[arg-type]
+            )
+
+    class _Execution:
+        def __init__(self) -> None:
+            self.actions: list[Any] = []
+
+        async def dispatch(self, action, ctx):
+            self.actions.append(action)
+            if action.chosen_action_id == "task.workbench":
+                return ToolResult(summary="工作台已更新")
+            return ToolResult(summary=f"读取完成 {action.params.get('path')}")
+
+    class _Behavior:
+        def on_act(self, *args, **kwargs):
+            return []
+
+        def apply_cognitive_probe(self, signals):
+            return None
+
+        def apply_execution_gate(self, action, signals):
+            return action
+
+        def on_act_result(self, *args, **kwargs):
+            return None
+
+    judgment = _Judgment()
+    execution = _Execution()
+    loop = SimpleNamespace(
+        _cfg=cfg,
+        _emotion=SimpleNamespace(valence=0.5, arousal=0.5),
+        _task_store=_Store(),
+        _judgment=judgment,
+        _pending_routing_overrides=None,
+        _registry=_Registry(),
+        _wm=WorkingMemory(capacity=20),
+        _execution=execution,
+        _behavior=_Behavior(),
+        _episodic=SimpleNamespace(record=lambda **kwargs: None),
+        _bootstrap_mode="none",
+    )
+
+    final_action, final_result = await _run_continue_phase(
+        loop=loop,
+        ctx=SimpleNamespace(),
+        user_message="",
+        active_task=SimpleNamespace(id=1),
+        cognitive_signals=SimpleNamespace(),
+        action=_judgment_output(decision="act", chosen_action_id="file.read", params={"path": "/tmp/start.txt"}),
+        result=ToolResult(summary="初始结果"),
+        tool_history=[],
+    )
+
+    assert judgment.calls == 2
+    assert final_action.chosen_action_id == "task.workbench"
+    assert final_result.summary == "工作台已更新"
+    assert execution.actions[-1].chosen_action_id == "task.workbench"
+    workbench = execution.actions[-1].params["workbench"]
+    assert workbench["recovery_state"] == "continue_round_limit_reached"
+    assert "本 tick continue 阶段已执行 2 轮工具续判" in workbench["evidence"][0]
+    assert "下一轮先综合本 tick 工具结果" in workbench["next_verification"]
+
+
+async def _continue_phase_gates_repeated_same_action_before_dispatch():
+    from core.config import Config
+    from core.loop.shared.continue_phase import _run_continue_phase
+    from memory.working import WorkingMemory
+    from tools.registry import ToolEntry, ToolManifest, ToolResult
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+        "loop": {"behavior_streak_threshold": 3},
+        "thresholds": {
+            "continue_max_inner_rounds": 4,
+            "continue_tool_history_compact_threshold": 20,
+            "continue_tool_history_keep_last": 10,
+        },
+    })
+
+    class _Store:
+        async def has_pending_chat_message(self) -> bool:
+            return False
+
+    class _Judgment:
+        async def decide_continue(self, tool_history, **kwargs):
+            return _judgment_output(
+                decision="act",
+                chosen_action_id="file.read",
+                params={"path": "/tmp/repeat.py"},
+                rationale="继续读取同一文件",
+            )
+
+    class _Registry:
+        def get(self, name: str):
+            if name != "task.workbench":
+                return None
+            return ToolEntry(
+                manifest=ToolManifest(name="task.workbench", description="demo"),
+                handler=lambda params, ctx: None,  # type: ignore[arg-type]
+            )
+
+    class _Execution:
+        def __init__(self) -> None:
+            self.actions: list[Any] = []
+
+        async def dispatch(self, action, ctx):
+            self.actions.append(action)
+            return ToolResult(summary=f"executed {action.chosen_action_id}")
+
+    class _Behavior:
+        def on_act(self, *args, **kwargs):
+            return []
+
+        def apply_cognitive_probe(self, signals):
+            return None
+
+        def apply_execution_gate(self, action, signals):
+            return action
+
+        def on_act_result(self, *args, **kwargs):
+            return None
+
+    execution = _Execution()
+    loop = SimpleNamespace(
+        _cfg=cfg,
+        _emotion=SimpleNamespace(valence=0.5, arousal=0.5),
+        _task_store=_Store(),
+        _judgment=_Judgment(),
+        _pending_routing_overrides=None,
+        _registry=_Registry(),
+        _wm=WorkingMemory(capacity=20),
+        _execution=execution,
+        _behavior=_Behavior(),
+        _episodic=SimpleNamespace(record=lambda **kwargs: None),
+        _bootstrap_mode="none",
+    )
+    tool_history = [
+        {
+            "tool": "file.read",
+            "params": {"path": "/tmp/repeat.py"},
+            "result": "same",
+            "status": "ok",
+            "error": "",
+            "summary": "same",
+            "state_delta": {},
+        },
+        {
+            "tool": "file.read",
+            "params": {"path": "/tmp/repeat.py"},
+            "result": "same",
+            "status": "ok",
+            "error": "",
+            "summary": "same",
+            "state_delta": {},
+        },
+    ]
+
+    final_action, final_result = await _run_continue_phase(
+        loop=loop,
+        ctx=SimpleNamespace(),
+        user_message="用户正在等结论",
+        active_task=SimpleNamespace(id=1),
+        cognitive_signals=SimpleNamespace(),
+        action=_judgment_output(decision="act", chosen_action_id="file.read", params={"path": "/tmp/repeat.py"}),
+        result=ToolResult(summary="初始结果"),
+        tool_history=tool_history,
+    )
+
+    assert final_action.chosen_action_id == "task.workbench"
+    assert final_result.summary == "executed task.workbench"
+    assert len(execution.actions) == 1
+    assert execution.actions[0].chosen_action_id == "task.workbench"
+    workbench = execution.actions[0].params["workbench"]
+    assert workbench["recovery_state"] == "continue_repeat_action_gated"
+    assert "file.read /tmp/repeat.py" in workbench["next_verification"]
 
 
 async def _self_drive_signal_bypasses_idle_judge_aggregation():

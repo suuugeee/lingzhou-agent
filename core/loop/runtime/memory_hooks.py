@@ -39,7 +39,12 @@ def _fmt_drive_template_list(items: Any) -> str:
     return "\n".join(f"- {str(item)}" for item in items)
 
 
-def build_task_anchor_item(active_task: Any, *, progress: str = "") -> WMItem:
+def build_task_anchor_item(
+    active_task: Any,
+    *,
+    progress: str = "",
+    action_feedback: str = "",
+) -> WMItem:
     """构造统一任务锚点，供 tick 准备与 consolidate 复用。"""
     result_json = getattr(active_task, "result_json", {}) or {}
     cortex = result_json.get("cortex", {}) if isinstance(result_json, dict) else {}
@@ -52,6 +57,7 @@ def build_task_anchor_item(active_task: Any, *, progress: str = "") -> WMItem:
     ).strip()
 
     progress_line = f"\n进度: {progress}" if str(progress or "").strip() else ""
+    feedback_line = f"\n上一动作反馈: {action_feedback}" if str(action_feedback or "").strip() else ""
     recovery_line = f"\n恢复状态: {recovery_state}" if recovery_state else ""
     verify_line = f"\n下一步验证: {next_verification}" if next_verification else ""
     return WMItem(
@@ -61,6 +67,7 @@ def build_task_anchor_item(active_task: Any, *, progress: str = "") -> WMItem:
             f"目标: {getattr(active_task, 'goal', '') or '(未指定)'}\n"
             f"下一步: {getattr(active_task, 'next_step', '') or '(未指定)'}"
             f"{progress_line}"
+            f"{feedback_line}"
             f"{recovery_line}"
             f"{verify_line}"
         ),

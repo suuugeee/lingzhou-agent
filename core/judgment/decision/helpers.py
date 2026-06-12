@@ -6,9 +6,9 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
+from core.judgment.context.budget import resolve_judgment_prompt_budget
 from core.judgment.output import JudgmentOutput, ModelSelection
 from core.log_fields import format_log_fields, llm_call_fields
-from core.judgment.context.budget import resolve_judgment_prompt_budget
 
 if TYPE_CHECKING:
     from core.judgment.executor import JudgmentExecutor
@@ -251,6 +251,21 @@ def _select_provider_impl(
     return provider, ModelSelection(phase=phase, tier=chosen_tier, model_ref=chosen_model, thinking=thinking)
 
 
+def _retry_fallback_tier(
+    executor: JudgmentExecutor,
+    selection: ModelSelection,
+    phase: str,
+    fallback_prefer_tier: str | None,
+) -> str:
+    if fallback_prefer_tier:
+        return fallback_prefer_tier
+    exclude_reader = phase in executor._REASONER_ONLY_PHASES
+    tiers = executor._fallback_tiers(selection.tier, exclude_reader=exclude_reader)
+    if tiers:
+        return tiers[0]
+    return selection.tier
+
+
 def _trim_messages_for_prompt_limit_impl(
     executor: JudgmentExecutor,
     messages: list[Any],
@@ -444,7 +459,12 @@ async def _chat_with_retry_impl(
             )
             executor._mark_model_failure(selection.model_ref, _err)
             if _attempt < max_attempts - 1:
-                _fallback_tier = fallback_prefer_tier or executor._fallback_tiers(selection.tier)[0]
+                _fallback_tier = _retry_fallback_tier(
+                    executor,
+                    selection,
+                    phase,
+                    fallback_prefer_tier,
+                )
                 fb_provider, fb_selection = executor._select_provider(
                     phase=phase,
                     user_message=user_message,
@@ -544,7 +564,12 @@ async def _chat_with_retry_impl(
 
             executor._mark_model_failure(selection.model_ref, _err)
             if _attempt < max_attempts - 1:
-                _fallback_tier = fallback_prefer_tier or executor._fallback_tiers(selection.tier)[0]
+                _fallback_tier = _retry_fallback_tier(
+                    executor,
+                    selection,
+                    phase,
+                    fallback_prefer_tier,
+                )
                 fb_provider, fb_selection = executor._select_provider(
                     phase=phase,
                     user_message=user_message,

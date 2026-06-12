@@ -81,6 +81,88 @@ def _self_drive_growth_completion_blockers(task: Any, recent_runs: list[Any]) ->
     return blockers
 
 
+_IMPLEMENTATION_CANDIDATE_MARKERS = (
+    "改进候选",
+    "一行级改进",
+    "加强守卫",
+    "强化守卫",
+    "具体改进",
+    "可实现",
+    "修复点",
+    "代码改动",
+    "改核心代码",
+    "改守卫代码",
+    "code change",
+    "implementation candidate",
+    "guard",
+)
+_IMPLEMENTATION_DEFERRAL_MARKERS = (
+    "无需立即改核心代码",
+    "不直接修改核心代码",
+    "后续重复出现",
+    "观察下一次",
+    "是否值得直接改代码",
+    "是否值得直接改",
+    "先固化经验",
+    "先沉淀",
+    "暂不修改",
+    "defer",
+    "observe later",
+)
+
+
+def _flatten_cortex_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_flatten_cortex_text(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_flatten_cortex_text(item) for item in value)
+    return str(value or "")
+
+
+def _contains_marker(text: str, lowered: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text or marker in lowered for marker in markers)
+
+
+def _self_drive_unresolved_implementation_blockers(task: Any, recent_runs: list[Any], ctx: ToolContext) -> list[str]:
+    """阻止自我进化任务把明确实现候选降级成“先记忆、以后再说”。"""
+    if not _is_self_drive_growth_task(task):
+        return []
+
+    cortex = _task_cortex(task)
+    text = _flatten_cortex_text(cortex)
+    lowered = text.lower()
+    has_candidate = _contains_marker(text, lowered, _IMPLEMENTATION_CANDIDATE_MARKERS)
+    has_deferral = _contains_marker(text, lowered, _IMPLEMENTATION_DEFERRAL_MARKERS)
+    if not (has_candidate and has_deferral):
+        return []
+
+    recent_tools = [
+        str(getattr(run, "tool_name", "") or "")
+        for run in recent_runs
+        if str(getattr(run, "status", "") or "") == "succeeded"
+    ]
+    has_mutation = any(tool_has_capability(ctx.registry, tool_name, "completion_mutation") for tool_name in recent_tools)
+    if has_mutation:
+        return []
+
+    latest_workbench_idx: int | None = None
+    for idx, run in enumerate(recent_runs):
+        if str(getattr(run, "tool_name", "") or "") == "task.workbench":
+            latest_workbench_idx = idx
+            break
+    if latest_workbench_idx is not None:
+        newer_runs = recent_runs[:latest_workbench_idx]
+        if any(_is_successful_verification_run(run) for run in newer_runs):
+            return []
+
+    return [
+        (
+            "自驱成长任务已经识别出可实现的代码/守卫改进候选，但仍停留在“先沉淀/后续观察/是否值得改”的"
+            "未决状态；不能只写语义记忆后完成。"
+        )
+    ]
+
+
 _ACTIONABLE_VERIFICATION_MARKERS = (
     "定位",
     "查找",
@@ -97,6 +179,38 @@ _ACTIONABLE_VERIFICATION_MARKERS = (
     "编辑",
     "推送",
     "提交",
+    "沉淀",
+    "固化",
+    "写入语义",
+    "memory.add_semantic",
+    "run",
+    "rerun",
+    "execute",
+    "read",
+    "check",
+    "verify",
+    "test",
+    "inspect",
+    "fetch",
+    "search",
+    "open",
+    "pytest",
+    "git ",
+    "curl",
+)
+_NON_ACTIONABLE_VERIFICATION_MARKERS = (
+    "无需",
+    "不需要",
+    "进入低频观察",
+    "等待新用户",
+    "no need",
+    "not needed",
+    "wait for user",
+)
+_COMPLETED_VERIFICATION_PREFIXES = (
+    "已完成",
+    "完成该",
+    "already done",
 )
 _NON_VERIFICATION_TOOLS = {
     "memory.add_semantic",
@@ -122,6 +236,15 @@ _VERIFICATION_TOOL_PREFIXES = (
     "memory.embed_backfill",
     "subagent.run",
 )
+_SEMANTIC_MEMORY_VERIFICATION_MARKERS = (
+    "memory.add_semantic",
+    "add_semantic",
+    "语义记忆",
+    "写入语义",
+    "沉淀",
+    "固化经验",
+    "semantic memory",
+)
 
 
 def _task_cortex(task: Any) -> dict[str, Any]:
@@ -135,26 +258,55 @@ def _has_actionable_next_verification(text: str) -> bool:
     if not value:
         return False
     lowered = value.lower()
-    if any(marker in lowered for marker in ("无需", "不需要", "已完成", "完成该", "进入低频观察", "等待新用户")):
+    if any(marker in lowered for marker in _NON_ACTIONABLE_VERIFICATION_MARKERS):
         return False
-    return any(marker in value for marker in _ACTIONABLE_VERIFICATION_MARKERS)
+    if any(lowered.startswith(marker) for marker in _COMPLETED_VERIFICATION_PREFIXES):
+        return False
+    return _contains_marker(value, lowered, _ACTIONABLE_VERIFICATION_MARKERS)
 
 
-def _is_successful_verification_run(run: Any) -> bool:
+def _verification_requests_semantic_memory(next_verification: str) -> bool:
+    lowered = str(next_verification or "").lower()
+    return _contains_marker(next_verification, lowered, _SEMANTIC_MEMORY_VERIFICATION_MARKERS)
+
+
+def _is_successful_verification_run(run: Any, *, next_verification: str = "") -> bool:
     if str(getattr(run, "status", "") or "").strip() != "succeeded":
         return False
     tool_name = str(getattr(run, "tool_name", "") or "").strip()
-    if not tool_name or tool_name in _NON_VERIFICATION_TOOLS or tool_name.startswith("task."):
+    if not tool_name:
+        return False
+    if tool_name == "memory.add_semantic" and _verification_requests_semantic_memory(next_verification):
+        return True
+    if tool_name in _NON_VERIFICATION_TOOLS or tool_name.startswith("task."):
         return False
     return tool_name in _VERIFICATION_TOOL_PREFIXES or any(
         tool_name.startswith(prefix) for prefix in _VERIFICATION_TOOL_PREFIXES
     )
 
 
-def _workbench_output_has_next_verification(run: Any) -> bool:
+def _run_workbench_cortex(run: Any) -> dict[str, Any]:
     output_json = getattr(run, "output_json", None)
-    cortex = output_json.get("cortex") if isinstance(output_json, dict) else None
-    return isinstance(cortex, dict) and _has_actionable_next_verification(str(cortex.get("next_verification") or ""))
+    candidates: list[Any] = []
+    if isinstance(output_json, dict):
+        candidates.append(output_json.get("cortex"))
+        state_delta = output_json.get("state_delta")
+        if isinstance(state_delta, dict):
+            candidates.append(state_delta.get("cortex"))
+
+    state_delta = getattr(run, "state_delta", None)
+    if isinstance(state_delta, dict):
+        candidates.append(state_delta.get("cortex"))
+
+    for cortex in candidates:
+        if isinstance(cortex, dict):
+            return cortex
+    return {}
+
+
+def _workbench_output_has_next_verification(run: Any) -> bool:
+    cortex = _run_workbench_cortex(run)
+    return _has_actionable_next_verification(str(cortex.get("next_verification") or ""))
 
 
 def _unresolved_workbench_verification_blockers(task: Any, recent_runs: list[Any]) -> list[str]:
@@ -173,13 +325,7 @@ def _unresolved_workbench_verification_blockers(task: Any, recent_runs: list[Any
         return []
 
     newer_runs = recent_runs[:latest_workbench_idx]
-    if any(_is_successful_verification_run(run) for run in newer_runs):
-        return []
-
-    intent = str(cortex.get("intent") or "").strip()
-    domain = str(cortex.get("domain") or "").strip()
-    is_growth = _is_self_drive_growth_task(task) or intent == "self_drive_growth" or domain in {"self_evolution", "runtime", "memory_system"}
-    if not is_growth:
+    if any(_is_successful_verification_run(run, next_verification=next_verification) for run in newer_runs):
         return []
 
     return [
@@ -556,6 +702,34 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                     **recovery_state,
                 ),
             )
+        implementation_blockers = _self_drive_unresolved_implementation_blockers(task, recent_runs, ctx)
+        if implementation_blockers:
+            recovery_state = _completion_block_state(
+                blocker_code="SelfDriveImplementationDecisionPending",
+                blockers=implementation_blockers,
+                recovery_next_step=(
+                    "先把实现候选收敛成明确决策：若应修改，定位文件并实施后验证；"
+                    "若不修改，用 task.workbench 写清不可改的硬约束、风险和替代监控条件。"
+                ),
+                suggested_tools=["file.read", "shell.run", "task.workbench"],
+            )
+            return ToolResult(
+                summary=(
+                    f"任务 [{task.id}] 暂不允许完成：自驱成长任务发现了实现候选，但还没有完成“是否修改”的决策闭环。"
+                    + " ".join(implementation_blockers)
+                ),
+                error="SelfDriveImplementationDecisionPending",
+                skipped=True,
+                state_delta=recovery_state,
+                metadata=_task_metadata(
+                    task,
+                    tool_name="task.complete",
+                    log_summary=(
+                        f"task.complete rejected SelfDriveImplementationDecisionPending id={task.id}"
+                    ),
+                    **recovery_state,
+                ),
+            )
         action_first_blockers = action_first_completion_blockers(task=task, recent_runs=recent_runs)
         if action_first_blockers:
             recovery_state = _completion_block_state(
@@ -867,15 +1041,38 @@ async def task_wait(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     task = await _resolve_task(params.get("task_id"), ctx)
     if not task:
         return ToolResult(summary="无活跃任务可等待", skipped=True)
+
+    def _invalid_wait_input(summary: str, *, code: str = "ToolInputInvalid") -> ToolResult:
+        return ToolResult(
+            summary=summary,
+            skipped=True,
+            error=code,
+            state_delta={
+                "tool_input_invalid": True,
+                "recovery_next_step": summary,
+                "suggested_tools": ["task.wait", "task.update", "task.workbench"],
+            },
+            metadata=_task_metadata(
+                task,
+                tool_name="task.wait",
+                log_summary=f"task.wait rejected invalid input id={task.id} code={code}",
+            ),
+        )
+
     wait_kind = (params.get("wait_kind") or "").strip().lower()
     if not wait_kind:
-        return ToolResult(summary="wait_kind 不能为空", skipped=True)
+        return _invalid_wait_input("wait_kind 不能为空；请指定 process/task/signal/time/external 之一。")
     wait_key = (params.get("wait_key") or "").strip()
     valid_wait_kinds = {"process", "task", "signal", "time", "external"}
     if wait_kind not in valid_wait_kinds:
-        return ToolResult(summary=f"不支持的 wait_kind: {wait_kind}", skipped=True)
+        return _invalid_wait_input(
+            f"不支持的 wait_kind: {wait_kind}；请改用 process/task/signal/time/external 之一。"
+        )
     current_step = str(params.get("current_step") or "").strip() if "current_step" in params else None
     next_step = str(params.get("next_step") or "").strip() if "next_step" in params else task.next_step
+    if wait_kind == "external" and not wait_key and not str(next_step or "").strip():
+        recovery = "external wait 缺少 wait_key 时必须写清 next_step，说明收到什么外部信号后如何恢复。"
+        return _invalid_wait_input(recovery, code="WaitConditionAmbiguous")
     await metabolic_mark_task_waiting(
         ctx,
         task.id,

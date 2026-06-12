@@ -14,6 +14,24 @@ from conftest import (
     _tool_registry,
 )
 
+
+class _WorkbenchRegistry:
+    def get(self, name: str):
+        if name != "task.workbench":
+            return None
+        from tools.registry import ToolEntry, ToolManifest
+
+        return ToolEntry(
+            manifest=ToolManifest(name="task.workbench", description="demo"),
+            handler=lambda params, ctx: None,  # type: ignore[arg-type]
+        )
+
+
+class _EmptyRegistry:
+    def get(self, name: str):
+        return None
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SemanticMemory — 多锚点情境召回（ACT-R 收敛激活）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -142,6 +160,32 @@ def test_judgment_output_preserves_model_reply_without_mechanical_rewrite():
     normalized = normalize_action_shape(output)
 
     assert normalized.reply_to_user == "我记得你之前说过你叫 bat。"
+
+
+def test_normalize_action_shape_clears_non_act_tool_payload():
+    from core.judgment.boundary import normalize_action_shape
+
+    output = _judgment_output(
+        decision="pause",
+        chosen_action_id="file.read",
+        params={"path": "/tmp/stale.py"},
+        rationale="暂停，不执行工具。",
+        next_step="等待外部输入",
+    )
+    output.parallel_actions = [{"action_id": "file.list", "params": {"path": "/tmp"}}]
+    output.delegate_tasks = [{"id": "sub-1", "goal": "read stale path"}]
+    output.applied_skills = ["anti-loop"]
+
+    normalized = normalize_action_shape(output)
+
+    assert normalized.decision == "pause"
+    assert normalized.chosen_action_id == ""
+    assert normalized.params == {}
+    assert normalized.parallel_actions == []
+    assert normalized.delegate_tasks == []
+    assert normalized.rationale == "暂停，不执行工具。"
+    assert normalized.next_step == "等待外部输入"
+    assert normalized.applied_skills == ["anti-loop"]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -280,7 +324,8 @@ def test_behavior_gate_blocks_repeating_same_action_and_logs_observation(caplog)
     from core.loop.drive.behavior import BehaviorTracker
 
     caplog.set_level(logging.INFO, logger="lingzhou.behavior_tracker")
-    tracker = BehaviorTracker()
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
 
     class _Signals:
         repeat_action_count = 3
@@ -297,10 +342,18 @@ def test_behavior_gate_blocks_repeating_same_action_and_logs_observation(caplog)
         rationale="再搜一次",
     )
     gated = tracker.apply_execution_gate(action, _Signals())
-    assert gated.decision == "wait"
+    assert gated.decision == "act"
     assert gated is not action
-    assert "行为门控制动" in gated.rationale
+    assert gated.chosen_action_id == "task.workbench"
+    assert "停止重复低增量动作" in gated.params["workbench"]["intent"]
+    assert "legacy runtime" in gated.params["workbench"]["next_verification"]
+    assert "行为门控改道" in gated.rationale
     assert any("repeat action streak=3" in rec.message for rec in caplog.records)
+
+    fallback_tracker = BehaviorTracker(registry=_EmptyRegistry())
+    fallback = fallback_tracker.apply_execution_gate(action, _Signals())
+    assert fallback.decision == "wait"
+    assert "行为门控制动" in fallback.rationale
 
     switched_action = _judgment_output(
         decision="act",
@@ -327,7 +380,31 @@ def test_behavior_gate_blocks_repeating_same_action_and_logs_observation(caplog)
     )
     gated_read = tracker.apply_execution_gate(read_action, _ReadSignals())
     assert gated_read.decision == "act"
-    assert gated_read is read_action
+    assert gated_read is not read_action
+    assert gated_read.chosen_action_id == "task.workbench"
+    assert "停止重复读取" in gated_read.params["workbench"]["intent"]
+    assert "/tmp/demo.txt" in gated_read.params["workbench"]["next_verification"]
+
+    different_read = _judgment_output(
+        decision="act",
+        chosen_action_id="file.read",
+        params={"path": "/tmp/other.txt"},
+    )
+    allowed_read = tracker.apply_execution_gate(different_read, _ReadSignals())
+    assert allowed_read is different_read
+
+    class _BothSignals:
+        repeat_action_count = 3
+        repeat_action_tool = "file.read"
+        repeat_action_key = "/tmp/demo.txt"
+        repeat_read_count = 3
+        repeat_read_path = "/tmp/demo.txt"
+        loop_probe_version = 7
+
+    gated_both = tracker.apply_execution_gate(read_action, _BothSignals())
+    assert gated_both.decision == "act"
+    assert gated_both.chosen_action_id == "task.workbench"
+    assert "不要再重复执行 file.read /tmp/demo.txt" in gated_both.params["workbench"]["next_verification"]
 
     # on_act 连续相同行为时应生成 WMItem 信号
     items = []
@@ -343,6 +420,109 @@ def test_behavior_gate_blocks_repeating_same_action_and_logs_observation(caplog)
     assert not any("行为信号" in i.content for i in items2), (
         "不同 shell.run 命令不应触发 streak（key_param 已区分命令内容）"
     )
+
+
+def test_behavior_gate_redirects_self_drive_evidence_wait_to_workbench():
+    from core.loop.drive.behavior import BehaviorTracker
+
+    class _EvidenceSignals:
+        active_task_id = 42
+        active_task_source = "self_drive"
+        active_task_status = "in_progress"
+        active_task_next_step = "读取最近日志，寻找重复模式或可优化点"
+        repeat_action_count = 0
+        repeat_read_count = 0
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
+    action = _judgment_output(decision="wait", rationale="当前无用户输入，先等待")
+
+    gated = tracker.apply_execution_gate(action, _EvidenceSignals())
+
+    assert gated.decision == "act"
+    assert gated.chosen_action_id == "task.workbench"
+    workbench = gated.params["workbench"]
+    assert workbench["recovery_state"] == "evidence_required_before_wait"
+    assert "取证" in workbench["intent"]
+    assert workbench["next_verification"] == "读取最近日志，寻找重复模式或可优化点"
+    assert "不能直接 wait" in gated.rationale
+
+
+def test_behavior_gate_allows_self_drive_external_wait():
+    from core.loop.drive.behavior import BehaviorTracker
+
+    class _ExternalSignals:
+        active_task_id = 43
+        active_task_source = "self_drive"
+        active_task_status = "in_progress"
+        active_task_next_step = "等待外部输入或下一次日记同步信号"
+        repeat_action_count = 0
+        repeat_read_count = 0
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
+    action = _judgment_output(decision="wait", rationale="等待外部信号")
+
+    assert tracker.apply_execution_gate(action, _ExternalSignals()) is action
+
+
+def test_behavior_gate_forces_repeated_self_drive_wait_to_evidence():
+    from core.loop.drive.behavior import BehaviorTracker
+
+    class _RepeatedWaitSignals:
+        active_task_id = 44
+        active_task_source = "self_drive"
+        active_task_status = "in_progress"
+        active_task_next_step = "等待外部输入或下一次日记同步信号"
+        repeat_action_count = 0
+        repeat_read_count = 0
+        wait_streak = 3
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
+    action = _judgment_output(decision="wait", rationale="等待外部信号")
+
+    gated = tracker.apply_execution_gate(action, _RepeatedWaitSignals())
+
+    assert gated.decision == "act"
+    assert gated.chosen_action_id == "task.workbench"
+    assert gated.params["workbench"]["recovery_state"] == "evidence_required_before_wait"
+    assert "取证" in gated.params["workbench"]["intent"]
+
+
+def test_behavior_gate_resumes_self_drive_waiting_task_if_no_evidence_hint():
+    from core.loop.drive.behavior import BehaviorTracker
+
+    class _Signals:
+        active_task_id = 45
+        active_task_source = "self_drive"
+        active_task_status = "waiting"
+        active_task_next_step = "等待外部输入或下一次同步信号"
+        repeat_action_count = 0
+        repeat_read_count = 0
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
+    action = _judgment_output(decision="wait", rationale="等待外部输入")
+    assert tracker.apply_execution_gate(action, _Signals()) is action
+
+
+def test_behavior_gate_forces_self_drive_waiting_task_with_evidence():
+    from core.loop.drive.behavior import BehaviorTracker
+
+    class _Signals:
+        active_task_id = 46
+        active_task_source = "self_drive"
+        active_task_status = "waiting"
+        active_task_next_step = "读取最近日志，寻找下一步可执行动作"
+        repeat_action_count = 0
+        repeat_read_count = 0
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
+    action = _judgment_output(decision="wait", rationale="等待外部输入")
+
+    gated = tracker.apply_execution_gate(action, _Signals())
+
+    assert gated.decision == "act"
+    assert gated.chosen_action_id == "task.workbench"
+    assert gated.params["workbench"]["recovery_state"] == "evidence_required_before_wait"
+    assert "读取最近日志" in gated.params["workbench"]["next_verification"]
 
 
 def test_cognitive_signals_include_last_action_feedback_and_repeat_list():
@@ -471,6 +651,74 @@ def test_behavior_tracker_uses_explicit_registry_capabilities():
     assert items == []
 
 
+def test_behavior_gate_redirects_low_increment_probe_after_unprogressful_action():
+    from core.loop.drive.behavior import BehaviorTracker
+
+    class _Signals:
+        repeat_action_count = 0
+        repeat_action_tool = ""
+        repeat_action_key = ""
+        repeat_read_count = 0
+        repeat_read_path = ""
+        last_action_tool = "task.list"
+        last_action_key = "all"
+        last_action_status = "ok"
+        last_action_progressful = False
+        last_action_progress_reason = "task.list 结果与上轮相同"
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
+    action = _judgment_output(decision="act", chosen_action_id="file.list", params={"path": "/root/lingzhou"})
+
+    gated = tracker.apply_execution_gate(action, _Signals())
+
+    assert gated.decision == "act"
+    assert gated.chosen_action_id == "task.workbench"
+    workbench = gated.params["workbench"]
+    assert "上一低增量探索未推进" in workbench["intent"]
+    assert "task.list" in workbench["evidence"][0]
+    assert "file.list" in workbench["evidence"][1]
+    assert "不要继续同类 list/search 枚举" in workbench["next_verification"]
+
+    read_action = _judgment_output(decision="act", chosen_action_id="file.read", params={"path": "/root/lingzhou/core/a.py"})
+    assert tracker.apply_execution_gate(read_action, _Signals()) is read_action
+
+    memory_action = _judgment_output(decision="act", chosen_action_id="memory.search", params={"query": "task continuity"})
+    assert tracker.apply_execution_gate(memory_action, _Signals()) is memory_action
+
+
+def test_behavior_gate_redirects_repeated_file_list_results():
+    from core.loop.drive.behavior import BehaviorTracker
+
+    class _Signals:
+        repeat_action_count = 0
+        repeat_read_count = 0
+        repeat_list_count = 3
+        repeat_list_path = "/root/lingzhou/tools"
+
+    tracker = BehaviorTracker(registry=_WorkbenchRegistry())
+    action = _judgment_output(
+        decision="act",
+        chosen_action_id="file.list",
+        params={"path": "/root/lingzhou/tools"},
+    )
+
+    gated = tracker.apply_execution_gate(action, _Signals())
+
+    assert gated.decision == "act"
+    assert gated.chosen_action_id == "task.workbench"
+    workbench = gated.params["workbench"]
+    assert "停止重复目录枚举" in workbench["intent"]
+    assert "/root/lingzhou/tools" in workbench["next_verification"]
+    assert "选择最相关文件读取" in workbench["next_verification"]
+
+    different_path = _judgment_output(
+        decision="act",
+        chosen_action_id="file.list",
+        params={"path": "/root/lingzhou/core"},
+    )
+    assert tracker.apply_execution_gate(different_path, _Signals()) is different_path
+
+
 def test_next_thinking_override_is_one_shot_and_strict():
     from core.loop.shared.common import _next_thinking_override
 
@@ -501,6 +749,67 @@ def test_thinking_floor_respects_chat_minimum_for_user_message():
     assert _thinking_floor("minimal", "low") == "low"
     assert _thinking_floor("high", "low") == "high"
     assert _thinking_floor(None, "low") == "low"
+
+
+async def test_decide_initial_raises_autonomous_active_task_to_medium_thinking(monkeypatch):
+    from core.loop.tick.prep import _decide_initial_action
+    from core.loop.tick.types import _TickJudgmentPrep
+
+    captured: dict[str, Any] = {}
+
+    class _Judgment:
+        async def decide(self, *args, **kwargs):
+            captured.update(kwargs)
+            return _judgment_output(decision="wait")
+
+    class _WM:
+        def get_top(self, limit: int):
+            return []
+
+    cfg = cast("Any", SimpleNamespace(
+        thinking="off",
+        loop=SimpleNamespace(
+            judge_every=1,
+            chat_thinking="low",
+            autonomous_thinking="minimal",
+        ),
+    ))
+    loop = cast("Any", SimpleNamespace(
+        _cfg=cfg,
+        _pending_thinking_override=None,
+        _ticks_since_judge=0,
+        _wm=_WM(),
+        _judgment=_Judgment(),
+        _task_store=object(),
+        _episodic=object(),
+        _semantic=object(),
+        _emotion=object(),
+        _pending_tier=None,
+        _pending_routing_overrides=None,
+    ))
+    monkeypatch.setattr(
+        "core.loop.runtime.life.collect_runtime_life_snapshot",
+        lambda loop: SimpleNamespace(as_dict=lambda: {}),
+    )
+
+    prep = _TickJudgmentPrep(
+        percept=object(),
+        perception_replay=None,
+        cognitive_signals=None,
+        ethos_state=None,
+        signals=None,
+        hard_boundaries=[],
+    )
+    await _decide_initial_action(
+        loop,
+        cycle=1,
+        user_message="",
+        active_task=SimpleNamespace(id=9, model_tier=""),
+        chat_id=None,
+        prep=prep,
+    )
+
+    assert captured["thinking_override"] == "medium"
 
 
 def test_recent_runs_summary_prefers_output_and_progress():
@@ -582,8 +891,9 @@ def test_waiting_tasks_section_exposes_wait_reason_and_next_step():
 
 
 def test_task_anchor_item_includes_recovery_hint():
-    from core.loop.runtime.memory_hooks import build_task_anchor_item
     from types import SimpleNamespace
+
+    from core.loop.runtime.memory_hooks import build_task_anchor_item
 
     task = SimpleNamespace(
         id=1,
@@ -598,7 +908,11 @@ def test_task_anchor_item_includes_recovery_hint():
         },
     )
 
-    item = build_task_anchor_item(task)
+    item = build_task_anchor_item(
+        task,
+        action_feedback="tool=file.read | key=/tmp/a.py | status=ok | progressful=False",
+    )
+    assert "上一动作反馈: tool=file.read | key=/tmp/a.py | status=ok | progressful=False" in item.content
     assert "恢复状态: recovering_from_run_failure" in item.content
     assert "下一步验证: 重新执行 tool.workbench 并验证下一步" in item.content
 
@@ -1280,6 +1594,94 @@ async def test_chat_with_retry_applies_retry_after_backoff_and_fallback(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_chat_with_retry_reasoner_phase_fallback_skips_reader_by_default(monkeypatch):
+    from core.config import Config
+    from core.judgment import JudgmentLayer, ModelSelection
+    from provider.base import Message
+    from tools.registry import ToolRegistry
+
+    class _ProviderAlwaysFail:
+        def __init__(self, model_ref: str):
+            self.model_ref = model_ref
+            self.last_usage = {}
+
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            raise RuntimeError("ConnectError('')")
+
+        async def close(self):
+            return None
+
+    class _ProviderSucceed:
+        def __init__(self, model_ref: str):
+            self.model_ref = model_ref
+            self.last_usage = {}
+
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "openai-codex": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "OPENAI_API_KEY",
+            },
+        },
+        "model": "openai-codex/gpt-5.4-mini",
+        "routing": {
+            "reader": "openai-codex/gpt-5.4-mini",
+            "reasoner": "openai-codex/gpt-5.5",
+            "repair": "openai-codex/gpt-5.4",
+        },
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    main_provider = _ProviderAlwaysFail("openai-codex/gpt-5.5")
+    reader_provider = _ProviderSucceed("openai-codex/gpt-5.4-mini")
+    repair_provider = _ProviderSucceed("openai-codex/gpt-5.4")
+    layer = JudgmentLayer(main_provider, ToolRegistry(), cfg)
+    layer.set_routing_providers({
+        "reader": reader_provider,
+        "reasoner": main_provider,
+        "repair": repair_provider,
+    })
+
+    sleep_calls: list[float] = []
+
+    async def _fake_sleep(delay: float) -> None:
+        sleep_calls.append(delay)
+
+    monkeypatch.setattr("core.judgment.decision.helpers.asyncio.sleep", _fake_sleep)
+
+    raw, final_selection, err = await layer._executor._chat_with_retry(
+        selected_provider=main_provider,
+        selection=ModelSelection(
+            phase="initial",
+            tier="reasoner",
+            model_ref="openai-codex/gpt-5.5",
+            thinking="low",
+        ),
+        messages=[Message(role="user", content="继续解决问题")],
+        phase="initial",
+        user_message="继续解决问题",
+        thinking_override=None,
+        routing_overrides=None,
+        log_prefix="[test]",
+        skills="none",
+    )
+
+    assert err is None
+    assert raw == '{"decision":"wait"}'
+    assert final_selection.tier == "repair"
+    assert final_selection.model_ref == "openai-codex/gpt-5.4"
+    assert sleep_calls == []
+
+
+@pytest.mark.asyncio
 async def test_chat_with_retry_same_model_uses_retry_after_delay(monkeypatch):
     from core.config import Config
     from core.judgment import JudgmentLayer, ModelSelection
@@ -1590,6 +1992,88 @@ def test_assemble_context_failure_is_coalesced_and_backed_off(caplog):
     assert rounds_mod._assemble_context_failure_backoff_ms(2) == 2000
     assert rounds_mod._assemble_context_failure_backoff_ms(99) == 60000
     assert any("异常重复 x2" in rec.message for rec in caplog.records)
+
+
+def test_assemble_context_failure_with_active_task_records_workbench_recovery():
+    from core.judgment.decision import rounds as rounds_mod
+
+    active_task = SimpleNamespace(id=42)
+    output = rounds_mod._assemble_context_failure_output(
+        exc=TypeError("episodic signature mismatch"),
+        repeat_count=2,
+        judgment_signals=None,
+        hard_boundaries=[],
+        active_task=active_task,
+        registry=_WorkbenchRegistry(),
+    )
+
+    assert output.decision == "act"
+    assert output.chosen_action_id == "task.workbench"
+    assert output.params["workbench"]["recovery_state"] == "recovering_from_context_assembly_failure"
+    assert "episodic signature mismatch" in output.params["workbench"]["evidence"][0]
+    assert "读取最新异常栈" in output.params["workbench"]["next_verification"]
+    assert output.model_strategy["next_idle_gap_ms"] == 2000
+
+
+def test_assemble_context_failure_without_workbench_keeps_safe_wait():
+    from core.judgment.decision import rounds as rounds_mod
+
+    output = rounds_mod._assemble_context_failure_output(
+        exc=RuntimeError("context failed"),
+        repeat_count=1,
+        judgment_signals=None,
+        hard_boundaries=[],
+        active_task=SimpleNamespace(id=7),
+        registry=None,
+    )
+
+    assert output.decision == "wait"
+    assert "上下文组装异常" in output.rationale
+
+
+def test_llm_unavailable_with_active_task_records_workbench_recovery():
+    from core.judgment.decision import rounds as rounds_mod
+
+    output = rounds_mod._llm_unavailable_output(
+        err="ConnectError('')",
+        active_task=SimpleNamespace(id=3485),
+        registry=_WorkbenchRegistry(),
+    )
+
+    assert output.decision == "act"
+    assert output.chosen_action_id == "task.workbench"
+    assert output.params["workbench"]["recovery_state"] == "recovering_from_llm_unavailable"
+    assert "ConnectError" in output.params["workbench"]["evidence"][1]
+    assert "provider 健康状态" in output.params["workbench"]["next_verification"]
+    assert output.model_strategy["next_idle_gap_ms"] == 2000
+
+
+def test_llm_unavailable_reply_only_keeps_inner_loop_wait():
+    from core.judgment.decision import rounds as rounds_mod
+
+    output = rounds_mod._llm_unavailable_output(
+        err="ConnectError('')",
+        active_task=SimpleNamespace(id=3485),
+        registry=None,
+        reply_only=True,
+    )
+
+    assert output.decision == "wait"
+    assert output.chosen_action_id == ""
+    assert "[inner-loop] LLM 不可用" in output.rationale
+
+
+def test_sync_prompt_capsule_clears_stale_assembler_capsule():
+    from core.judgment.decision import rounds as rounds_mod
+
+    deps = SimpleNamespace(
+        executor=SimpleNamespace(_last_prompt_capsule=""),
+        assembler=SimpleNamespace(_last_context_compression_capsule="STALE_CAPSULE"),
+    )
+
+    rounds_mod._sync_prompt_capsule(cast("Any", deps))
+
+    assert deps.assembler._last_context_compression_capsule == ""
 
 
 def test_model_routing_section_no_longer_exposes_implicit_reader_default():
@@ -2051,6 +2535,97 @@ async def test_decide_continue_uses_passed_thinking_override():
     assert layer.last_call_meta["thinking"] == "low"
 
 
+async def test_decide_continue_raises_user_task_followup_to_medium_thinking():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        def __init__(self) -> None:
+            self.last_thinking_override: str | None = None
+
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            self.last_thinking_override = thinking_override
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    provider = _DummyProvider()
+    layer = JudgmentLayer(provider, ToolRegistry(), cfg)
+    layer._assembler._last_context_text = "cached context"
+
+    out = await layer.decide_continue(
+        [{"tool": "file.read", "params": {"path": "/tmp/a.py"}, "result": "ok"}],
+        user_message="不对，继续分析原因",
+        active_task=SimpleNamespace(id=7),
+        prefer_tier="reasoner",
+    )
+
+    assert out.decision == "wait"
+    assert provider.last_thinking_override == "medium"
+    assert layer.last_call_meta["thinking"] == "medium"
+
+
+async def test_decide_continue_raises_autonomous_active_task_to_medium_thinking():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        def __init__(self) -> None:
+            self.last_thinking_override: str | None = None
+
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            self.last_thinking_override = thinking_override
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    provider = _DummyProvider()
+    layer = JudgmentLayer(provider, ToolRegistry(), cfg)
+    layer._assembler._last_context_text = "cached context"
+
+    out = await layer.decide_continue(
+        [{"tool": "file.read", "params": {"path": "/tmp/a.py"}, "result": "ok"}],
+        user_message="",
+        active_task=SimpleNamespace(id=8),
+        prefer_tier="reasoner",
+        thinking_override="low",
+    )
+
+    assert out.decision == "wait"
+    assert provider.last_thinking_override == "medium"
+    assert layer.last_call_meta["thinking"] == "medium"
+
+
 async def test_decide_continue_updates_last_call_meta_after_fallback():
     from core.config import Config
     from core.judgment import JudgmentLayer, ModelSelection
@@ -2264,6 +2839,20 @@ def test_fallback_reply_for_user_describes_waiting_state():
     assert "等用户补充路径后重新验证目录" in reply
 
 
+def test_clip_signal_text_honors_limit_and_compacts_whitespace():
+    from core.loop.shared.logging import _clip_signal_text, _summarize_state_delta
+
+    assert _clip_signal_text("a\n  b\tc", 20) == "a b c"
+    clipped = _clip_signal_text("A" * 50, 12)
+    assert clipped == "A" * 9 + "..."
+    tiny = _clip_signal_text("ABCDE", 2)
+    assert tiny == "AB"
+
+    state = _summarize_state_delta({"blob": "B" * 200, "count": 1}, limit=80)
+    assert len(state) <= 80
+    assert state.endswith("...")
+
+
 def test_fallback_reply_for_user_uses_real_error_instead_of_background_ack():
     from core.loop.shared.logging import _fallback_reply_for_user
     from tools.registry import ToolResult
@@ -2276,6 +2865,75 @@ def test_fallback_reply_for_user_uses_real_error_instead_of_background_ack():
     assert "路径不存在" in reply
     assert "后台继续处理" not in reply
     assert "我这轮" not in reply
+
+
+def test_fallback_reply_for_user_uses_recovery_next_step_from_tool_result():
+    from core.loop.shared.logging import _fallback_reply_for_user
+    from tools.registry import ToolResult
+
+    action = _judgment_output(decision="act", chosen_action_id="task.workbench")
+    result = ToolResult(
+        summary="工具参数缺失: task.workbench requires workbench",
+        error="ToolInputInvalid",
+        skipped=True,
+        state_delta={
+            "recovery_next_step": "按 task.workbench 的 manifest 重新调用工具；补齐必填参数 workbench。",
+        },
+    )
+
+    reply = _fallback_reply_for_user(action, result, None)
+    assert reply.startswith("这轮工具执行失败")
+    assert "工具参数缺失" in reply
+    assert "补齐必填参数 workbench" in reply
+
+
+def test_fallback_reply_for_user_clips_long_recovery_next_step():
+    from core.loop.shared.logging import _fallback_reply_for_user
+    from tools.registry import ToolResult
+
+    action = _judgment_output(decision="act", chosen_action_id="shell.run")
+    result = ToolResult(
+        summary="执行超时：" + "S" * 500,
+        error="timeout",
+        state_delta={
+            "recovery_next_step": "先检查短命令输出。" + ("N" * 500),
+        },
+    )
+
+    reply = _fallback_reply_for_user(action, result, None)
+    assert len(reply) < 260
+    assert "S" * 200 not in reply
+    assert "N" * 200 not in reply
+    assert "先检查短命令输出" in reply
+
+
+def test_fallback_reply_for_user_uses_next_verification_from_completion_blocker():
+    from core.loop.shared.logging import _fallback_reply_for_user
+    from store.task import Task
+    from tools.registry import ToolResult
+
+    action = _judgment_output(decision="act", chosen_action_id="task.complete")
+    result = ToolResult(
+        summary="任务皮层仍有未验证的下一步。",
+        error="WorkbenchVerificationPending",
+        skipped=True,
+        state_delta={
+            "next_verification": "运行 pytest 验证 task.complete 未执行 workbench 下一步时会被拦截。",
+        },
+    )
+    task = Task(
+        id=9,
+        title="旧任务",
+        status="in_progress",
+        priority="normal",
+        created_at="2026-05-15T14:00:00+00:00",
+        next_step="旧的 next_step 不应优先",
+    )
+
+    reply = _fallback_reply_for_user(action, result, task)
+    assert reply.startswith("这轮工具执行失败")
+    assert "运行 pytest 验证" in reply
+    assert "旧的 next_step" not in reply
 
 
 def test_fallback_reply_for_user_does_not_echo_tool_summary_on_success():
@@ -2292,7 +2950,7 @@ def test_fallback_reply_for_user_does_not_echo_tool_summary_on_success():
 
 
 @pytest.mark.asyncio
-async def test_finalize_tick_user_reply_does_not_synthesize_progress_reply_on_nonfailure_reply_only_empty():
+async def test_finalize_tick_user_reply_falls_back_when_reply_only_empty_for_user_message():
     from core.loop.tick import _finalize_tick_user_reply
     from tools.registry import ToolResult
 
@@ -2339,8 +2997,103 @@ async def test_finalize_tick_user_reply_does_not_synthesize_progress_reply_on_no
         chat_id=None,
     )
 
-    assert action.reply_to_user == ""
+    assert action.reply_to_user.startswith("我已完成本轮处理")
+    assert "已拿到证据" in action.reply_to_user
     assert store.messages == []
+
+
+@pytest.mark.asyncio
+async def test_finalize_tick_user_reply_uses_medium_thinking_for_active_task_reply():
+    from core.loop.tick import _finalize_tick_user_reply
+    from tools.registry import ToolResult
+
+    captured: dict[str, Any] = {}
+
+    class _Judgment:
+        async def decide_continue(self, *args, **kwargs):
+            captured.update(kwargs)
+            return _judgment_output(decision="wait", reply_to_user="已根据执行结果回复。")
+
+    class _Store:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str, str]] = []
+
+        async def get_fact(self, key: str):
+            return "", False
+
+        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
+            self.messages.append((role, content, chat_id))
+            return len(self.messages)
+
+    cfg = cast("Any", SimpleNamespace(
+        thinking="off",
+        loop=SimpleNamespace(chat_thinking="low", autonomous_thinking="minimal"),
+    ))
+    store = _Store()
+    loop = cast("Any", SimpleNamespace(
+        _cfg=cfg,
+        _judgment=_Judgment(),
+        _pending_routing_overrides=None,
+        _task_store=store,
+    ))
+    action = _judgment_output(decision="act", chosen_action_id="file.read", rationale="已读取关键文件。")
+    result = ToolResult(summary="读取完成")
+
+    await _finalize_tick_user_reply(
+        loop,
+        action,
+        result,
+        tool_history=[{"tool": "file.read", "params": {"path": "/tmp/a"}, "result": "读取完成"}],
+        user_message="继续",
+        active_task=SimpleNamespace(id=7, next_step="解释结果"),
+        chat_id=None,
+    )
+
+    assert captured["reply_only"] is True
+    assert captured["thinking_override"] == "medium"
+    assert action.reply_to_user == "已根据执行结果回复。"
+
+
+@pytest.mark.asyncio
+async def test_finalize_tick_user_reply_keeps_direct_pause_reply_without_reply_only():
+    from core.loop.tick import _finalize_tick_user_reply
+    from tools.registry import ToolResult
+
+    class _Judgment:
+        async def decide_continue(self, *args, **kwargs):
+            raise AssertionError("direct pause reply should not invoke reply-only continuation")
+
+    class _Store:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str, str]] = []
+
+        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
+            self.messages.append((role, content, chat_id))
+            return len(self.messages)
+
+    store = _Store()
+    loop = cast("Any", SimpleNamespace(
+        _judgment=_Judgment(),
+        _task_store=store,
+    ))
+    action = _judgment_output(
+        decision="pause",
+        rationale="已经得到结论",
+        reply_to_user="这是直接答复。",
+    )
+
+    await _finalize_tick_user_reply(
+        loop,
+        action,
+        ToolResult(summary=""),
+        tool_history=[],
+        user_message="你好",
+        active_task=None,
+        chat_id="chat-1",
+    )
+
+    assert action.reply_to_user == "这是直接答复。"
+    assert store.messages == [("assistant", "这是直接答复。", "chat-1")]
 
 
 @pytest.mark.asyncio
@@ -2393,6 +3146,68 @@ async def test_finalize_tick_user_reply_keeps_disaster_fallback_for_reply_only_f
 
     assert action.reply_to_user.startswith("我已完成本轮处理")
     assert "状态:" not in action.reply_to_user
+
+
+@pytest.mark.asyncio
+async def test_finalize_tick_user_reply_rejects_internal_json_payload():
+    from core.loop.tick import _finalize_tick_user_reply
+    from tools.registry import ToolResult
+
+    leaked_reply = (
+        '{"command":"cd /root/lingzhou && git status","timeout":30,"workdir":"/root/lingzhou"}\n'
+        '{"tool":"shell.run","status":"ok","summary":"done"}'
+    )
+
+    class _Judgment:
+        async def decide_continue(self, *args, **kwargs):
+            return _judgment_output(
+                decision="wait",
+                rationale="已根据执行结果组织回复。",
+                reply_to_user=leaked_reply,
+            )
+
+    class _Store:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str, str]] = []
+
+        async def get_fact(self, key: str):
+            return "", False
+
+        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
+            self.messages.append((role, content, chat_id))
+            return len(self.messages)
+
+    cfg = cast("Any", SimpleNamespace(
+        thinking="off",
+        loop=SimpleNamespace(chat_thinking="low", autonomous_thinking="minimal"),
+    ))
+    store = _Store()
+    loop = cast("Any", SimpleNamespace(
+        _cfg=cfg,
+        _judgment=_Judgment(),
+        _pending_routing_overrides=None,
+        _task_store=store,
+    ))
+    action = _judgment_output(
+        decision="act",
+        chosen_action_id="shell.run",
+        rationale="已经完成日志统计并形成结论。",
+    )
+    result = ToolResult(summary="shell.run exit=0 chars=120")
+
+    await _finalize_tick_user_reply(
+        loop,
+        action,
+        result,
+        tool_history=[{"tool": "shell.run", "params": {"command": "git status"}, "result": "done"}],
+        user_message="继续",
+        active_task=SimpleNamespace(id=8, next_step="总结日志结论"),
+        chat_id=None,
+    )
+
+    assert action.reply_to_user.startswith("我已完成本轮处理")
+    assert '{"command"' not in action.reply_to_user
+    assert '{"tool"' not in action.reply_to_user
 
 
 @pytest.mark.asyncio
@@ -2462,6 +3277,18 @@ def test_should_continue_within_tick_for_autonomous_act():
             skipped=True,
             error="ToolInputInvalid",
             state_delta={"retry_params_template": {"workbench": {}}},
+        ),
+    ) is True
+    assert _should_continue_within_tick(
+        _judgment_output(decision="act", chosen_action_id="task.wait"),
+        user_message="继续",
+        has_active_task=True,
+        registry=_tool_registry(),
+        result=ToolResult(
+            summary="external wait 缺少 wait_key 时必须写清 next_step",
+            skipped=True,
+            error="WaitConditionAmbiguous",
+            state_delta={"tool_input_invalid": True},
         ),
     ) is True
     assert _should_continue_within_tick(
@@ -2901,6 +3728,8 @@ def test_continue_context_rebuilds_budgeted_working_set_not_raw_prompt():
     assert "RAW_PREVIOUS_PROMPT" not in text
     assert "WM_FACT" in text
     assert "TOOL_CATALOG" in text
+    assert "Continue 收敛契约" in text
+    assert "避免对同一路径、同一查询、同一命令做低增量重复" in text
     assert "结构化最近工具结果(JSON)" in text
 
 
@@ -2956,6 +3785,107 @@ def test_continue_context_reuses_cached_compression_capsule():
     assert "结构化最近工具结果(JSON)" in text
 
 
+def test_continue_context_clamps_oversized_compression_capsule_to_reserve_budget():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    layer = JudgmentLayer(_DummyProvider(), ToolRegistry(), cfg)
+    asm = layer._assembler
+    asm._last_context_budget = 1600
+    asm._last_context_compression_capsule = (
+        "[上下文超限压缩胶囊]\n"
+        "next_verification=保留这个关键恢复动作\n"
+        + ("外围胶囊材料 " * 5000)
+        + "\ncompletion_checks=保留尾部检查"
+    )
+
+    text = asm._build_continue_context(
+        [{"tool": "file.read", "params": {"path": "/tmp/a.py"}, "result": "ok"}],
+        user_message="继续",
+        reply_only=False,
+        wm_delta=None,
+    )
+
+    assert "上下文超限压缩胶囊" in text
+    assert "next_verification=保留这个关键恢复动作" in text
+    assert "completion_checks=保留尾部检查" in text
+    assert "chars omitted" in text
+    assert "结构化最近工具结果(JSON)" in text
+    assert len(text) < 12000
+
+
+def test_continue_context_compacts_wm_delta_block():
+    from core.config import Config
+    from core.judgment import JudgmentLayer
+    from tools.registry import ToolRegistry
+
+    class _DummyProvider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://example.invalid/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            }
+        },
+        "model": "bailian/qwen3.6-plus",
+        "temperature": 0.7,
+        "timeout": 60.0,
+    })
+
+    asm = JudgmentLayer(_DummyProvider(), ToolRegistry(), cfg)._assembler
+    asm._judgment_template = "{{user_message}}\n{{wm_section}}\n{{tools_section}}"
+    asm._last_context_sections = {
+        "user_message": "",
+        "wm_section": "WM_FACT",
+        "tools_section": "TOOL_CATALOG",
+    }
+    asm._last_context_budget = 6000
+    asm._last_context_compression_capsule = ""
+
+    text = asm._build_continue_context(
+        [{"tool": "file.read", "params": {"path": "/tmp/a.py"}, "result": "ok"}],
+        user_message="",
+        reply_only=False,
+        wm_delta=[
+            {"kind": f"k{i}", "priority": 0.5, "content": "X" * 1000}
+            for i in range(12)
+        ],
+    )
+
+    assert "已压缩早期 4 条本轮 WM 更新" in text
+    assert "k0" not in text
+    assert "k11" in text
+    assert "X" * 500 not in text
+
+
 def test_reply_only_context_omits_tool_catalog_from_working_set():
     from core.config import Config
     from core.judgment import JudgmentLayer
@@ -3001,6 +3931,7 @@ def test_reply_only_context_omits_tool_catalog_from_working_set():
     assert "WM_FACT" in text
     assert "TOOL_CATALOG" not in text
     assert "禁止再调用任何工具" in text
+    assert "Continue 收敛契约" not in text
 
 
 def test_structured_tool_history_window_clips_huge_summary_and_state_delta():
@@ -3023,6 +3954,37 @@ def test_structured_tool_history_window_clips_huge_summary_and_state_delta():
     assert json.loads(json_block)
     assert len(json_block) < 2000
     assert len(text_block) < 1200
+
+
+def test_structured_tool_history_window_preserves_recovery_state_delta_first():
+    from core.judgment.output import _structured_tool_history_window
+
+    state_delta = {
+        **{f"field_{i}": f"value-{i}" for i in range(20)},
+        "has_more": True,
+        "truncated": True,
+        "next_params": {"path": "/tmp/big.txt", "start": 20, "max_chars": 20},
+        "recovery_next_step": "继续读取同一文件剩余内容：file.read path=/tmp/big.txt start=20 max_chars=20。",
+    }
+    tool_history = [
+        {
+            "tool": "file.read",
+            "params": {"path": "/tmp/big.txt", "max_chars": 20},
+            "status": "ok",
+            "summary": "x" * 20,
+            "state_delta": state_delta,
+        },
+    ]
+
+    json_block, text_block = _structured_tool_history_window(tool_history)
+    payload = json.loads(json_block)[0]["state_delta"]
+
+    assert "recovery_next_step" in payload
+    assert "next_params" in payload
+    assert payload["next_params"]["start"] == "20"
+    assert payload["truncated"] == "True"
+    assert "recovery_next_step" in text_block
+    assert "field_19" not in payload
 
 
 async def test_decide_continue_keeps_complex_act_without_runtime_rewrite():
@@ -3162,6 +4124,154 @@ async def test_sync_task_progress_state_preserves_explicit_current_step_from_sta
         assert updated is not None
         assert updated.current_step == "收到新迁移指令"
         assert updated.next_step == "开始盘点旧运行时记忆"
+        await store.close()
+
+
+async def test_sync_task_progress_state_promotes_recovery_next_step_from_state_delta():
+    from core.loop.task.runtime import _sync_task_progress_state
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "runtime-recovery-step.db")
+        await store.open()
+        task_id = await store.add_task("恢复任务", goal="验证恢复下一步同步", next_step="执行旧步骤")
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        updated = await _sync_task_progress_state(
+            store,
+            task,
+            previous_next_step="执行旧步骤",
+            action=_judgment_output(decision="act", chosen_action_id="task.complete", next_step=""),
+            progressful=True,
+            state_delta={
+                "completion_blocked": True,
+                "recovery_next_step": "先执行 shell.run 验证测试，再重新完成任务。",
+            },
+        )
+
+        assert updated is not None
+        assert updated.current_step == "执行旧步骤"
+        assert updated.next_step == "先执行 shell.run 验证测试，再重新完成任务。"
+        await store.close()
+
+
+async def test_sync_task_progress_state_uses_next_verification_when_no_recovery_step():
+    from core.loop.task.runtime import _sync_task_progress_state
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "runtime-next-verification.db")
+        await store.open()
+        task_id = await store.add_task("验证任务", goal="验证 next_verification 同步", next_step="")
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        updated = await _sync_task_progress_state(
+            store,
+            task,
+            previous_next_step="",
+            action=_judgment_output(decision="act", chosen_action_id="task.complete", next_step=""),
+            progressful=False,
+            state_delta={
+                "next_verification": "读取最新 loop 日志确认 active_idle_gap 生效。",
+            },
+        )
+
+        assert updated is not None
+        assert updated.current_step == ""
+        assert updated.next_step == "读取最新 loop 日志确认 active_idle_gap 生效。"
+        await store.close()
+
+
+async def test_sync_task_progress_state_uses_nested_cortex_next_verification():
+    from core.loop.task.runtime import _sync_task_progress_state
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "runtime-cortex-next-verification.db")
+        await store.open()
+        task_id = await store.add_task("工作台任务", goal="验证 workbench next_verification 同步", next_step="旧验证")
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        updated = await _sync_task_progress_state(
+            store,
+            task,
+            previous_next_step="旧验证",
+            action=_judgment_output(decision="act", chosen_action_id="task.workbench", next_step=""),
+            progressful=True,
+            state_delta={
+                "cortex": {
+                    "domain": "runtime-loop",
+                    "next_verification": "下一轮先综合本 tick 工具结果，再选择最高信息增量验证动作。",
+                }
+            },
+        )
+
+        assert updated is not None
+        assert updated.current_step == "旧验证"
+        assert updated.next_step == "下一轮先综合本 tick 工具结果，再选择最高信息增量验证动作。"
+        await store.close()
+
+
+async def test_sync_task_progress_state_workbench_overrides_stale_next_step():
+    from core.loop.task.runtime import _sync_task_progress_state
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "runtime-workbench-overrides-stale.db")
+        await store.open()
+        task_id = await store.add_task("工作台任务", goal="验证 workbench 权威下一步", next_step="继续重复旧日志读取")
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        updated = await _sync_task_progress_state(
+            store,
+            task,
+            previous_next_step="旧的启动步骤",
+            action=_judgment_output(decision="act", chosen_action_id="task.workbench", next_step=""),
+            progressful=True,
+            state_delta={
+                "cortex": {
+                    "domain": "runtime-loop",
+                    "next_verification": "改用 shell.run 查询最近 10 条 runs，确认重复来源。",
+                }
+            },
+        )
+
+        assert updated is not None
+        assert updated.current_step == "旧的启动步骤"
+        assert updated.next_step == "改用 shell.run 查询最近 10 条 runs，确认重复来源。"
+        await store.close()
+
+
+async def test_sync_task_progress_state_completion_blocker_overrides_stale_next_step():
+    from core.loop.task.runtime import _sync_task_progress_state
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "runtime-completion-blocker-overrides-stale.db")
+        await store.open()
+        task_id = await store.add_task("完成门任务", goal="验证阻塞恢复下一步", next_step="继续旧完成尝试")
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        updated = await _sync_task_progress_state(
+            store,
+            task,
+            previous_next_step="旧的验证步骤",
+            action=_judgment_output(decision="act", chosen_action_id="task.complete", next_step=""),
+            progressful=False,
+            state_delta={
+                "completion_blocked": True,
+                "next_verification": "先执行 pytest 验证 workbench 下一步，再重新 complete。",
+            },
+        )
+
+        assert updated is not None
+        assert updated.current_step == ""
+        assert updated.next_step == "先执行 pytest 验证 workbench 下一步，再重新 complete。"
         await store.close()
 
 

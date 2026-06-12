@@ -581,6 +581,7 @@ async def _assemble_context(
         all_skills=all_skills,
         config_with_breaker=config_with_breaker,
         effective_registry=registry_override or assembler._registry,
+        effective_thinking=effective_thinking,
         runtime_life_snapshot=runtime_life_snapshot,
     )
     ctx = {**task_sections, **memory_sections, **state_sections}

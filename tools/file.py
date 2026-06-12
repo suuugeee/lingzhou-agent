@@ -32,6 +32,121 @@ from tools.registry import (
 _log = logging.getLogger("lingzhou.tools.file")
 
 
+def _nearest_existing_parent(path: Path) -> Path | None:
+    current = path.parent if path.name else path
+    for candidate in [current, *current.parents]:
+        try:
+            if candidate.exists() and candidate.is_dir():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _missing_path_result(path: Path, *, expected: str) -> ToolResult:
+    parent = _nearest_existing_parent(path)
+    recovery_next_step = (
+        f"先用 file.list 列出最近存在的父目录 {parent}，确认真实路径后再读取/列出目标。"
+        if parent is not None
+        else "先用 file.list 列出工作区或仓库根目录，确认真实路径后再读取/列出目标。"
+    )
+    state_delta = {
+        "tool_input_invalid": True,
+        "recovery_reason": "path_not_found",
+        "recovery_next_step": recovery_next_step,
+        "suggested_tools": ["file.list", "shell.run"],
+        "missing_path": str(path),
+        "expected": expected,
+    }
+    if parent is not None:
+        state_delta["nearest_existing_parent"] = str(parent)
+    summary = f"路径不存在: {path}\n恢复建议: {recovery_next_step}"
+    return ToolResult(
+        summary=summary,
+        error="FileNotFound",
+        state_delta=state_delta,
+        metadata=tool_metadata(
+            "file.path_missing",
+            f"file.path_missing path={path} parent={parent or ''} expected={expected}",
+            path=str(path),
+            nearest_existing_parent=str(parent) if parent is not None else "",
+            expected=expected,
+        ),
+    )
+
+
+def _clip_read_text_with_recovery(
+    *,
+    text: str,
+    path: Path,
+    max_chars: int | None,
+    state_delta: dict[str, Any],
+    has_range: bool,
+    start: int,
+    end: int,
+    has_line_range: bool,
+    line_offset: int,
+    line_limit: int,
+) -> tuple[str, int | None, bool, dict[str, Any]]:
+    if max_chars is None:
+        return text, None, False, {}
+
+    max_chars = max(0, max_chars)
+    before_clip_chars = len(text)
+    if before_clip_chars <= max_chars:
+        return text[:max_chars], max_chars, False, {}
+
+    next_params: dict[str, Any]
+    state_delta.update({
+        "has_more": True,
+        "truncated": True,
+        "truncation_reason": "max_chars",
+        "returned_chars": max_chars,
+        "available_chars_in_window": before_clip_chars,
+    })
+
+    if has_range:
+        next_start = start + max_chars
+        next_params = {"path": str(path), "start": next_start, "end": end, "max_chars": max_chars}
+        state_delta.update({
+            "next_start": next_start,
+            "next_end": end,
+            "next_params": next_params,
+            "recovery_next_step": (
+                f"继续读取同一文件剩余字符窗口：file.read path={path} "
+                f"start={next_start} end={end} max_chars={max_chars}。"
+            ),
+        })
+    elif has_line_range:
+        next_params = {
+            "path": str(path),
+            "offset": line_offset + 1,
+            "limit": line_limit,
+            "max_chars": before_clip_chars,
+        }
+        state_delta.update({
+            "next_params": next_params,
+            "recovery_next_step": (
+                "本次行窗口被 max_chars 截断；先扩大 max_chars 或缩小 limit，"
+                f"再读取同一行窗口确认完整内容：file.read path={path} "
+                f"offset={line_offset + 1} limit={line_limit} max_chars={before_clip_chars}。"
+            ),
+        })
+    else:
+        next_start = max_chars
+        next_params = {"path": str(path), "start": next_start, "max_chars": max_chars}
+        state_delta.update({
+            "next_start": next_start,
+            "next_params": next_params,
+            "recovery_next_step": (
+                f"继续读取同一文件剩余内容：file.read path={path} "
+                f"start={next_start} max_chars={max_chars}。"
+            ),
+        })
+
+    return text[:max_chars], max_chars, True, next_params
+
+
 @tool(ToolManifest(
     name="file.list",
     description="列出目录内容。支持 shallow list，用于替代 shell.run 的 ls/find 场景。",
@@ -50,7 +165,7 @@ async def file_list(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     include_hidden = bool(params.get("include_hidden", False))
 
     if not path.exists():
-        return ToolResult(summary=f"路径不存在: {path}", error="FileNotFound")
+        return _missing_path_result(path, expected="directory")
     if not path.is_dir():
         return ToolResult(summary=f"不是目录: {path}", error="NotADirectory")
 
@@ -113,7 +228,7 @@ async def file_read(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     has_line_range = ("offset" in params) or ("limit" in params)
 
     if not path.exists():
-        return ToolResult(summary=f"文件不存在: {path}", error="FileNotFound")
+        return _missing_path_result(path, expected="file")
     if not path.is_file():
         return ToolResult(summary=f"不是文件: {path}", error="NotAFile", skipped=True)
 
@@ -123,6 +238,8 @@ async def file_read(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
         start = 0
         end = total
+        line_offset = 0
+        line_limit = 50
 
         read_state_delta: dict[str, Any] = {}
         if has_line_range:
@@ -148,8 +265,18 @@ async def file_read(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             end = int(end_raw) if end_raw is not None else total
             text = text[start:end]
 
-        if max_chars is not None:
-            text = text[:max(0, max_chars)]
+        text, max_chars, truncated_by_max_chars, next_params = _clip_read_text_with_recovery(
+            text=text,
+            path=path,
+            max_chars=max_chars,
+            state_delta=read_state_delta,
+            has_range=has_range,
+            start=start,
+            end=end,
+            has_line_range=has_line_range,
+            line_offset=line_offset,
+            line_limit=line_limit,
+        )
 
         log_summary = (
             f"file.read path={path} chars={len(text)}"
@@ -171,6 +298,8 @@ async def file_read(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 start=start,
                 end=end,
                 max_chars=max_chars,
+                truncated=truncated_by_max_chars,
+                next_params=next_params,
             ),
         )
     except Exception as e:
