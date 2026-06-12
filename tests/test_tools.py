@@ -30,6 +30,18 @@ def _test_soul_cfg() -> Any:
         )
     )
 
+
+class _NoToolRegistry:
+    def get(self, name: str):
+        return None
+
+
+def _task_tool_ctx(store: Any):
+    ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
+    ctx.registry = _NoToolRegistry()
+    return ctx
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 新增工具测试（file.edit / skill_ops / exec 覆盖）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -246,10 +258,6 @@ async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
     from store.task import TaskStore
     from tools.task import task_complete
 
-    class _Registry:
-        def get(self, name: str):
-            return None
-
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         store = TaskStore(root / "action-first-complete.db")
@@ -266,8 +274,7 @@ async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
                     }
                 },
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             no_evidence = await task_complete({"task_id": task_id}, ctx)
             assert no_evidence.skipped is True
@@ -307,10 +314,6 @@ async def _task_complete_blocks_unresolved_workbench_next_verification():
     from store.task import TaskStore
     from tools.task import task_complete
 
-    class _Registry:
-        def get(self, name: str):
-            return None
-
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         store = TaskStore(root / "workbench-verification-complete.db")
@@ -333,8 +336,7 @@ async def _task_complete_blocks_unresolved_workbench_next_verification():
                 status="in_progress",
                 result_json={"cortex": cortex},
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             await store.add_run(
                 task_id=task_id,
@@ -395,10 +397,6 @@ async def _task_complete_blocks_real_workbench_state_delta_next_verification():
     from store.task import TaskStore
     from tools.task import task_complete
 
-    class _Registry:
-        def get(self, name: str):
-            return None
-
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         store = TaskStore(root / "real-workbench-state-delta-complete.db")
@@ -418,8 +416,7 @@ async def _task_complete_blocks_real_workbench_state_delta_next_verification():
                 status="in_progress",
                 result_json={"cortex": cortex},
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             await store.add_run(
                 task_id=task_id,
@@ -460,10 +457,6 @@ async def _task_complete_blocks_external_workbench_next_verification():
     from store.task import TaskStore
     from tools.task import task_complete
 
-    class _Registry:
-        def get(self, name: str):
-            return None
-
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         store = TaskStore(root / "external-workbench-verification-complete.db")
@@ -487,8 +480,7 @@ async def _task_complete_blocks_external_workbench_next_verification():
                 current_step="已写入 workbench，等待执行 next_verification",
                 result_json={"cortex": cortex},
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             await store.add_run(
                 task_id=task_id,
@@ -534,10 +526,6 @@ async def _task_complete_blocks_english_workbench_next_verification():
     from store.task import TaskStore
     from tools.task import task_complete
 
-    class _Registry:
-        def get(self, name: str):
-            return None
-
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         store = TaskStore(root / "english-workbench-verification-complete.db")
@@ -558,8 +546,7 @@ async def _task_complete_blocks_english_workbench_next_verification():
                 current_step="已写入 workbench，等待执行英文 next_verification",
                 result_json={"cortex": cortex},
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             await store.add_run(
                 task_id=task_id,
@@ -596,10 +583,6 @@ async def _task_complete_blocks_semantic_memory_next_verification_until_memory_w
     from store.task import TaskStore
     from tools.task import task_complete
 
-    class _Registry:
-        def get(self, name: str):
-            return None
-
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         store = TaskStore(root / "semantic-memory-workbench-verification-complete.db")
@@ -619,8 +602,7 @@ async def _task_complete_blocks_semantic_memory_next_verification_until_memory_w
                 status="in_progress",
                 result_json={"cortex": cortex},
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             await store.add_run(
                 task_id=task_id,
@@ -666,10 +648,6 @@ async def _task_complete_blocks_self_drive_deferred_implementation_candidate():
     from store.task import TaskStore
     from tools.task import task_complete
 
-    class _Registry:
-        def get(self, name: str):
-            return None
-
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         store = TaskStore(root / "self-drive-deferred-implementation-complete.db")
@@ -700,8 +678,7 @@ async def _task_complete_blocks_self_drive_deferred_implementation_candidate():
                 status="in_progress",
                 result_json={"cortex": cortex},
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             await store.add_run(
                 task_id=task_id,
@@ -745,10 +722,6 @@ async def _task_complete_blocks_self_drive_growth_without_evidence():
     from store.task import TaskStore
     from tools.task import task_complete
 
-    class _Registry:
-        def get(self, name: str):
-            return None
-
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         store = TaskStore(root / "self-drive-growth-complete.db")
@@ -767,8 +740,7 @@ async def _task_complete_blocks_self_drive_growth_without_evidence():
                     }
                 },
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             no_probe = await task_complete({"task_id": task_id}, ctx)
             assert no_probe.skipped is True
