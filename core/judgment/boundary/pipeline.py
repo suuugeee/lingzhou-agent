@@ -15,6 +15,21 @@ _RECOVERY_GATE_ACTIVE_MARKER = re.compile(
 )
 
 
+def _coalesce_recovery_text(*candidates: str) -> str:
+    """从候选文本中取第一个有效恢复文本。"""
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if not value:
+            continue
+        if (value.startswith("（") and value.endswith("）")) or (value.startswith("(") and value.endswith(")")):
+            inner = value[1:-1].strip()
+            if inner in {"未指定", "未进入恢复状态", "无", "none", ""}:
+                continue
+            value = inner
+        return value
+    return ""
+
+
 def _extract_recovery_fields(context_text: str) -> tuple[str, str]:
     """从上下文提取 recovery_state 与 next_verification."""
     text = str(context_text or "")
@@ -39,10 +54,8 @@ def _extract_recovery_fields(context_text: str) -> tuple[str, str]:
         if next_match:
             next_verification = str(next_match.group(1) or "").strip()
 
-    if next_verification.startswith("（") and next_verification.endswith("）"):
-        next_verification = ""
-    if recovery_state.startswith("（") and recovery_state.endswith("）"):
-        recovery_state = ""
+    recovery_state = _coalesce_recovery_text(recovery_state)
+    next_verification = _coalesce_recovery_text(next_verification)
     return recovery_state, next_verification
 
 
@@ -114,7 +127,9 @@ def _enforce_recovery_continuation(
         return output
 
     recovery_state, next_verification = _extract_recovery_fields(context_text)
-    if not (recovery_state and next_verification):
+    if not next_verification:
+        next_verification = _coalesce_recovery_text(str(output.next_step or ""))
+    if not recovery_state:
         return output
 
     fallback = _build_recovery_fallback_action(next_verification, registry)

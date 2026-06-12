@@ -385,6 +385,43 @@ async def test_recovery_wait_does_not_trigger_for_default_placeholders() -> None
     assert out.decision == "wait"
 
 
+async def test_recovery_wait_falls_back_to_task_list_when_next_verification_placeholder() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "task.list" else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "problem_solving:\n"
+        "- recovery_state=recovering_from_previous_wait_loop\n"
+        "- next_verification=（未指定）\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(
+            decision="wait",
+            next_step="读取最近日志，确认 active_idle_gap 是否生效。",
+            rationale="当前无用户输入且无外部任务",
+        ),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "task.list"
+    assert out.params == {"status": "all", "limit": 8}
+
+
 def test_judgment_subpackages_importable() -> None:
     for name in ("core.judgment.boundary", "core.judgment.decision", "core.judgment.policy"):
         mod = importlib.import_module(name)
