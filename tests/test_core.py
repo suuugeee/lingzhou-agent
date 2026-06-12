@@ -620,6 +620,18 @@ def test_judgment_output_parse():
     assert out.model_strategy["next_phase_tier"] == "reader"
 
 
+def test_judgment_output_parse_tool_alias():
+    from core.judgment import JudgmentOutput
+
+    raw = (
+        '{"decision":"act","tool":"file.read","params":{"path":"/tmp/demo.txt"},"rationale":"兼容老 schema"}'
+    )
+    out = JudgmentOutput.from_llm(raw)
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "file.read"
+
+
 def test_judgment_output_parse_null_text_fields_as_empty():
     from core.judgment import JudgmentOutput
 

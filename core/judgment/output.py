@@ -353,7 +353,11 @@ class JudgmentOutput:
 
         return cls(
             decision=cls._coerce_text(data.get("decision", "wait")).lower(),
-            chosen_action_id=cls._coerce_text(data.get("chosen_action_id", "")),
+            chosen_action_id=cls._coerce_text(
+                data.get("chosen_action_id")
+                if data.get("chosen_action_id") is not None
+                else data.get("tool", data.get("action_id", ""))
+            ),
             params=dict(data.get("params") or {}),
             rationale=cls._coerce_text(data.get("rationale", "")),
             reflection=cls._coerce_text(data.get("reflection", "")),
