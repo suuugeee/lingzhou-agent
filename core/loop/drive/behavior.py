@@ -16,6 +16,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from core.contracts.execution import action_key_param
+from core.cortex import intent as cortex_intent
 from core.judgment.output import JudgmentOutput
 from tools.registry import tool_has_capability
 
@@ -47,95 +48,11 @@ _LOW_INCREMENT_TOOL_GROUPS = {
     "config.list_keys": "inventory",
     "memory.search": "memory_search",
 }
-_WAIT_MARKERS = (
-    "等待",
-    "外部输入",
-    "外部信号",
-    "下一次",
-    "到期",
-    "用户输入",
-    "wait ",
-    "external",
-    "signal",
-    "inbox",
-)
-_EVIDENCE_MARKERS = (
-    "读取",
-    "查询",
-    "自检",
-    "检查",
-    "核验",
-    "验证",
-    "查看",
-    "确认",
-    "核对",
-    "核实",
-    "排查",
-    "定位",
-    "列出",
-    "分析",
-    "梳理",
-    "追踪",
-    "对比",
-    "运行",
-    "执行",
-    "复现",
-    "修复",
-    "实现",
-    "测试",
-    "调试",
-    "调研",
-    "日志",
-    "schema",
-    "read",
-    "query",
-    "check",
-    "verify",
-    "diagnose",
-    "inspect",
-    "list",
-    "analyze",
-    "run",
-    "execute",
-    "fix",
-    "implement",
-    "test",
-    "debug",
-    "log",
-)
+_contains_evidence_intent = cortex_intent.contains_evidence_intent
 
 
 def _normalize_next_step(next_step: str) -> str:
-    """标准化 next_step 文本，减少标点干扰导致的关键词 miss。"""
-    cleaned = str(next_step or "").strip()
-    for ch in (
-        "　",
-        "	",
-        "\n",
-        "（",
-        "）",
-        "【",
-        "】",
-        "(",
-        ")",
-        "[",
-        "]",
-        "，",
-        "。",
-        ",",
-        ".",
-        ";",
-        "；",
-        "：",
-        ":",
-    ):
-        cleaned = cleaned.replace(ch, " ")
-    return " ".join(cleaned.split()).lower()
-
-
-def _contains_evidence_intent(text: str) -> bool:
-    normalized = _normalize_next_step(text)
-    return any(marker in normalized for marker in _EVIDENCE_MARKERS)
+    return cortex_intent.normalize_intent_text(next_step)
 
 
 class BehaviorTracker:
@@ -570,11 +487,10 @@ class BehaviorTracker:
         if not next_step:
             return False
         has_evidence = _contains_evidence_intent(next_step)
-        wait_text = _normalize_next_step(next_step)
         wait_streak = int(getattr(signals, "wait_streak", 0) or 0)
         if status == "waiting" and not has_evidence:
             return False
-        if any(marker in wait_text for marker in _WAIT_MARKERS) and not has_evidence:
+        if cortex_intent.contains_wait_dependency(next_step) and not has_evidence:
             return wait_streak >= 3
         return has_evidence
 

@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from core.cortex import action_first_completion_blockers
+from core.cortex import intent as cortex_intent
 from core.metabolic import (
     add_semantic_memory as metabolic_add_semantic_memory,
 )
@@ -40,6 +41,9 @@ from tools.registry import (
 )
 
 _log_task_ops = _logging.getLogger("lingzhou.task_ops")
+_contains_marker = cortex_intent.contains_marker
+_has_actionable_next_verification = cortex_intent.has_actionable_next_verification
+_verification_requests_semantic_memory = cortex_intent.requests_semantic_memory
 
 
 def _decision_basis(*parts: Any) -> str:
@@ -119,10 +123,6 @@ def _flatten_cortex_text(value: Any) -> str:
     return str(value or "")
 
 
-def _contains_marker(text: str, lowered: str, markers: tuple[str, ...]) -> bool:
-    return any(marker in text or marker in lowered for marker in markers)
-
-
 def _self_drive_unresolved_implementation_blockers(task: Any, recent_runs: list[Any], ctx: ToolContext) -> list[str]:
     """阻止自我进化任务把明确实现候选降级成“先记忆、以后再说”。"""
     if not _is_self_drive_growth_task(task):
@@ -163,55 +163,6 @@ def _self_drive_unresolved_implementation_blockers(task: Any, recent_runs: list[
     ]
 
 
-_ACTIONABLE_VERIFICATION_MARKERS = (
-    "定位",
-    "查找",
-    "读取",
-    "检查",
-    "验证",
-    "确认",
-    "测试",
-    "运行",
-    "修改",
-    "修复",
-    "实现",
-    "改进",
-    "编辑",
-    "推送",
-    "提交",
-    "沉淀",
-    "固化",
-    "写入语义",
-    "memory.add_semantic",
-    "run",
-    "rerun",
-    "execute",
-    "read",
-    "check",
-    "verify",
-    "test",
-    "inspect",
-    "fetch",
-    "search",
-    "open",
-    "pytest",
-    "git ",
-    "curl",
-)
-_NON_ACTIONABLE_VERIFICATION_MARKERS = (
-    "无需",
-    "不需要",
-    "进入低频观察",
-    "等待新用户",
-    "no need",
-    "not needed",
-    "wait for user",
-)
-_COMPLETED_VERIFICATION_PREFIXES = (
-    "已完成",
-    "完成该",
-    "already done",
-)
 _NON_VERIFICATION_TOOLS = {
     "memory.add_semantic",
     "memory.add_wm",
@@ -236,38 +187,12 @@ _VERIFICATION_TOOL_PREFIXES = (
     "memory.embed_backfill",
     "subagent.run",
 )
-_SEMANTIC_MEMORY_VERIFICATION_MARKERS = (
-    "memory.add_semantic",
-    "add_semantic",
-    "语义记忆",
-    "写入语义",
-    "沉淀",
-    "固化经验",
-    "semantic memory",
-)
 
 
 def _task_cortex(task: Any) -> dict[str, Any]:
     result_json = getattr(task, "result_json", None)
     cortex = result_json.get("cortex") if isinstance(result_json, dict) else None
     return cortex if isinstance(cortex, dict) else {}
-
-
-def _has_actionable_next_verification(text: str) -> bool:
-    value = str(text or "").strip()
-    if not value:
-        return False
-    lowered = value.lower()
-    if any(marker in lowered for marker in _NON_ACTIONABLE_VERIFICATION_MARKERS):
-        return False
-    if any(lowered.startswith(marker) for marker in _COMPLETED_VERIFICATION_PREFIXES):
-        return False
-    return _contains_marker(value, lowered, _ACTIONABLE_VERIFICATION_MARKERS)
-
-
-def _verification_requests_semantic_memory(next_verification: str) -> bool:
-    lowered = str(next_verification or "").lower()
-    return _contains_marker(next_verification, lowered, _SEMANTIC_MEMORY_VERIFICATION_MARKERS)
 
 
 def _is_successful_verification_run(run: Any, *, next_verification: str = "") -> bool:
