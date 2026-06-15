@@ -264,6 +264,16 @@ def _unresolved_workbench_verification_blockers(task: Any, recent_runs: list[Any
 async def _resolve_active_task(ctx: ToolContext):
     task = await ctx.get_active_task()
     if task is not None:
+        task_store = getattr(ctx, "task_store", None)
+        getter = getattr(task_store, "get_task_by_id", None)
+        raw_task_id = getattr(task, "id", None)
+        if getter is not None and raw_task_id is not None:
+            try:
+                refreshed = await getter(int(raw_task_id))
+                if refreshed is not None:
+                    return refreshed
+            except Exception:
+                pass
         return task
     task_store = getattr(ctx, "task_store", None)
     getter = getattr(task_store, "get_active", None)
@@ -789,7 +799,7 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             summary=f"任务 [{task.id}] 已完成，叙事已编译进语义记忆",
             evidence=f"task_id={task.id} skill_node={node_id}",
             resource_key=str(task.id),
-            state_delta={"task_status": "done", "compiled_skill": node_id},
+            state_delta={"task_id": task.id, "task_status": "done", "compiled_skill": node_id},
             metadata=_task_metadata(
                 task,
                 tool_name="task.complete",
@@ -802,7 +812,7 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         summary=f"任务 [{task.id}] 已完成",
         evidence=f"task_id={task.id}",
         resource_key=str(task.id),
-        state_delta={"task_status": "done"},
+        state_delta={"task_id": task.id, "task_status": "done"},
         metadata=_task_metadata(
             task,
             tool_name="task.complete",
@@ -939,7 +949,7 @@ async def task_fail(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         summary=f"任务 [{task.id}] 已标记失败: {reason}",
         evidence=f"task_id={task.id} reason={reason}",
         resource_key=str(task.id),
-        state_delta={"task_status": "failed", "reason": reason},
+        state_delta={"task_id": task.id, "task_status": "failed", "reason": reason},
         metadata=_task_metadata(
             task,
             tool_name="task.fail",

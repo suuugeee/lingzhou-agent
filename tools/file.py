@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
 
@@ -43,13 +44,51 @@ def _nearest_existing_parent(path: Path) -> Path | None:
     return None
 
 
+def _path_suggestions(path: Path, parent: Path | None, *, limit: int = 5) -> list[str]:
+    if parent is None:
+        return []
+    try:
+        rel_parts = path.relative_to(parent).parts
+    except ValueError:
+        rel_parts = ()
+    target_name = rel_parts[0] if rel_parts else path.name
+    try:
+        children = sorted(parent.iterdir(), key=lambda p: p.name.lower())
+    except OSError:
+        return []
+    if not children:
+        return []
+
+    names = [child.name for child in children]
+    matched = set(get_close_matches(target_name, names, n=limit, cutoff=0.35))
+    target_stem = Path(target_name).stem.lower()
+    if target_stem:
+        for child in children:
+            child_stem = child.stem.lower()
+            if target_stem in child_stem or child_stem in target_stem:
+                matched.add(child.name)
+            if len(matched) >= limit:
+                break
+
+    suggestions: list[str] = []
+    for child in children:
+        if child.name in matched:
+            suggestions.append(str(child))
+        if len(suggestions) >= limit:
+            break
+    return suggestions
+
+
 def _missing_path_result(path: Path, *, expected: str) -> ToolResult:
     parent = _nearest_existing_parent(path)
+    candidate_paths = _path_suggestions(path, parent)
     recovery_next_step = (
         f"先用 file.list 列出最近存在的父目录 {parent}，确认真实路径后再读取/列出目标。"
         if parent is not None
         else "先用 file.list 列出工作区或仓库根目录，确认真实路径后再读取/列出目标。"
     )
+    if candidate_paths:
+        recovery_next_step += f" 可优先核对候选路径: {', '.join(candidate_paths)}。"
     state_delta = {
         "tool_input_invalid": True,
         "recovery_reason": "path_not_found",
@@ -60,6 +99,8 @@ def _missing_path_result(path: Path, *, expected: str) -> ToolResult:
     }
     if parent is not None:
         state_delta["nearest_existing_parent"] = str(parent)
+    if candidate_paths:
+        state_delta["candidate_paths"] = candidate_paths
     summary = f"路径不存在: {path}\n恢复建议: {recovery_next_step}"
     return ToolResult(
         summary=summary,

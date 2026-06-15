@@ -169,6 +169,14 @@ def test_finalize_focus_task_clears_terminal_self_drive_attention():
     asyncio.run(_finalize_focus_task_clears_terminal_self_drive_attention())
 
 
+def test_terminal_task_result_cleanup_clears_attention_without_active_task():
+    asyncio.run(_terminal_task_result_cleanup_clears_attention_without_active_task())
+
+
+def test_terminal_task_fail_result_cleanup_clears_attention():
+    asyncio.run(_terminal_task_fail_result_cleanup_clears_attention())
+
+
 def test_finalize_focus_task_keeps_waiting_task_attention():
     asyncio.run(_finalize_focus_task_keeps_waiting_task_attention())
 
@@ -263,6 +271,102 @@ async def _finalize_focus_task_clears_terminal_self_drive_attention():
         assert "self_drive" not in remaining
         assert "bootstrap_identity" in remaining
 
+        current_focus, current_exists = await store.get_fact("focus:current_task_id")
+        assert current_exists is False or current_focus == ""
+        await store.close()
+
+
+async def _terminal_task_result_cleanup_clears_attention_without_active_task():
+    from core.judgment import JudgmentOutput
+    from core.loop.cycle.focus import claim_focus_task
+    from core.loop.tick.exec import _cleanup_terminal_result_attention
+    from memory.working import WMItem, WorkingMemory
+    from store.task import TaskStore
+    from tools.registry import ToolResult
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "focus-terminal-result-cleanup.db")
+        await store.open()
+        task_id = await store.add_task(
+            "刚完成的显式任务",
+            goal="即使 active_task 已丢失，也要清理旧锚点",
+            status="done",
+            source="self_drive",
+        )
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        wm = WorkingMemory(capacity=10)
+        wm.add(WMItem(kind="task_anchor", content="旧任务锚点", priority=0.95))
+        wm.add(WMItem(kind="self_drive", content="旧自驱信号", priority=0.9))
+        loop = SimpleNamespace(_task_store=store, _wm=wm)
+        await claim_focus_task(loop, task, clear_current=True)
+
+        cleaned = await _cleanup_terminal_result_attention(
+            loop,
+            JudgmentOutput(decision="act", chosen_action_id="task.complete"),
+            ToolResult(
+                summary="任务已完成",
+                resource_key=str(task_id),
+                state_delta={"task_id": task_id, "task_status": "done"},
+                metadata={"task_id": task_id},
+            ),
+            None,
+            None,
+        )
+
+        assert cleaned is None
+        remaining = {item["kind"] for item in wm.get_top(10)}
+        assert "task_anchor" not in remaining
+        assert "self_drive" not in remaining
+        current_focus, current_exists = await store.get_fact("focus:current_task_id")
+        assert current_exists is False or current_focus == ""
+        await store.close()
+
+
+async def _terminal_task_fail_result_cleanup_clears_attention():
+    from core.judgment import JudgmentOutput
+    from core.loop.cycle.focus import claim_focus_task
+    from core.loop.tick.exec import _cleanup_terminal_result_attention
+    from memory.working import WMItem, WorkingMemory
+    from store.task import TaskStore
+    from tools.registry import ToolResult
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "focus-terminal-fail-cleanup.db")
+        await store.open()
+        task_id = await store.add_task(
+            "失败的显式任务",
+            goal="失败也是终结状态，需要清理旧锚点",
+            status="failed",
+            source="self_drive",
+        )
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        wm = WorkingMemory(capacity=10)
+        wm.add(WMItem(kind="task_anchor", content="旧任务锚点", priority=0.95))
+        wm.add(WMItem(kind="self_drive", content="旧自驱信号", priority=0.9))
+        loop = SimpleNamespace(_task_store=store, _wm=wm)
+        await claim_focus_task(loop, task, clear_current=True)
+
+        cleaned = await _cleanup_terminal_result_attention(
+            loop,
+            JudgmentOutput(decision="act", chosen_action_id="task.fail"),
+            ToolResult(
+                summary="任务已失败",
+                resource_key=str(task_id),
+                state_delta={"task_id": task_id, "task_status": "failed"},
+                metadata={"task_id": task_id},
+            ),
+            None,
+            None,
+        )
+
+        assert cleaned is None
+        remaining = {item["kind"] for item in wm.get_top(10)}
+        assert "task_anchor" not in remaining
+        assert "self_drive" not in remaining
         current_focus, current_exists = await store.get_fact("focus:current_task_id")
         assert current_exists is False or current_focus == ""
         await store.close()

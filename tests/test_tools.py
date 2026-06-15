@@ -90,6 +90,14 @@ def test_worker_rewrites_task_workbench_flat_fields_into_workbench_arg():
     asyncio.run(_worker_rewrites_task_workbench_flat_fields_into_workbench_arg())
 
 
+def test_worker_rewrites_task_workbench_recovery_aliases():
+    asyncio.run(_worker_rewrites_task_workbench_recovery_aliases())
+
+
+def test_task_complete_refreshes_active_task_before_growth_guard():
+    asyncio.run(_task_complete_refreshes_active_task_before_growth_guard())
+
+
 async def _worker_rewrites_task_workbench_flat_fields_into_workbench_arg():
     from core.execution import WorkerLayer
     from core.judgment import JudgmentOutput
@@ -124,6 +132,49 @@ async def _worker_rewrites_task_workbench_flat_fields_into_workbench_arg():
                 "next_verification": "完成一次验证",
                 "evidence": ["已重跑", "已归档"],
                 "unknown": "ignored",
+            },
+        ),
+        _tool_ctx(),
+    )
+
+    assert result.error is None
+    assert result.state_delta["seen"] is True
+
+
+async def _worker_rewrites_task_workbench_recovery_aliases():
+    from core.execution import WorkerLayer
+    from core.judgment import JudgmentOutput
+    from tools.registry import ToolEntry, ToolManifest, ToolParam, ToolResult
+
+    async def _handler(params, ctx):
+        assert params["task_id"] == 3788
+        assert params["workbench"]["progress"] == ["已读取关键文件"]
+        assert params["workbench"]["evidence"] == ["形成最小成长证据"]
+        return ToolResult(summary="ok", state_delta={"seen": True})
+
+    entry = ToolEntry(
+        manifest=ToolManifest(
+            name="task.workbench",
+            description="demo",
+            params=[
+                ToolParam("workbench", "object", "workbench patch", required=True),
+                ToolParam("task_id", "number", "task id", required=False),
+            ],
+        ),
+        handler=_handler,
+    )
+
+    result = await WorkerLayer(_test_config()).dispatch(
+        "tool-chain-worker",
+        entry,
+        JudgmentOutput(
+            decision="act",
+            chosen_action_id="task.workbench",
+            params={
+                "id": 3788,
+                "workbench": {},
+                "current_step": "已读取关键文件",
+                "result_summary": "形成最小成长证据",
             },
         ),
         _tool_ctx(),
@@ -780,6 +831,62 @@ async def _task_complete_blocks_self_drive_growth_without_evidence():
             completed = await task_complete({"task_id": task_id}, ctx)
             assert completed.error is None
             assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_refreshes_active_task_before_growth_guard():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "self-drive-growth-stale-active.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "自驱成长探索",
+                goal="同一 tick 内 workbench 写入后应能完成",
+                source="self_drive",
+                status="in_progress",
+                result_json={
+                    "cortex": {
+                        "intent": "self_drive_growth",
+                        "domain": "self_evolution",
+                        "evidence": [],
+                    }
+                },
+            )
+            stale_task = await store.get_task_by_id(task_id)
+            assert stale_task is not None
+            ctx = _task_tool_ctx(store)
+            ctx.active_task = stale_task
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="verified ok",
+            )
+            await store.update_task_result(
+                task_id,
+                {
+                    "cortex": {
+                        "intent": "self_drive_growth",
+                        "domain": "self_evolution",
+                        "evidence": ["shell.run verified ok"],
+                    }
+                },
+            )
+
+            completed = await task_complete({}, ctx)
+
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_id"] == task_id
             assert completed.state_delta["task_status"] == "done"
         finally:
             await store.close()
@@ -3441,14 +3548,17 @@ async def _file_read_missing_path_returns_recovery_state():
         root = Path(d)
         existing_parent = root / "core"
         existing_parent.mkdir()
+        candidate = existing_parent / "assemble_context.py"
+        candidate.write_text("# candidate\n", encoding="utf-8")
         ctx = _tool_ctx(workspace_dir=d)
 
-        result = await file_read({"path": str(existing_parent / "missing.py")}, ctx)
+        result = await file_read({"path": str(existing_parent / "assembler.py")}, ctx)
 
         assert result.error == "FileNotFound"
         assert result.state_delta["tool_input_invalid"] is True
         assert result.state_delta["recovery_reason"] == "path_not_found"
         assert result.state_delta["nearest_existing_parent"] == str(existing_parent)
+        assert result.state_delta["candidate_paths"] == [str(candidate)]
         assert result.state_delta["suggested_tools"] == ["file.list", "shell.run"]
         assert "file.list" in result.state_delta["recovery_next_step"]
 

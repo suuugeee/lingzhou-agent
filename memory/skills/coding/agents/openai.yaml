@@ -1,0 +1,4 @@
+interface:
+  display_name: "Coding"
+  short_description: "Repository coding workflow with focused edits and verification"
+  default_prompt: "Use $coding to implement a focused code change with tests."

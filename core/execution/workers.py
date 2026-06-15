@@ -42,22 +42,38 @@ _WORKBENCH_PREFERENCE_FIELDS = {
     "failures",
 }
 
-
 def _repair_task_workbench_params(entry: ToolEntry, params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(params, dict):
         return params
     if entry.manifest.name != "task.workbench":
         return params
-    if "workbench" in params:
+    existing_workbench = params.get("workbench")
+    if isinstance(existing_workbench, dict) and existing_workbench:
         return params
 
     workbench_payload: dict[str, Any] = {
         key: value for key, value in params.items() if key in _WORKBENCH_PREFERENCE_FIELDS
     }
+    progress_items: list[str] = []
+    for alias in ("current_step", "summary"):
+        value = str(params.get(alias) or "").strip()
+        if value:
+            progress_items.append(value)
+    result_summary = str(params.get("result_summary") or "").strip()
+    if result_summary:
+        workbench_payload.setdefault("evidence", [])
+        if isinstance(workbench_payload["evidence"], list):
+            workbench_payload["evidence"].append(result_summary)
+    if progress_items:
+        workbench_payload.setdefault("progress", [])
+        if isinstance(workbench_payload["progress"], list):
+            workbench_payload["progress"].extend(progress_items)
     if not workbench_payload:
         return params
 
     repaired = dict(params)
+    if "task_id" not in repaired and "id" in repaired:
+        repaired["task_id"] = repaired["id"]
     repaired["workbench"] = workbench_payload
     return repaired
 

@@ -38,6 +38,23 @@ _REPEAT_COMPACT_TOOLS = frozenset({
     "web.fetch",
     "shell.run",
 })
+_LOW_INCREMENT_CONTINUE_TOOLS = frozenset({
+    "file.read",
+    "file.list",
+    "memory.search",
+    "task.list",
+    "probe.list",
+    "probe.run",
+    "config.list_keys",
+})
+_TASK_SCOPED_CONTINUE_TOOLS = frozenset({
+    "task.advance",
+    "task.update",
+    "task.workbench",
+    "task.complete",
+    "task.fail",
+    "task.wait",
+})
 
 
 def _compact_history_line(entry: dict[str, Any]) -> str:
@@ -116,6 +133,45 @@ def _action_history_key(action: JudgmentOutput) -> tuple[str, str]:
     return str(action.chosen_action_id or ""), action_key_param(action.params)
 
 
+def _coerce_task_id(value: Any) -> int | None:
+    try:
+        task_id = int(value)
+    except (TypeError, ValueError):
+        return None
+    return task_id if task_id > 0 else None
+
+
+def _latest_task_id_from_history(history: list[dict[str, Any]]) -> int | None:
+    for entry in reversed(history):
+        params = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+        state_delta = entry.get("state_delta") if isinstance(entry.get("state_delta"), dict) else {}
+        metadata = entry.get("metadata") if isinstance(entry.get("metadata"), dict) else {}
+        for raw in (
+            params.get("task_id"),
+            state_delta.get("task_id"),
+            metadata.get("task_id"),
+            entry.get("resource_key"),
+        ):
+            task_id = _coerce_task_id(raw)
+            if task_id is not None:
+                return task_id
+    return None
+
+
+def _ensure_continue_task_id(action: JudgmentOutput, active_task: Any | None, history: list[dict[str, Any]]) -> None:
+    if action.decision != "act" or action.chosen_action_id not in _TASK_SCOPED_CONTINUE_TOOLS:
+        return
+    if not isinstance(action.params, dict):
+        action.params = {}
+    if _coerce_task_id(action.params.get("task_id")) is not None:
+        return
+    task_id = _coerce_task_id(getattr(active_task, "id", None))
+    if task_id is None:
+        task_id = _latest_task_id_from_history(history)
+    if task_id is not None:
+        action.params["task_id"] = task_id
+
+
 def _trailing_same_action_count(history: list[dict[str, Any]], tool_name: str, key_param: str) -> int:
     if not tool_name:
         return 0
@@ -142,6 +198,33 @@ def _continue_repeat_threshold(loop: Any) -> int:
     cfg = getattr(loop, "_cfg", None)
     loop_cfg = getattr(cfg, "loop", None)
     return max(2, int(getattr(loop_cfg, "behavior_streak_threshold", 3) or 3))
+
+
+def _continue_low_increment_budget(loop: Any, max_inner_rounds: int) -> int:
+    cfg = getattr(loop, "_cfg", None)
+    thresholds = getattr(cfg, "thresholds", None)
+    explicit = getattr(thresholds, "continue_low_increment_budget", None) if thresholds is not None else None
+    if explicit is not None:
+        try:
+            return max(1, int(explicit))
+        except (TypeError, ValueError):
+            pass
+    return max(2, min(3, int(max_inner_rounds)))
+
+
+def _low_increment_history_count(history: list[dict[str, Any]]) -> int:
+    count = 0
+    for entry in history:
+        tool = str(entry.get("tool") or "")
+        if tool in _LOW_INCREMENT_CONTINUE_TOOLS:
+            count += 1
+            continue
+        if tool == "[repeat-compacted]":
+            params = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+            repeat_tool = str(params.get("repeat_tool") or "")
+            if repeat_tool in _LOW_INCREMENT_CONTINUE_TOOLS:
+                count += int(params.get("repeat_count") or 0)
+    return count
 
 
 def _build_continue_repeat_workbench_action(
@@ -177,6 +260,45 @@ def _build_continue_repeat_workbench_action(
         ),
         source_action=action,
         next_step="先综合已有证据；仍需验证时换不同证据源。",
+    )
+
+
+def _build_continue_low_increment_budget_action(
+    *,
+    action: JudgmentOutput,
+    tool_name: str,
+    budget: int,
+    history: list[dict[str, Any]],
+) -> JudgmentOutput:
+    recent_tools = [
+        str(entry.get("tool") or "")
+        for entry in history[-max(1, min(6, len(history))):]
+        if str(entry.get("tool") or "")
+    ]
+    workbench = {
+        "domain": "runtime-loop",
+        "intent": "continue 阶段停止低信息探索串联",
+        "evidence": [
+            f"本 tick continue 阶段低信息探索动作已达到预算 {budget} 次。",
+            f"本轮候选动作仍是 {tool_name}。",
+            f"最近工具序列: {', '.join(recent_tools) if recent_tools else '（无）'}",
+        ],
+        "hypothesis": "继续追加 list/read/search/probe 会扩大上下文压力；当前应先综合已有证据或切换到更高信息增量验证。",
+        "recovery_state": "continue_low_increment_budget_reached",
+        "next_verification": "先总结已有工具结果；若仍需验证，使用更具体的 grep/测试/配置查询/任务更新，而不是继续泛化枚举。",
+        "completion_checks": [
+            "已停止同 tick 内连续低信息探索。",
+            "已把已有结果收敛为结论或更具体的下一步验证。",
+        ],
+    }
+    return build_workbench_action(
+        workbench=workbench,
+        rationale=(
+            f"continue 行为门控改道：低信息探索动作已达到预算 {budget} 次，"
+            f"本轮不再执行 {tool_name}，先写工作台收敛。"
+        ),
+        source_action=action,
+        next_step="先综合已有证据；仍需验证时选择更高信息增量动作。",
     )
 
 
@@ -310,6 +432,7 @@ async def _run_continue_phase(
 
     compact_threshold, keep_last = tool_history_compact_limits(cfg)
     max_inner_rounds = max(1, int(getattr(cfg.thresholds, "continue_max_inner_rounds", 4) or 4))
+    low_increment_budget = _continue_low_increment_budget(loop, max_inner_rounds)
 
     _inner = 0
     while True:
@@ -372,7 +495,21 @@ async def _run_continue_phase(
                     repeat_count=repeat_count,
                 )
 
+        if (
+            cont.decision == "act"
+            and cont.chosen_action_id in _LOW_INCREMENT_CONTINUE_TOOLS
+            and registry_has_tool(loop._registry, "task.workbench")
+            and _low_increment_history_count(tool_history) >= low_increment_budget
+        ):
+            cont = _build_continue_low_increment_budget_action(
+                action=cont,
+                tool_name=cont.chosen_action_id,
+                budget=low_increment_budget,
+                history=tool_history,
+            )
+
         if cont.decision == "act":
+            _ensure_continue_task_id(cont, active_task, tool_history)
             tool_name = cont.chosen_action_id or ""
             key_param = action_key_param(cont.params)
             behavior = getattr(loop, "_behavior", None)

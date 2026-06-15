@@ -547,6 +547,10 @@ def test_continue_phase_gates_repeated_same_action_before_dispatch():
     asyncio.run(_continue_phase_gates_repeated_same_action_before_dispatch())
 
 
+def test_continue_phase_inherits_task_id_for_task_scoped_tools():
+    asyncio.run(_continue_phase_inherits_task_id_for_task_scoped_tools())
+
+
 async def _continue_phase_uses_configured_tool_history_compaction_threshold():
     from core.loop.shared.continue_phase import _run_continue_phase
 
@@ -726,6 +730,68 @@ async def _continue_phase_gates_repeated_same_action_before_dispatch():
     workbench = execution.actions[0].params["workbench"]
     assert workbench["recovery_state"] == "continue_repeat_action_gated"
     assert "file.read /tmp/repeat.py" in workbench["next_verification"]
+
+
+async def _continue_phase_inherits_task_id_for_task_scoped_tools():
+    from core.loop.shared.continue_phase import _run_continue_phase
+
+    cfg = _continue_cfg(
+        thresholds={
+            "continue_max_inner_rounds": 2,
+            "continue_tool_history_compact_threshold": 20,
+            "continue_tool_history_keep_last": 10,
+        },
+    )
+
+    class _Judgment:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def decide_continue(self, tool_history, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return _judgment_output(
+                    decision="act",
+                    chosen_action_id="task.workbench",
+                    params={"workbench": {"evidence": ["done"]}},
+                    rationale="写入工作台",
+                )
+            return _judgment_output(decision="wait", rationale="done")
+
+    execution = _ContinueExecution()
+    loop = _continue_loop(
+        cfg=cfg,
+        judgment=_Judgment(),
+        execution=execution,
+        registry=_ContinueWorkbenchRegistry(),
+    )
+    tool_history = [
+        {
+            "tool": "task.add",
+            "params": {"title": "new task"},
+            "result": "task.add id=3794",
+            "status": "ok",
+            "error": "",
+            "summary": "task.add id=3794",
+            "resource_key": "3794",
+            "metadata": {"task_id": 3794},
+            "state_delta": {"task_status": "pending"},
+        }
+    ]
+
+    await _run_continue_phase(
+        loop=loop,
+        ctx=SimpleNamespace(),
+        user_message="",
+        active_task=None,
+        cognitive_signals=SimpleNamespace(),
+        action=_judgment_output(decision="act", chosen_action_id="task.add", params={"title": "new task"}),
+        result=_tool_result("task.add id=3794"),
+        tool_history=tool_history,
+    )
+
+    assert execution.actions[0].chosen_action_id == "task.workbench"
+    assert execution.actions[0].params["task_id"] == 3794
 
 
 async def _self_drive_signal_bypasses_idle_judge_aggregation():

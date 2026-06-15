@@ -72,6 +72,31 @@ def _self_drive_signals(**overrides: Any) -> SimpleNamespace:
     return SimpleNamespace(**data)
 
 
+def test_continue_low_increment_budget_builds_workbench_gate():
+    from core.loop.shared.continue_phase import (
+        _build_continue_low_increment_budget_action,
+        _low_increment_history_count,
+    )
+
+    history = [
+        {"tool": "file.list", "params": {"path": "memory"}, "result": "a"},
+        {"tool": "file.read", "params": {"path": "memory/SKILL.md"}, "result": "b"},
+        {"tool": "memory.search", "params": {"query": "provider"}, "result": "c"},
+    ]
+
+    assert _low_increment_history_count(history) == 3
+    gated = _build_continue_low_increment_budget_action(
+        action=_judgment_output(decision="act", chosen_action_id="file.list", params={"path": "tools"}),
+        tool_name="file.list",
+        budget=3,
+        history=history,
+    )
+
+    assert gated.decision == "act"
+    assert gated.chosen_action_id == "task.workbench"
+    assert gated.params["workbench"]["recovery_state"] == "continue_low_increment_budget_reached"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SemanticMemory — 多锚点情境召回（ACT-R 收敛激活）
 # ══════════════════════════════════════════════════════════════════════════════
