@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -282,6 +283,13 @@ def _finalize_context_text(assembler: Any, ctx: dict[str, Any], wm: WorkingMemor
     used_tokens, section_tokens = _context_token_usage(ctx)
     assembler._last_context_used_tokens = used_tokens
     assembler._last_context_section_tokens = section_tokens
+    top_sections = _top_context_section_tokens(section_tokens)
+    logger.info(
+        "[judgment.context] usage used=%s budget=%s top_context_section_tokens_json=%s",
+        used_tokens,
+        budget,
+        json.dumps(top_sections, ensure_ascii=False),
+    )
     if budget:
         assembler._executor.self_model.context_budget = f"{budget // 1000}K" if budget >= 1000 else str(budget)
         assembler._executor.self_model.context_pressure = min(1.0, used_tokens / max(budget, 1))
@@ -290,6 +298,6 @@ def _finalize_context_text(assembler: Any, ctx: dict[str, Any], wm: WorkingMemor
         int(budget or 0),
         used_tokens,
         min(1.0, used_tokens / max(int(budget or 1), 1)) if budget else 0.0,
-        _top_context_section_tokens(section_tokens),
+        json.dumps(top_sections, ensure_ascii=False),
     )
     return _fill_template(assembler._judgment_template, ctx)

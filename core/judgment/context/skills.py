@@ -123,7 +123,18 @@ def _fmt_probe_sensors(probes: list[Any]) -> str:
         if isinstance(confidence, (int, float)):
             confidence_mark = f" confidence={float(confidence):.2f}"
         suspect_mark = " ⚠️布放可疑" if getattr(probe, "last_suspect", False) else ""
-        purpose_line = f"  └ 目的: {probe.purpose}" if getattr(probe, "purpose", "") else ""
+        attention_probe = bool(
+            alert_mark
+            or suspect_mark
+            or getattr(probe, "last_error", None)
+            or getattr(probe, "last_alerted", False)
+            or (isinstance(confidence, (int, float)) and float(confidence) < 0.60)
+        )
+        purpose_line = (
+            f"  └ 目的: {probe.purpose}"
+            if attention_probe and getattr(probe, "purpose", "")
+            else ""
+        )
         reading_line = ""
         if probe.last_run_at:
             timestamp = probe.last_run_at
@@ -131,6 +142,8 @@ def _fmt_probe_sensors(probes: list[Any]) -> str:
                 reading_line = f"  └ @{timestamp} ❌ {probe.last_error}"
             elif probe.last_result:
                 result_text = probe.last_result.strip().replace("\n", " ")
+                if len(result_text) > 360:
+                    result_text = result_text[:357].rstrip() + "..."
                 reading_line = f"  └ @{timestamp} → {result_text}"
             else:
                 reading_line = f"  └ @{timestamp} (无输出)"
@@ -138,7 +151,7 @@ def _fmt_probe_sensors(probes: list[Any]) -> str:
             reading_line = "  └ 尚未执行"
         conf_reason = str(getattr(probe, "last_confidence_reason", "") or "").strip()
         conf_line = ""
-        if conf_reason:
+        if conf_reason and attention_probe:
             conf_line = f"  └ 可信度依据: {conf_reason}"
         alert_line = ""
         if getattr(probe, "last_alerted", False):

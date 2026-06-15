@@ -181,13 +181,25 @@ def _fmt_life_state(snapshot: dict[str, Any] | None) -> str:
 def _fmt_tools(manifests: list[ToolManifest]) -> str:
     if not manifests:
         return "（无可用工具）"
+
+    def _clip(text: str, limit: int) -> str:
+        compact = " ".join(str(text or "").split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: max(0, limit - 1)].rstrip() + "…"
+
     lines: list[str] = []
     for manifest in manifests:
+        desc = _clip(manifest.description, 72)
+        params = list(manifest.params[:6])
         params_str = ", ".join(
-            f"{param.name}({'*' if param.required else '?'}): {param.description}"
-            for param in manifest.params
+            f"{param.name}({'*' if param.required else '?'}): {_clip(param.description, 32)}"
+            for param in params
         )
-        lines.append(f"- `{manifest.name}`: {manifest.description}  参数: [{params_str}]")
+        if len(manifest.params) > len(params):
+            params_str = f"{params_str}, …+{len(manifest.params) - len(params)}" if params_str else f"…+{len(manifest.params)}"
+        suffix = f"  参数: [{params_str}]" if params_str else ""
+        lines.append(f"- `{manifest.name}`: {desc}{suffix}")
     return "\n".join(lines)
 
 
