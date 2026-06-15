@@ -181,7 +181,22 @@ def _build_model_routing_section(
         },
     }
     catalog_key = str((cfg.workspace_dir / "models.json").resolve())
-    payload["catalog_models"] = list(_catalog_models_snapshot(catalog_key))
+    catalog_models = list(_catalog_models_snapshot(catalog_key))
+    compact_model_routing = bool(
+        getattr(getattr(cfg, "thresholds", None), "compact_model_routing", True)
+    )
+    payload["catalog_models"] = (
+        [
+            {
+                "model": item.get("model"),
+                "reasoning": item.get("reasoning"),
+                "context_window": item.get("context_window"),
+            }
+            for item in catalog_models
+        ]
+        if compact_model_routing
+        else catalog_models
+    )
     payload["primary_provider"] = {"model": cfg.model}
     if hasattr(assembler, "_ref_resolver") and assembler._ref_resolver is not None:
         resolver = assembler._ref_resolver
