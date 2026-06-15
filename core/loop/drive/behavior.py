@@ -5,8 +5,8 @@
   2. read streak：连续 3 次 file.read 读取相同文件的相同内容（按内容 MD5 去重）
   3. rationale 指纹：连续相同推理结论超阈值时触发信念固化警告
 
-所有检测结果均以 WMItem 形式注入工作记忆，由 LLM 决定如何响应——
-不做硬阻断，不替 LLM 做决定。
+检测结果优先以 WMItem 形式注入工作记忆；当同一低增量动作已明确形成
+连续循环时，执行门控会把动作改道到总结/换策略，避免继续消耗工具轮次。
 """
 from __future__ import annotations
 
@@ -15,10 +15,13 @@ import logging
 from collections import deque
 from typing import TYPE_CHECKING, Any
 
-from tools.registry import tool_has_capability
+from core.contracts.execution import action_key_param
+from core.cortex import intent as cortex_intent
+from core.cortex.actions import build_workbench_action
+from core.judgment.output import JudgmentOutput
+from tools.registry import registry_has_tool, tool_has_capability
 
 if TYPE_CHECKING:
-    from core.judgment import JudgmentOutput
     from memory.working import WMItem
 
 _log = logging.getLogger("lingzhou.behavior_tracker")
@@ -32,9 +35,29 @@ _SEQ_WINDOW_GAP_RATIO = 0.25  # 25% 窗口大小内视作连续
 _BELIEF_STALE_THRESHOLD = 4
 # rationale 指纹窗口大小（deque maxlen)
 _BELIEF_WINDOW = 8
+_LOW_INCREMENT_EXPLORATION_TOOLS = frozenset({
+    "file.list",
+    "memory.search",
+    "task.list",
+    "probe.list",
+    "config.list_keys",
+})
+_LOW_INCREMENT_TOOL_GROUPS = {
+    "file.list": "inventory",
+    "task.list": "inventory",
+    "probe.list": "inventory",
+    "config.list_keys": "inventory",
+    "memory.search": "memory_search",
+}
+_contains_evidence_intent = cortex_intent.contains_evidence_intent
+
+
+def _normalize_next_step(next_step: str) -> str:
+    return cortex_intent.normalize_intent_text(next_step)
 
 
 class BehaviorTracker:
+
     """行为模式追踪器：检测循环并把信号交给 LLM。"""
 
     def __init__(
@@ -103,23 +126,348 @@ class BehaviorTracker:
     # ── 状态接口 ──────────────────────────────────────────────────────────────
 
     def apply_execution_gate(self, action: JudgmentOutput, signals: Any) -> JudgmentOutput:
-        """感知重复信号并记录日志，不替 LLM 改 decision（纯观察门）。"""
+        """在明确重复同一低增量动作时硬制动，避免继续消耗上下文与工具轮次。"""
+        if self._should_gate_evidence_task_wait(action, signals):
+            task_id = str(getattr(signals, "active_task_id", "") or "").strip()
+            next_step = str(getattr(signals, "active_task_next_step", "") or "").strip()
+            return self._build_workbench_gate(
+                action=action,
+                domain="self-drive-evidence",
+                intent="阻止自驱取证任务在证据未产生前进入等待",
+                evidence=[
+                    f"task#{task_id or '?'} 是自驱任务，next_step 明确要求取证。",
+                    f"本轮模型选择了 {action.decision}，但尚未产生 next_step 所需的新证据。",
+                ],
+                hypothesis="当前卡点不是缺少外部信号，而是自驱任务把可执行的取证步骤误判成了等待条件。",
+                next_verification=next_step,
+                completion_checks=[
+                    "已执行 next_step 指向的低风险取证动作。",
+                    "已把取证结果写入 task.workbench/current_step/result summary。",
+                    "只有在外部依赖明确时才进入 task.wait。",
+                ],
+                rationale=(
+                    "行为门控改道：自驱任务仍有明确取证 next_step，"
+                    f"不能直接 {action.decision}，先写入恢复工作台约束下一轮行动。"
+                ),
+                next_step=next_step,
+                recovery_state="evidence_required_before_wait",
+            )
+
         repeat_action = getattr(signals, "repeat_action_count", 0)
         repeat_read = getattr(signals, "repeat_read_count", 0)
+        repeat_list = getattr(signals, "repeat_list_count", 0)
+        path_gate: tuple[str, int, str, str, str] | None = None
         if repeat_action >= self._streak_threshold:
+            repeat_tool = str(getattr(signals, "repeat_action_tool", "") or "")
+            repeat_key = str(getattr(signals, "repeat_action_key", "") or "")
             _log.info(
-                "[behavior.gate] repeat action streak=%d tool=%s key=%s → delegated to llm",
+                "[behavior.gate] repeat action streak=%d tool=%s key=%s",
                 repeat_action,
-                getattr(signals, "repeat_action_tool", ""),
-                getattr(signals, "repeat_action_key", ""),
+                repeat_tool,
+                repeat_key,
             )
+            if (
+                action.decision == "act"
+                and str(action.chosen_action_id or "") == repeat_tool
+                and action_key_param(action.params) == repeat_key
+            ):
+                if repeat_tool != "task.workbench" and registry_has_tool(self._registry, "task.workbench"):
+                    return self._build_repetition_workbench_gate(
+                        action=action,
+                        repeat_tool=repeat_tool,
+                        repeat_key=repeat_key,
+                        repeat_count=repeat_action,
+                        domain="runtime-loop",
+                        intent="停止重复低增量动作并恢复问题解决闭环",
+                        rationale=(
+                            f"行为门控改道：{repeat_tool} {repeat_key or '（空参数）'} "
+                            f"已连续重复 {repeat_action} 次，本轮先沉淀证据并切换策略。"
+                        ),
+                    )
+                return self._build_wait_fallback(
+                    action=action,
+                    rationale=(
+                        f"行为门控改道：{repeat_tool} {repeat_key or '（空参数）'} "
+                        f"已连续重复 {repeat_action} 次，继续执行没有新增证据；等待下一轮重新组装上下文或切换策略。"
+                    ),
+                )
         elif repeat_read >= self._streak_threshold:
-            _log.info(
-                "[behavior.gate] repeat read streak=%d path=%s → delegated to llm",
-                repeat_read,
-                getattr(signals, "repeat_read_path", ""),
+            path_gate = ("read", repeat_read, str(getattr(signals, "repeat_read_path", "") or ""), "file.read", "读取")
+        elif repeat_list >= self._streak_threshold:
+            path_gate = (
+                "list",
+                repeat_list,
+                str(getattr(signals, "repeat_list_path", "") or ""),
+                "file.list",
+                "列表枚举",
             )
+
+        if path_gate:
+            kind, repeat_count, repeat_path, tool_id, fallback_verb = path_gate
+            _log.info("[behavior.gate] repeat %s streak=%d path=%s", kind, repeat_count, repeat_path)
+            if (
+                action.decision == "act"
+                and str(action.chosen_action_id or "") == tool_id
+                and action_key_param(action.params) == repeat_path
+            ):
+                if registry_has_tool(self._registry, "task.workbench"):
+                    return self._build_repeat_path_workbench_gate(
+                        action=action,
+                        kind=kind,
+                        repeat_path=repeat_path,
+                        repeat_count=repeat_count,
+                    )
+                return self._build_wait_fallback(
+                    action=action,
+                    rationale=(
+                        f"行为门控改道：{repeat_path} 已连续重复{fallback_verb} {repeat_count} 次，"
+                        "继续执行没有新增证据；等待下一轮重新组装上下文或切换策略。"
+                    ),
+                )
+
+        if self._should_gate_after_unprogressful_probe(action, signals):
+            last_tool = str(getattr(signals, "last_action_tool", "") or "")
+            last_key = str(getattr(signals, "last_action_key", "") or "")
+            next_tool = str(action.chosen_action_id or "")
+            next_key = action_key_param(action.params)
+            reason = str(getattr(signals, "last_action_progress_reason", "") or "")
+            if registry_has_tool(self._registry, "task.workbench"):
+                return self._build_unprogressful_probe_gate(
+                    action=action,
+                    last_tool=last_tool,
+                    last_key=last_key,
+                    next_tool=next_tool,
+                    next_key=next_key,
+                    reason=reason,
+                )
+            return self._build_wait_fallback(
+                action=action,
+                rationale=(
+                    f"行为门控改道：上一动作 {last_tool} 未推进，本轮仍选择同类探索 {next_tool}；"
+                    "缺少 task.workbench，先等待下一轮重新收敛。"
+                ),
+            )
+
         return action
+
+    def _build_workbench_gate(
+        self,
+        *,
+        action: JudgmentOutput,
+        domain: str,
+        intent: str,
+        evidence: list[str],
+        hypothesis: str,
+        next_verification: str,
+        completion_checks: list[str],
+        rationale: str,
+        next_step: str | None = None,
+        recovery_state: str | None = None,
+    ) -> JudgmentOutput:
+        workbench = {
+            "domain": domain,
+            "intent": intent,
+            "evidence": evidence,
+            "hypothesis": hypothesis,
+            "next_verification": next_verification,
+            "completion_checks": completion_checks,
+        }
+        if recovery_state:
+            workbench["recovery_state"] = recovery_state
+        return build_workbench_action(
+            workbench=workbench,
+            rationale=rationale,
+            source_action=action,
+            next_step=next_step,
+        )
+
+    def _build_wait_fallback(self, *, action: JudgmentOutput, rationale: str) -> JudgmentOutput:
+        fallback_rationale = rationale
+        if "行为门控制动" not in fallback_rationale:
+            fallback_rationale = f"行为门控制动：{fallback_rationale}"
+        return JudgmentOutput(
+            decision="wait",
+            rationale=fallback_rationale,
+            reflection=action.reflection,
+            next_step=action.next_step,
+            model_strategy=dict(action.model_strategy or {}),
+            applied_skills=list(action.applied_skills or []),
+        )
+
+    def _build_repetition_workbench_gate(
+        self,
+        *,
+        action: JudgmentOutput,
+        repeat_tool: str,
+        repeat_key: str,
+        repeat_count: int,
+        domain: str,
+        intent: str,
+        rationale: str,
+    ) -> JudgmentOutput:
+        return self._build_workbench_gate(
+            action=action,
+            domain=domain,
+            intent=intent,
+            evidence=[
+                f"{repeat_tool or 'unknown'} {repeat_key or '（空参数）'} 已连续重复 {repeat_count} 次。",
+                "继续执行同一动作无法提供新增证据，应先综合已有结果或切换验证方式。",
+            ],
+            hypothesis="当前卡点不是缺少工具调用，而是缺少对重复结果的综合判断和策略切换。",
+            next_verification=(
+                f"不要再重复执行 {repeat_tool or '同一工具'} {repeat_key or ''}；"
+                "先总结已有证据，或改用不同工具/参数验证同一假设。"
+            ),
+            completion_checks=[
+                "已停止重复同一低增量动作。",
+                "已把重复结果转化为结论、修正假设或新的验证动作。",
+            ],
+            rationale=rationale,
+            next_step=(
+                f"停止重复 {repeat_tool} {repeat_key or ''}，先综合已有证据；"
+                "仍需验证时改用不同证据源。"
+            ),
+        )
+
+    def _build_repeat_path_workbench_gate(
+        self,
+        *,
+        action: JudgmentOutput,
+        kind: str,
+        repeat_path: str,
+        repeat_count: int,
+    ) -> JudgmentOutput:
+        if kind == "list":
+            intent = "停止重复目录枚举并恢复问题解决闭环"
+            evidence = [
+                f"file.list 已连续 {repeat_count} 次列出相同目录结果: {repeat_path}",
+                "继续列同一目录无法提供新增证据，应先基于已有目录结果选择具体文件、命令或结论。",
+            ]
+            hypothesis = "当前循环不是缺少目录信息，而是缺少从目录清单到具体验证对象的收敛。"
+            next_verification = (
+                f"不要再列出 {repeat_path}；从已有目录结果中选择最相关文件读取，"
+                "或改用 grep/测试/配置查询等更具体证据源。"
+            )
+            completion_checks = [
+                "已停止重复枚举同一目录。",
+                "已把目录结果转化为具体文件读取、验证命令或可回答结论。",
+            ]
+            rationale = (
+                f"行为门控改道：{repeat_path} 已连续重复列表枚举 {repeat_count} 次，"
+                "本轮先沉淀证据并要求切换到具体验证对象。"
+            )
+            next_step = f"停止重复列出 {repeat_path}，先选择具体文件/命令验证；仍需目录信息时换更精确路径。"
+        else:
+            intent = "停止重复读取并恢复问题解决闭环"
+            evidence = [
+                f"file.read 已连续 {repeat_count} 次读取同一路径: {repeat_path}",
+                "继续读取同一路径无法提供新增证据，应先总结已读内容或切换验证手段。",
+            ]
+            hypothesis = "当前循环不是缺少读取能力，而是缺少读取后的证据综合和下一步改道。"
+            next_verification = f"不要再读取 {repeat_path}；基于已读结果写出判断，或改用 grep/测试/配置查询等不同证据源验证。"
+            completion_checks = [
+                "已停止重复读取同一路径。",
+                "已把已有读取结果转化为结论或新的验证动作。",
+            ]
+            rationale = (
+                f"行为门控改道：{repeat_path} 已连续重复读取 {repeat_count} 次，"
+                "本轮先沉淀证据并要求切换验证策略。"
+            )
+            next_step = f"停止重复读取 {repeat_path}，先总结已读证据；仍需验证时改用不同证据源。"
+
+        return self._build_workbench_gate(
+            action=action,
+            domain="runtime-loop",
+            intent=intent,
+            evidence=evidence,
+            hypothesis=hypothesis,
+            next_verification=next_verification,
+            completion_checks=completion_checks,
+            rationale=rationale,
+            next_step=next_step,
+        )
+
+    def _build_unprogressful_probe_gate(
+        self,
+        *,
+        action: JudgmentOutput,
+        last_tool: str,
+        last_key: str,
+        next_tool: str,
+        next_key: str,
+        reason: str,
+    ) -> JudgmentOutput:
+        return self._build_workbench_gate(
+            action=action,
+            domain="runtime-loop",
+            intent="上一低增量探索未推进，停止同类重复并收敛问题解决闭环",
+            evidence=[
+                f"上一动作 {last_tool or 'unknown'} {last_key or '（空参数）'} 被判定为未推进。",
+                f"本轮又选择同类探索动作 {next_tool or 'unknown'} {next_key or '（空参数）'}。",
+                f"未推进原因: {reason or '系统未给出额外原因'}",
+            ],
+            hypothesis="当前不是缺少更多列表/搜索，而是需要先综合已有证据，明确下一条高信息增量验证。",
+            next_verification=(
+                "不要继续同类 list/search 枚举；先总结已有结果，"
+                "若仍需取证，改用更具体的文件读取、测试、配置查询或用户可见结论。"
+            ),
+            completion_checks=[
+                "已停止低增量探索循环。",
+                "已把未推进原因转化为新的验证策略或可回答结论。",
+            ],
+            rationale=(
+                f"行为门控改道：上一动作 {last_tool} 未推进，"
+                f"本轮仍选择同类探索 {next_tool}，先写 workbench 收敛。"
+            ),
+            next_step="先综合已有证据并选择更具体的高信息增量验证动作。",
+        )
+
+    def _should_gate_after_unprogressful_probe(self, action: JudgmentOutput, signals: Any) -> bool:
+        if action.decision != "act":
+            return False
+        next_tool = str(action.chosen_action_id or "").strip()
+        if not next_tool or next_tool == "task.workbench":
+            return False
+        if getattr(signals, "last_action_progressful", None) is not False:
+            return False
+        if str(getattr(signals, "last_action_status", "") or "") not in {"ok", "skipped"}:
+            return False
+        last_tool = str(getattr(signals, "last_action_tool", "") or "").strip()
+        if not last_tool:
+            return False
+        if next_tool == last_tool and (
+            next_tool in _LOW_INCREMENT_EXPLORATION_TOOLS
+            or tool_has_capability(self._registry, next_tool, "completion_info_only")
+            or tool_has_capability(self._registry, next_tool, "ask_evidence")
+        ):
+            return True
+        return (
+            last_tool in _LOW_INCREMENT_EXPLORATION_TOOLS
+            and next_tool in _LOW_INCREMENT_EXPLORATION_TOOLS
+            and _LOW_INCREMENT_TOOL_GROUPS.get(last_tool) == _LOW_INCREMENT_TOOL_GROUPS.get(next_tool)
+        )
+
+    def _should_gate_evidence_task_wait(self, action: JudgmentOutput, signals: Any) -> bool:
+        if action.decision not in {"wait", "pause"}:
+            return False
+        if not registry_has_tool(self._registry, "task.workbench"):
+            return False
+        source = str(getattr(signals, "active_task_source", "") or "").strip()
+        if source != "self_drive":
+            return False
+        status = str(getattr(signals, "active_task_status", "") or "").strip()
+        if status in {"done", "cancelled"}:
+            return False
+        next_step = str(getattr(signals, "active_task_next_step", "") or "").strip()
+        if not next_step:
+            return False
+        has_evidence = _contains_evidence_intent(next_step)
+        wait_streak = int(getattr(signals, "wait_streak", 0) or 0)
+        if status == "waiting" and not has_evidence:
+            return False
+        if cortex_intent.contains_wait_dependency(next_step) and not has_evidence:
+            return wait_streak >= 3
+        return has_evidence
 
     def apply_cognitive_probe(self, signals: Any) -> None:
         """将当前循环探针状态写入 cognitive_signals 对象（原地修改）。"""

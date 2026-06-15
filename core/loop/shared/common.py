@@ -98,11 +98,28 @@ def _should_continue_within_tick(
     user_message: str = "",
     has_active_task: bool = False,
     registry: Any | None = None,
+    result: ToolResult | None = None,
 ) -> bool:
-    """task.complete/fail 后不续计；mutation+用户消息+有任务时暂停让用户确认。"""
+    """task.complete/fail 真正终结后不续判；被守卫拒绝的 complete 继续恢复闭环。"""
     if action.decision != "act":
         return False
-    if (action.chosen_action_id or "") in {"task.complete", "task.fail"}:
+    tool_name = action.chosen_action_id or ""
+    if result is not None and result.skipped and (
+        str(result.error or "") == "ToolInputInvalid"
+        or bool((result.state_delta or {}).get("tool_input_invalid"))
+    ):
+        return True
+    if tool_name == "task.complete":
+        recoverable_errors = {
+            "SelfDriveGrowthIncomplete",
+            "WorkbenchVerificationPending",
+            "ActionFirstCompletionBlocked",
+            "InsufficientEvidence",
+            "MutationWithoutVerification",
+            "UserInboxPending",
+        }
+        return result is not None and result.skipped and str(result.error or "") in recoverable_errors
+    if tool_name == "task.fail":
         return False
     # mutation tool in a user-prompted tick with active task: don't auto-continue
     return not (user_message and has_active_task and tool_tier(action.chosen_action_id or "", registry) != "reader")

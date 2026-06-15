@@ -7,8 +7,7 @@ from core.judgment.boundary.normalize import (
     normalize_reply_pseudo_tool,
     simulate_safe_output,
 )
-from core.judgment.boundary.pipeline import normalize_judgment_output
-from core.judgment.boundary.pipeline import enforce_problem_solving_guard
+from core.judgment.boundary.pipeline import enforce_problem_solving_guard, normalize_judgment_output
 
 __all__ = [
     "coerce_reply_only_output",

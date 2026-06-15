@@ -30,6 +30,18 @@ def _test_soul_cfg() -> Any:
         )
     )
 
+
+class _NoToolRegistry:
+    def get(self, name: str):
+        return None
+
+
+def _task_tool_ctx(store: Any):
+    ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
+    ctx.registry = _NoToolRegistry()
+    return ctx
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 新增工具测试（file.edit / skill_ops / exec 覆盖）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -66,6 +78,110 @@ async def _worker_validates_required_tool_params_before_handler():
     assert result.skipped is True
     assert result.error == "ToolInputInvalid"
     assert result.metadata["missing_params"] == ["path"]
+    assert result.state_delta["tool_input_invalid"] is True
+    assert result.state_delta["missing_params"] == ["path"]
+    assert result.state_delta["retry_params_template"] == {"path": "<string>"}
+    assert result.metadata["retry_params_template"] == {"path": "<string>"}
+    assert result.state_delta["expected_params"][0]["name"] == "path"
+    assert "补齐必填参数 path" in result.state_delta["recovery_next_step"]
+
+
+def test_worker_rewrites_task_workbench_flat_fields_into_workbench_arg():
+    asyncio.run(_worker_rewrites_task_workbench_flat_fields_into_workbench_arg())
+
+
+def test_worker_rewrites_task_workbench_recovery_aliases():
+    asyncio.run(_worker_rewrites_task_workbench_recovery_aliases())
+
+
+def test_task_complete_refreshes_active_task_before_growth_guard():
+    asyncio.run(_task_complete_refreshes_active_task_before_growth_guard())
+
+
+async def _worker_rewrites_task_workbench_flat_fields_into_workbench_arg():
+    from core.execution import WorkerLayer
+    from core.judgment import JudgmentOutput
+    from tools.registry import ToolEntry, ToolManifest, ToolParam, ToolResult
+
+    async def _handler(params, ctx):
+        assert isinstance(params.get("workbench"), dict)
+        assert params["workbench"]["domain"] == "runtime"
+        assert params["workbench"]["intent"] == "bootstrap"
+        assert params["workbench"]["next_verification"] == "完成一次验证"
+        assert params["workbench"]["evidence"] == ["已重跑", "已归档"]
+        return ToolResult(summary="ok", state_delta={"seen": True})
+
+    entry = ToolEntry(
+        manifest=ToolManifest(
+            name="task.workbench",
+            description="demo",
+            params=[ToolParam("workbench", "object", "workbench patch", required=True)],
+        ),
+        handler=_handler,
+    )
+
+    result = await WorkerLayer(_test_config()).dispatch(
+        "tool-chain-worker",
+        entry,
+        JudgmentOutput(
+            decision="act",
+            chosen_action_id="task.workbench",
+            params={
+                "domain": "runtime",
+                "intent": "bootstrap",
+                "next_verification": "完成一次验证",
+                "evidence": ["已重跑", "已归档"],
+                "unknown": "ignored",
+            },
+        ),
+        _tool_ctx(),
+    )
+
+    assert result.error is None
+    assert result.state_delta["seen"] is True
+
+
+async def _worker_rewrites_task_workbench_recovery_aliases():
+    from core.execution import WorkerLayer
+    from core.judgment import JudgmentOutput
+    from tools.registry import ToolEntry, ToolManifest, ToolParam, ToolResult
+
+    async def _handler(params, ctx):
+        assert params["task_id"] == 3788
+        assert params["workbench"]["progress"] == ["已读取关键文件"]
+        assert params["workbench"]["evidence"] == ["形成最小成长证据"]
+        return ToolResult(summary="ok", state_delta={"seen": True})
+
+    entry = ToolEntry(
+        manifest=ToolManifest(
+            name="task.workbench",
+            description="demo",
+            params=[
+                ToolParam("workbench", "object", "workbench patch", required=True),
+                ToolParam("task_id", "number", "task id", required=False),
+            ],
+        ),
+        handler=_handler,
+    )
+
+    result = await WorkerLayer(_test_config()).dispatch(
+        "tool-chain-worker",
+        entry,
+        JudgmentOutput(
+            decision="act",
+            chosen_action_id="task.workbench",
+            params={
+                "id": 3788,
+                "workbench": {},
+                "current_step": "已读取关键文件",
+                "result_summary": "形成最小成长证据",
+            },
+        ),
+        _tool_ctx(),
+    )
+
+    assert result.error is None
+    assert result.state_delta["seen"] is True
 
 
 def test_task_store_get_active_prefers_started_task_over_pending():
@@ -157,13 +273,41 @@ def test_task_complete_blocks_self_drive_growth_without_evidence():
     asyncio.run(_task_complete_blocks_self_drive_growth_without_evidence())
 
 
+def test_task_complete_blocks_unresolved_workbench_next_verification():
+    asyncio.run(_task_complete_blocks_unresolved_workbench_next_verification())
+
+
+def test_task_complete_blocks_real_workbench_state_delta_next_verification():
+    asyncio.run(_task_complete_blocks_real_workbench_state_delta_next_verification())
+
+
+def test_task_complete_blocks_external_workbench_next_verification():
+    asyncio.run(_task_complete_blocks_external_workbench_next_verification())
+
+
+def test_task_complete_blocks_english_workbench_next_verification():
+    asyncio.run(_task_complete_blocks_english_workbench_next_verification())
+
+
+def test_task_next_verification_completed_word_does_not_hide_actionable_check():
+    from tools.task import _has_actionable_next_verification
+
+    assert _has_actionable_next_verification("确认已完成测试并读取最新 pytest 结果") is True
+    assert _has_actionable_next_verification("已完成，无需继续验证") is False
+    assert _has_actionable_next_verification("already done; no need to rerun") is False
+
+
+def test_task_complete_blocks_semantic_memory_next_verification_until_memory_written():
+    asyncio.run(_task_complete_blocks_semantic_memory_next_verification_until_memory_written())
+
+
+def test_task_complete_blocks_self_drive_deferred_implementation_candidate():
+    asyncio.run(_task_complete_blocks_self_drive_deferred_implementation_candidate())
+
+
 async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
     from store.task import TaskStore
     from tools.task import task_complete
-
-    class _Registry:
-        def get(self, name: str):
-            return None
 
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
@@ -181,8 +325,7 @@ async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
                     }
                 },
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             no_evidence = await task_complete({"task_id": task_id}, ctx)
             assert no_evidence.skipped is True
@@ -218,13 +361,417 @@ async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
             await store.close()
 
 
-async def _task_complete_blocks_self_drive_growth_without_evidence():
+async def _task_complete_blocks_unresolved_workbench_next_verification():
     from store.task import TaskStore
     from tools.task import task_complete
 
-    class _Registry:
-        def get(self, name: str):
-            return None
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-verification-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "self_drive_growth",
+                "domain": "self_evolution",
+                "evidence": ["recent logs show route drift probe returns too much context"],
+                "next_verification": "优先定位 reasoner_route_drift_watch 探针定义，确认是否能压缩正常路径输出。",
+                "completion_checks": [
+                    "已形成一个明确的一行级改进候选。",
+                    "当前不直接修改核心代码，因为还未定位具体实现文件。",
+                ],
+            }
+            task_id = await store.add_task(
+                "自我进化日志优化",
+                goal="定位并减少无效探针日志注入",
+                source="self_drive",
+                status="in_progress",
+                result_json={"cortex": cortex},
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="counted recent logs",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote next verification",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="memory.add_semantic",
+                log_text="stored observation",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "未验证的下一步" in blocked.summary
+            assert "reasoner_route_drift_watch" in blocked.summary
+            assert blocked.state_delta["completion_blocked"] is True
+            assert blocked.state_delta["completion_blocker"] == "WorkbenchVerificationPending"
+            assert "reasoner_route_drift_watch" in blocked.state_delta["next_verification"]
+            assert "file.read" in blocked.state_delta["suggested_tools"]
+            assert "shell.run" in blocked.state_delta["suggested_tools"]
+            assert blocked.metadata["completion_blocked"] is True
+            assert blocked.metadata["recovery_next_step"] == blocked.state_delta["recovery_next_step"]
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="file.read",
+                log_text="read probe definition",
+            )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_real_workbench_state_delta_next_verification():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "real-workbench-state-delta-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "debug_runtime_issue",
+                "domain": "runtime",
+                "evidence": ["真实 tool result 会把 workbench 皮层写在 state_delta.cortex。"],
+                "next_verification": "执行 shell.run 读取最近 runs，确认 workbench 后有真实验证工具。",
+                "completion_checks": ["已确认完成门能读取真实 ToolResult 持久化形态。"],
+            }
+            task_id = await store.add_task(
+                "验证真实 workbench 输出形态",
+                goal="完成门必须识别 output_json.state_delta.cortex",
+                source="external",
+                status="in_progress",
+                result_json={"cortex": cortex},
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={
+                    "summary": "工作台已更新",
+                    "state_delta": {"cortex": cortex, "run_id": 1},
+                    "metadata": {},
+                },
+                log_text="wrote real ToolResult-shaped next verification",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "shell.run" in blocked.state_delta["next_verification"]
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="runs verified",
+            )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_external_workbench_next_verification():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "external-workbench-verification-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "debug_runtime_issue",
+                "domain": "user_problem",
+                "evidence": ["用户反馈同模型下问题解决能力弱，当前已定位到完成门可能过早放行。"],
+                "next_verification": "运行 pytest 验证 task.complete 未执行 workbench 下一步时会被拦截。",
+                "completion_checks": [
+                    "已确认普通外部任务也受 workbench 验证门约束。",
+                    "已确认验证工具成功后才允许完成。",
+                ],
+            }
+            task_id = await store.add_task(
+                "修复普通问题任务过早完成",
+                goal="确保普通用户问题也不能把 workbench 当完成证据",
+                source="external",
+                status="in_progress",
+                current_step="已写入 workbench，等待执行 next_verification",
+                result_json={"cortex": cortex},
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote next verification",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="memory.add_semantic",
+                log_text="stored observation",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "未验证的下一步" in blocked.summary
+            assert "pytest" in blocked.state_delta["next_verification"]
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="pytest passed",
+            )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_english_workbench_next_verification():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "english-workbench-verification-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "verify remote",
+                "domain": "git",
+                "evidence": ["remote push failed once"],
+                "next_verification": "run git ls-remote to verify remote connectivity.",
+                "completion_checks": ["remote connectivity verified"],
+            }
+            task_id = await store.add_task(
+                "验证远程连接",
+                goal="English next_verification should still block completion",
+                source="external",
+                status="in_progress",
+                current_step="已写入 workbench，等待执行英文 next_verification",
+                result_json={"cortex": cortex},
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote english next verification",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "git ls-remote" in blocked.state_delta["next_verification"]
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="git ls-remote ok",
+            )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_semantic_memory_next_verification_until_memory_written():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "semantic-memory-workbench-verification-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "self_drive_growth",
+                "domain": "self_evolution",
+                "evidence": ["已完成一次日志取证并形成可复用经验。"],
+                "next_verification": "沉淀一条语义记忆：自驱取证任务不应 wait；随后完成本次轻量探索任务。",
+                "completion_checks": ["经验已进入长期语义记忆。"],
+            }
+            task_id = await store.add_task(
+                "沉淀自驱经验",
+                goal="语义记忆沉淀必须先执行",
+                source="self_drive",
+                status="in_progress",
+                result_json={"cortex": cortex},
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="collected log evidence",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote semantic memory next verification",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "沉淀一条语义记忆" in blocked.state_delta["next_verification"]
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="memory.add_semantic",
+                log_text="stored self-drive lesson",
+            )
+
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_self_drive_deferred_implementation_candidate():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "self-drive-deferred-implementation-complete.db")
+        await store.open()
+        try:
+            cortex = {
+                "intent": "self_drive_growth",
+                "domain": "self_evolution",
+                "evidence": [
+                    "日志统计发现 wait_no_progress=7。",
+                    "脚本给出的改进候选：加强守卫，当 self_drive 任务 next_step 要求取证时优先低成本取证而不是 wait。",
+                ],
+                "hypothesis": "最低成本的一行级改进方向是强化守卫。",
+                "next_verification": "沉淀一条语义记忆：自驱取证任务不应 wait；随后完成本次轻量探索任务。",
+                "open_questions": [
+                    "这个守卫应落在 judgment 层，还是通过现有 anti-loop/task-continuity skill 强化即可？",
+                    "是否值得直接改代码，还是先沉淀为经验并观察下一次自驱任务表现？",
+                ],
+                "completion_checks": [
+                    "已提出一条具体、低风险、可实现的一行级改进候选。",
+                    "下一步无需立即改核心代码；先固化经验并在后续重复出现时再改守卫代码。",
+                ],
+            }
+            task_id = await store.add_task(
+                "自驱取证任务不应空转",
+                goal="从日志中定位可落地的自我进化修复点",
+                source="self_drive",
+                status="in_progress",
+                result_json={"cortex": cortex},
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="counted wait_no_progress and repeated reads",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={"cortex": cortex},
+                log_text="wrote implementation candidate but deferred code change",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="memory.add_semantic",
+                log_text="stored self-drive lesson",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+            assert blocked.skipped is True
+            assert blocked.error == "SelfDriveImplementationDecisionPending"
+            assert "是否修改" in blocked.summary
+            assert blocked.state_delta["completion_blocked"] is True
+            assert blocked.state_delta["completion_blocker"] == "SelfDriveImplementationDecisionPending"
+            assert "定位文件" in blocked.state_delta["recovery_next_step"]
+            assert blocked.state_delta["suggested_tools"] == ["file.read", "shell.run", "task.workbench"]
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_self_drive_growth_without_evidence():
+    from store.task import TaskStore
+    from tools.task import task_complete
 
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
@@ -244,13 +791,16 @@ async def _task_complete_blocks_self_drive_growth_without_evidence():
                     }
                 },
             )
-            ctx = _tool_ctx(task_store=store, episodic=SimpleNamespace(load_for_context=lambda *args, **kwargs: ""))
-            ctx.registry = _Registry()
+            ctx = _task_tool_ctx(store)
 
             no_probe = await task_complete({"task_id": task_id}, ctx)
             assert no_probe.skipped is True
             assert no_probe.error == "SelfDriveGrowthIncomplete"
             assert "非 task 工具取证" in no_probe.summary
+            assert no_probe.state_delta["completion_blocked"] is True
+            assert no_probe.state_delta["completion_blocker"] == "SelfDriveGrowthIncomplete"
+            assert "memory.search" in no_probe.state_delta["suggested_tools"]
+            assert "task.workbench" in no_probe.state_delta["suggested_tools"]
 
             await store.add_run(
                 task_id=task_id,
@@ -264,6 +814,8 @@ async def _task_complete_blocks_self_drive_growth_without_evidence():
             assert no_evidence.skipped is True
             assert no_evidence.error == "SelfDriveGrowthIncomplete"
             assert "成长证据" in no_evidence.summary
+            assert no_evidence.state_delta["completion_blocked"] is True
+            assert "证据" in no_evidence.state_delta["recovery_next_step"]
 
             await store.update_status(
                 task_id,
@@ -279,6 +831,62 @@ async def _task_complete_blocks_self_drive_growth_without_evidence():
             completed = await task_complete({"task_id": task_id}, ctx)
             assert completed.error is None
             assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_refreshes_active_task_before_growth_guard():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "self-drive-growth-stale-active.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "自驱成长探索",
+                goal="同一 tick 内 workbench 写入后应能完成",
+                source="self_drive",
+                status="in_progress",
+                result_json={
+                    "cortex": {
+                        "intent": "self_drive_growth",
+                        "domain": "self_evolution",
+                        "evidence": [],
+                    }
+                },
+            )
+            stale_task = await store.get_task_by_id(task_id)
+            assert stale_task is not None
+            ctx = _task_tool_ctx(store)
+            ctx.active_task = stale_task
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="shell.run",
+                log_text="verified ok",
+            )
+            await store.update_task_result(
+                task_id,
+                {
+                    "cortex": {
+                        "intent": "self_drive_growth",
+                        "domain": "self_evolution",
+                        "evidence": ["shell.run verified ok"],
+                    }
+                },
+            )
+
+            completed = await task_complete({}, ctx)
+
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_id"] == task_id
             assert completed.state_delta["task_status"] == "done"
         finally:
             await store.close()
@@ -1141,6 +1749,51 @@ def test_task_workbench_merges_general_problem_solving_state():
     asyncio.run(_task_workbench_merges_general_problem_solving_state())
 
 
+def test_task_workbench_accepts_flattened_workbench_fields():
+    asyncio.run(_task_workbench_accepts_flattened_workbench_fields())
+
+
+async def _task_workbench_accepts_flattened_workbench_fields():
+    from store.task import TaskStore
+    from tools.workbench import task_workbench
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-flat.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "general problem solving",
+                goal="flattened workbench support",
+                status="in_progress",
+                result_json={"cortex": {}},
+            )
+            task = await store.get_task_by_id(task_id)
+            ctx = _tool_ctx(task_store=store, active_task=task)
+
+            result = await task_workbench(
+                {
+                    "domain": "runtime",
+                    "intent": "verify recovery",
+                    "next_verification": "检查结果是否收敛",
+                    "completion_checks": ["step done"],
+                },
+                ctx,
+            )
+
+            assert result.error is None
+            refreshed = await store.get_task_by_id(task_id)
+            assert refreshed is not None
+            cortex = refreshed.result_json["cortex"]
+            assert cortex["domain"] == "runtime"
+            assert cortex["intent"] == "verify recovery"
+            assert cortex["next_verification"] == "检查结果是否收敛"
+            assert cortex["completion_checks"] == ["step done"]
+            assert "已自动从顶层字段组装 workbench" in result.summary
+        finally:
+            await store.close()
+
+
 async def _task_workbench_merges_general_problem_solving_state():
     from store.task import TaskStore
     from tools.workbench import task_workbench
@@ -1918,6 +2571,66 @@ def test_subagent_runner_shared_memory_does_not_write_parent_episodic():
     asyncio.run(_subagent_runner_shared_memory_does_not_write_parent_episodic())
 
 
+def test_subagent_episodic_view_accepts_parent_memory_signatures():
+    from core.subagent import _SubagentEpisodicView
+
+    class _Parent:
+        def __init__(self) -> None:
+            self.calls: list[tuple[Any, ...]] = []
+
+        def load_for_context(self, task_id: str | None, n_recent: int = 20) -> str:
+            self.calls.append(("load_for_context", task_id, n_recent))
+            return "task narrative"
+
+        def load_for_chat_context(
+            self,
+            chat_id: str | None,
+            n_recent: int = 20,
+            *,
+            max_chars: int | None = None,
+        ) -> str:
+            self.calls.append(("load_for_chat_context", chat_id, n_recent, max_chars))
+            return "chat narrative"
+
+        def load_for_interlocutor_context(
+            self,
+            interlocutor_id: str | None,
+            n_recent: int = 20,
+            *,
+            max_chars: int | None = None,
+        ) -> str:
+            self.calls.append(("load_for_interlocutor_context", interlocutor_id, n_recent, max_chars))
+            return "speaker narrative"
+
+        def load_for_task_narrative(self, task_id: str | None, n_recent: int = 20) -> str:
+            self.calls.append(("load_for_task_narrative", task_id, n_recent))
+            return "task-only narrative"
+
+        def load_recent_daily_context(self, days: int = 2, max_chars: int = 1200) -> str:
+            self.calls.append(("load_recent_daily_context", days, max_chars))
+            return "daily narrative"
+
+        def search(self, query: str, max_chars: int = 2000, exclude_task_id: str | None = None) -> str:
+            self.calls.append(("search", query, max_chars, exclude_task_id))
+            return "search result"
+
+    parent = _Parent()
+    view = _SubagentEpisodicView(parent)
+
+    assert view.load_for_context("task-1", 6) == "task narrative"
+    assert view.load_for_chat_context("chat-1", 7, max_chars=800) == "chat narrative"
+    assert view.load_for_interlocutor_context("speaker-1", 8, max_chars=900) == "speaker narrative"
+    assert view.load_for_task_narrative("task-2", 9) == "task-only narrative"
+    assert view.load_recent_daily_context(3, 1000) == "daily narrative"
+    assert parent.calls == [
+        ("load_for_context", "task-1", 6),
+        ("load_for_chat_context", "chat-1", 7, 800),
+        ("load_for_interlocutor_context", "speaker-1", 8, 900),
+        ("load_for_task_narrative", "task-2", 9),
+        ("load_recent_daily_context", 3, 1000),
+    ]
+
+
 async def _subagent_runner_shared_memory_does_not_write_parent_episodic():
     from core.execution import ExecutionLayer
     from core.judgment import JudgmentOutput
@@ -2549,6 +3262,63 @@ async def _memory_embed_backfill_runs_in_small_batches():
         assert semantic.get_unembedded(modality="text", model="test-model", limit=10) == []
 
 
+def test_memory_embed_backfill_can_target_node_id():
+    asyncio.run(_memory_embed_backfill_can_target_node_id())
+
+
+async def _memory_embed_backfill_can_target_node_id():
+    from store.semantic import MemoryNode, SemanticMemory
+    from tools.memory import memory_embed_backfill
+
+    calls: list[str] = []
+
+    def _embed(text: str) -> list[float]:
+        calls.append(text)
+        return [0.0, 1.0]
+
+    with tempfile.TemporaryDirectory() as d:
+        semantic = SemanticMemory(Path(d), decay_lambda=0.0, embed_fn=_embed)
+        semantic.upsert(MemoryNode(id="target", kind="fact", title="target title", body="target body"))
+        semantic.upsert(MemoryNode(id="other", kind="fact", title="other title", body="other body"))
+        ctx = _tool_ctx(semantic=semantic)
+
+        result = await memory_embed_backfill(
+            {"node_id": "target", "batch_size": 10, "sleep_seconds": 0, "model": "test-model", "max_text_chars": 64},
+            ctx,
+        )
+
+        assert result.error is None
+        assert result.metadata["processed"] == 1
+        assert result.metadata["processed_ids"] == ["target"]
+        assert result.metadata["node_id"] == "target"
+        assert calls == ["target title target body"]
+        assert ("target", "target title target body") not in semantic.get_unembedded(modality="text", model="test-model", limit=10)
+        assert ("other", "other title other body") in semantic.get_unembedded(modality="text", model="test-model", limit=10)
+
+
+def test_memory_embed_backfill_target_node_id_not_found():
+    asyncio.run(_memory_embed_backfill_target_node_id_not_found())
+
+
+async def _memory_embed_backfill_target_node_id_not_found():
+    from store.semantic import SemanticMemory
+    from tools.memory import memory_embed_backfill
+
+    with tempfile.TemporaryDirectory() as d:
+        semantic = SemanticMemory(Path(d), decay_lambda=0.0, embed_fn=lambda text: [1.0])
+        ctx = _tool_ctx(semantic=semantic)
+
+        result = await memory_embed_backfill(
+            {"node_id": "missing", "sleep_seconds": 0, "model": "test-model"},
+            ctx,
+        )
+
+        assert result.skipped is True
+        assert result.error == "SemanticNodeNotFound"
+        assert result.metadata["node_id"] == "missing"
+        assert result.metadata["processed"] == 0
+
+
 def test_process_kill():
     """process.kill 可以终止后台进程。"""
     asyncio.run(_process_kill())
@@ -2766,6 +3536,53 @@ def test_file_read_max_chars():
     """file.read max_chars 参数正确截断。"""
     asyncio.run(_file_read_max_chars())
 
+
+def test_file_read_missing_path_returns_recovery_state():
+    asyncio.run(_file_read_missing_path_returns_recovery_state())
+
+
+async def _file_read_missing_path_returns_recovery_state():
+    from tools.file import file_read
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        existing_parent = root / "core"
+        existing_parent.mkdir()
+        candidate = existing_parent / "assemble_context.py"
+        candidate.write_text("# candidate\n", encoding="utf-8")
+        ctx = _tool_ctx(workspace_dir=d)
+
+        result = await file_read({"path": str(existing_parent / "assembler.py")}, ctx)
+
+        assert result.error == "FileNotFound"
+        assert result.state_delta["tool_input_invalid"] is True
+        assert result.state_delta["recovery_reason"] == "path_not_found"
+        assert result.state_delta["nearest_existing_parent"] == str(existing_parent)
+        assert result.state_delta["candidate_paths"] == [str(candidate)]
+        assert result.state_delta["suggested_tools"] == ["file.list", "shell.run"]
+        assert "file.list" in result.state_delta["recovery_next_step"]
+
+
+def test_file_list_missing_path_returns_recovery_state():
+    asyncio.run(_file_list_missing_path_returns_recovery_state())
+
+
+async def _file_list_missing_path_returns_recovery_state():
+    from tools.file import file_list
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        ctx = _tool_ctx(workspace_dir=d)
+
+        result = await file_list({"path": str(root / "missing" / "child")}, ctx)
+
+        assert result.error == "FileNotFound"
+        assert result.state_delta["tool_input_invalid"] is True
+        assert result.state_delta["expected"] == "directory"
+        assert result.state_delta["nearest_existing_parent"] == str(root)
+        assert "确认真实路径" in result.summary
+
+
 async def _file_read_max_chars():
     from tools.file import file_read, file_write
 
@@ -2777,3 +3594,26 @@ async def _file_read_max_chars():
 
         r = await file_read({"path": str(fpath), "max_chars": 20}, ctx)
         assert len(r.summary) == 20
+        assert r.state_delta["has_more"] is True
+        assert r.state_delta["truncated"] is True
+        assert r.state_delta["truncation_reason"] == "max_chars"
+        assert r.state_delta["next_start"] == 20
+        assert r.state_delta["next_params"] == {"path": str(fpath), "start": 20, "max_chars": 20}
+        assert "继续读取同一文件剩余内容" in r.state_delta["recovery_next_step"]
+        assert r.metadata["truncated"] is True
+        assert r.metadata["next_params"] == {"path": str(fpath), "start": 20, "max_chars": 20}
+
+        ranged = await file_read({"path": str(fpath), "start": 10, "end": 80, "max_chars": 15}, ctx)
+        assert len(ranged.summary) == 15
+        assert ranged.state_delta["next_start"] == 25
+        assert ranged.state_delta["next_params"] == {"path": str(fpath), "start": 25, "end": 80, "max_chars": 15}
+
+        lines = root / "lines.txt"
+        await file_write({"path": str(lines), "content": "\n".join(f"line-{i}-" + ("x" * 20) for i in range(1, 8))}, ctx)
+        line_window = await file_read({"path": str(lines), "offset": 2, "limit": 3, "max_chars": 25}, ctx)
+        assert len(line_window.summary) == 25
+        assert line_window.state_delta["truncated"] is True
+        assert line_window.state_delta["next_params"]["offset"] == 2
+        assert line_window.state_delta["next_params"]["limit"] == 3
+        assert line_window.state_delta["next_params"]["max_chars"] > 25
+        assert "扩大 max_chars" in line_window.state_delta["recovery_next_step"]

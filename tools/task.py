@@ -6,6 +6,7 @@ import uuid
 from typing import Any
 
 from core.cortex import action_first_completion_blockers
+from core.cortex import intent as cortex_intent
 from core.metabolic import (
     add_semantic_memory as metabolic_add_semantic_memory,
 )
@@ -40,6 +41,9 @@ from tools.registry import (
 )
 
 _log_task_ops = _logging.getLogger("lingzhou.task_ops")
+_contains_marker = cortex_intent.contains_marker
+_has_actionable_next_verification = cortex_intent.has_actionable_next_verification
+_verification_requests_semantic_memory = cortex_intent.requests_semantic_memory
 
 
 def _decision_basis(*parts: Any) -> str:
@@ -81,9 +85,195 @@ def _self_drive_growth_completion_blockers(task: Any, recent_runs: list[Any]) ->
     return blockers
 
 
+_IMPLEMENTATION_CANDIDATE_MARKERS = (
+    "改进候选",
+    "一行级改进",
+    "加强守卫",
+    "强化守卫",
+    "具体改进",
+    "可实现",
+    "修复点",
+    "代码改动",
+    "改核心代码",
+    "改守卫代码",
+    "code change",
+    "implementation candidate",
+    "guard",
+)
+_IMPLEMENTATION_DEFERRAL_MARKERS = (
+    "无需立即改核心代码",
+    "不直接修改核心代码",
+    "后续重复出现",
+    "观察下一次",
+    "是否值得直接改代码",
+    "是否值得直接改",
+    "先固化经验",
+    "先沉淀",
+    "暂不修改",
+    "defer",
+    "observe later",
+)
+
+
+def _flatten_cortex_text(value: Any) -> str:
+    if isinstance(value, dict):
+        return " ".join(_flatten_cortex_text(item) for item in value.values())
+    if isinstance(value, (list, tuple, set)):
+        return " ".join(_flatten_cortex_text(item) for item in value)
+    return str(value or "")
+
+
+def _self_drive_unresolved_implementation_blockers(task: Any, recent_runs: list[Any], ctx: ToolContext) -> list[str]:
+    """阻止自我进化任务把明确实现候选降级成“先记忆、以后再说”。"""
+    if not _is_self_drive_growth_task(task):
+        return []
+
+    cortex = _task_cortex(task)
+    text = _flatten_cortex_text(cortex)
+    lowered = text.lower()
+    has_candidate = _contains_marker(text, lowered, _IMPLEMENTATION_CANDIDATE_MARKERS)
+    has_deferral = _contains_marker(text, lowered, _IMPLEMENTATION_DEFERRAL_MARKERS)
+    if not (has_candidate and has_deferral):
+        return []
+
+    recent_tools = [
+        str(getattr(run, "tool_name", "") or "")
+        for run in recent_runs
+        if str(getattr(run, "status", "") or "") == "succeeded"
+    ]
+    has_mutation = any(tool_has_capability(ctx.registry, tool_name, "completion_mutation") for tool_name in recent_tools)
+    if has_mutation:
+        return []
+
+    latest_workbench_idx: int | None = None
+    for idx, run in enumerate(recent_runs):
+        if str(getattr(run, "tool_name", "") or "") == "task.workbench":
+            latest_workbench_idx = idx
+            break
+    if latest_workbench_idx is not None:
+        newer_runs = recent_runs[:latest_workbench_idx]
+        if any(_is_successful_verification_run(run) for run in newer_runs):
+            return []
+
+    return [
+        (
+            "自驱成长任务已经识别出可实现的代码/守卫改进候选，但仍停留在“先沉淀/后续观察/是否值得改”的"
+            "未决状态；不能只写语义记忆后完成。"
+        )
+    ]
+
+
+_NON_VERIFICATION_TOOLS = {
+    "memory.add_semantic",
+    "memory.add_wm",
+    "memory.drop_wm",
+    "task.workbench",
+    "task.advance",
+    "task.complete",
+    "task.add",
+    "task.update",
+    "task.amend",
+}
+_VERIFICATION_TOOL_PREFIXES = (
+    "file.",
+    "shell.",
+    "exec.",
+    "process.",
+    "probe.",
+    "config.",
+    "browser.",
+    "web.",
+    "memory.search",
+    "memory.embed_backfill",
+    "subagent.run",
+)
+
+
+def _task_cortex(task: Any) -> dict[str, Any]:
+    result_json = getattr(task, "result_json", None)
+    cortex = result_json.get("cortex") if isinstance(result_json, dict) else None
+    return cortex if isinstance(cortex, dict) else {}
+
+
+def _is_successful_verification_run(run: Any, *, next_verification: str = "") -> bool:
+    if str(getattr(run, "status", "") or "").strip() != "succeeded":
+        return False
+    tool_name = str(getattr(run, "tool_name", "") or "").strip()
+    if not tool_name:
+        return False
+    if tool_name == "memory.add_semantic" and _verification_requests_semantic_memory(next_verification):
+        return True
+    if tool_name in _NON_VERIFICATION_TOOLS or tool_name.startswith("task."):
+        return False
+    return tool_name in _VERIFICATION_TOOL_PREFIXES or any(
+        tool_name.startswith(prefix) for prefix in _VERIFICATION_TOOL_PREFIXES
+    )
+
+
+def _run_workbench_cortex(run: Any) -> dict[str, Any]:
+    output_json = getattr(run, "output_json", None)
+    candidates: list[Any] = []
+    if isinstance(output_json, dict):
+        candidates.append(output_json.get("cortex"))
+        state_delta = output_json.get("state_delta")
+        if isinstance(state_delta, dict):
+            candidates.append(state_delta.get("cortex"))
+
+    state_delta = getattr(run, "state_delta", None)
+    if isinstance(state_delta, dict):
+        candidates.append(state_delta.get("cortex"))
+
+    for cortex in candidates:
+        if isinstance(cortex, dict):
+            return cortex
+    return {}
+
+
+def _workbench_output_has_next_verification(run: Any) -> bool:
+    cortex = _run_workbench_cortex(run)
+    return _has_actionable_next_verification(str(cortex.get("next_verification") or ""))
+
+
+def _unresolved_workbench_verification_blockers(task: Any, recent_runs: list[Any]) -> list[str]:
+    cortex = _task_cortex(task)
+    next_verification = str(cortex.get("next_verification") or "").strip()
+    if not _has_actionable_next_verification(next_verification):
+        return []
+
+    latest_workbench_idx: int | None = None
+    for idx, run in enumerate(recent_runs):
+        if str(getattr(run, "tool_name", "") or "") == "task.workbench" and _workbench_output_has_next_verification(run):
+            latest_workbench_idx = idx
+            break
+
+    if latest_workbench_idx is None:
+        return []
+
+    newer_runs = recent_runs[:latest_workbench_idx]
+    if any(_is_successful_verification_run(run, next_verification=next_verification) for run in newer_runs):
+        return []
+
+    return [
+        (
+            "task.workbench 仍有未执行的 next_verification，不能把写 workbench/语义记忆当作完成："
+            f"{next_verification[:180]}"
+        )
+    ]
+
+
 async def _resolve_active_task(ctx: ToolContext):
     task = await ctx.get_active_task()
     if task is not None:
+        task_store = getattr(ctx, "task_store", None)
+        getter = getattr(task_store, "get_task_by_id", None)
+        raw_task_id = getattr(task, "id", None)
+        if getter is not None and raw_task_id is not None:
+            try:
+                refreshed = await getter(int(raw_task_id))
+                if refreshed is not None:
+                    return refreshed
+            except Exception:
+                pass
         return task
     task_store = getattr(ctx, "task_store", None)
     getter = getattr(task_store, "get_active", None)
@@ -125,6 +315,68 @@ def _task_metadata(
         chain_id=task.chain_id,
         **extra,
     )
+
+
+def _clip_recovery_text(value: Any, limit: int = 220) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
+def _completion_recovery_tools(blocker_code: str, recovery_next_step: str = "") -> list[str]:
+    text = str(recovery_next_step or "")
+    tools: list[str] = []
+
+    def add(*names: str) -> None:
+        for name in names:
+            if name not in tools:
+                tools.append(name)
+
+    if any(marker in text for marker in ("测试", "运行", "执行", "命令", "日志")):
+        add("shell.run")
+    if any(marker in text for marker in ("读取", "定位", "查找", "文件", "实现", "代码", "配置")):
+        add("file.read", "shell.run")
+    if any(marker in text for marker in ("探针", "probe", "健康", "告警")):
+        add("probe.run")
+    if any(marker in text for marker in ("记忆", "语义", "历史", "任务")):
+        add("memory.search", "task.workbench")
+
+    if blocker_code == "MutationWithoutVerification":
+        add("shell.run", "file.read")
+    elif blocker_code == "WorkbenchVerificationPending":
+        add("file.read", "shell.run", "probe.run", "task.workbench")
+    elif blocker_code == "SelfDriveGrowthIncomplete":
+        add("memory.search", "probe.run", "shell.run", "task.workbench")
+    elif blocker_code == "ActionFirstCompletionBlocked":
+        add("shell.run", "file.read", "task.workbench")
+    elif blocker_code == "InsufficientEvidence":
+        add("task.update", "task.workbench")
+    elif blocker_code == "UserInboxPending":
+        add("task.add", "task.workbench")
+
+    return tools[:5]
+
+
+def _completion_block_state(
+    *,
+    blocker_code: str,
+    blockers: list[str] | None = None,
+    recovery_next_step: str = "",
+    next_verification: str = "",
+    suggested_tools: list[str] | None = None,
+) -> dict[str, Any]:
+    recovery = _clip_recovery_text(recovery_next_step or next_verification)
+    verification = _clip_recovery_text(next_verification)
+    return {
+        "task_status": "in_progress",
+        "completion_blocked": True,
+        "completion_blocker": blocker_code,
+        "blockers": [_clip_recovery_text(item, 180) for item in (blockers or [])],
+        "recovery_next_step": recovery,
+        "next_verification": verification,
+        "suggested_tools": list(suggested_tools or _completion_recovery_tools(blocker_code, recovery or verification)),
+    }
 
 
 def _similar_task_source_filters(source: str) -> tuple[tuple[str, ...] | None, tuple[str, ...] | None]:
@@ -317,6 +569,11 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         # 自驱任务：若曾收到用户 inbox 消息，要求先为用户消息创建任务或回复，
         # 再完成自驱任务。确认已处理后可用 force=True 强制完成。
         if getattr(task, "source", None) == "self_drive" and isinstance(task.extras, dict) and task.extras.get("had_user_inbox"):
+            recovery_state = _completion_block_state(
+                blocker_code="UserInboxPending",
+                recovery_next_step="先为用户 inbox 消息创建任务或回复用户，再完成当前自驱任务。",
+                suggested_tools=["task.add", "task.workbench"],
+            )
             return ToolResult(
                 summary=(
                     f"任务 [{task.id}] 是自驱任务，但本轮收到过用户消息（inbox）。"
@@ -325,15 +582,22 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 ),
                 error="UserInboxPending",
                 skipped=True,
+                state_delta=recovery_state,
                 metadata=_task_metadata(
                     task,
                     tool_name="task.complete",
                     log_summary=f"task.complete rejected UserInboxPending id={task.id}",
+                    **recovery_state,
                 ),
             )
         recent_runs = await ctx.task_store.list_runs(task_id=task.id, limit=12)
         self_drive_growth_blockers = _self_drive_growth_completion_blockers(task, recent_runs)
         if self_drive_growth_blockers:
+            recovery_state = _completion_block_state(
+                blocker_code="SelfDriveGrowthIncomplete",
+                blockers=self_drive_growth_blockers,
+                recovery_next_step="先执行一个非 task 取证工具，并把证据写入 task.workbench、current_step 或 result summary。",
+            )
             return ToolResult(
                 summary=(
                     f"任务 [{task.id}] 暂不允许完成：自驱成长任务还没有形成最小成长证据。"
@@ -341,15 +605,73 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 ),
                 error="SelfDriveGrowthIncomplete",
                 skipped=True,
+                state_delta=recovery_state,
                 metadata=_task_metadata(
                     task,
                     tool_name="task.complete",
                     log_summary=f"task.complete rejected SelfDriveGrowthIncomplete id={task.id}",
-                    blockers=self_drive_growth_blockers,
+                    **recovery_state,
+                ),
+            )
+        workbench_verification_blockers = _unresolved_workbench_verification_blockers(task, recent_runs)
+        if workbench_verification_blockers:
+            next_verification = str(_task_cortex(task).get("next_verification") or "").strip()
+            recovery_state = _completion_block_state(
+                blocker_code="WorkbenchVerificationPending",
+                blockers=workbench_verification_blockers,
+                next_verification=next_verification,
+                recovery_next_step=next_verification,
+            )
+            return ToolResult(
+                summary=(
+                    f"任务 [{task.id}] 暂不允许完成：任务皮层仍有未验证的下一步。"
+                    + " ".join(workbench_verification_blockers)
+                ),
+                error="WorkbenchVerificationPending",
+                skipped=True,
+                state_delta=recovery_state,
+                metadata=_task_metadata(
+                    task,
+                    tool_name="task.complete",
+                    log_summary=f"task.complete rejected WorkbenchVerificationPending id={task.id}",
+                    **recovery_state,
+                ),
+            )
+        implementation_blockers = _self_drive_unresolved_implementation_blockers(task, recent_runs, ctx)
+        if implementation_blockers:
+            recovery_state = _completion_block_state(
+                blocker_code="SelfDriveImplementationDecisionPending",
+                blockers=implementation_blockers,
+                recovery_next_step=(
+                    "先把实现候选收敛成明确决策：若应修改，定位文件并实施后验证；"
+                    "若不修改，用 task.workbench 写清不可改的硬约束、风险和替代监控条件。"
+                ),
+                suggested_tools=["file.read", "shell.run", "task.workbench"],
+            )
+            return ToolResult(
+                summary=(
+                    f"任务 [{task.id}] 暂不允许完成：自驱成长任务发现了实现候选，但还没有完成“是否修改”的决策闭环。"
+                    + " ".join(implementation_blockers)
+                ),
+                error="SelfDriveImplementationDecisionPending",
+                skipped=True,
+                state_delta=recovery_state,
+                metadata=_task_metadata(
+                    task,
+                    tool_name="task.complete",
+                    log_summary=(
+                        f"task.complete rejected SelfDriveImplementationDecisionPending id={task.id}"
+                    ),
+                    **recovery_state,
                 ),
             )
         action_first_blockers = action_first_completion_blockers(task=task, recent_runs=recent_runs)
         if action_first_blockers:
+            recovery_state = _completion_block_state(
+                blocker_code="ActionFirstCompletionBlocked",
+                blockers=action_first_blockers,
+                recovery_next_step="执行或重试用户输入对应的真实工具，并用成功结果或验收证据更新 task.workbench。",
+            )
             return ToolResult(
                 summary=(
                     f"任务 [{task.id}] 暂不允许完成：Action-first 执行任务仍缺少验收证据。"
@@ -357,11 +679,12 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 ),
                 error="ActionFirstCompletionBlocked",
                 skipped=True,
+                state_delta=recovery_state,
                 metadata=_task_metadata(
                     task,
                     tool_name="task.complete",
                     log_summary=f"task.complete rejected ActionFirstCompletionBlocked id={task.id}",
-                    blockers=action_first_blockers,
+                    **recovery_state,
                 ),
             )
         recent_tools = [
@@ -371,6 +694,12 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         only_info_browsing = bool(recent_tools) and all(tool_has_capability(ctx.registry, t, "completion_info_only") for t in recent_tools)
         explicit_progress = bool((task.current_step or "").strip() or str(task.result_json.get("summary") or "").strip())
         if only_info_browsing and not explicit_progress:
+            recovery_state = _completion_block_state(
+                blocker_code="InsufficientEvidence",
+                blockers=["最近仅有信息浏览类动作，且缺少 current_step / result summary 等明确结论。"],
+                recovery_next_step="先更新 current_step、result summary 或 task.workbench，写清结论与下一步验证。",
+                suggested_tools=["task.update", "task.workbench"],
+            )
             return ToolResult(
                 summary=(
                     f"任务 [{task.id}] 暂不允许完成：最近仅有信息浏览类动作，"
@@ -379,11 +708,13 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 ),
                 error="InsufficientEvidence",
                 skipped=True,
+                state_delta=recovery_state,
                 metadata=_task_metadata(
                     task,
                     tool_name="task.complete",
                     log_summary=f"task.complete rejected InsufficientEvidence id={task.id}",
                     recent_tools=recent_tools,
+                    **recovery_state,
                 ),
             )
 
@@ -403,6 +734,12 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 for t in post_mutation_tools
             )
             if not verified_after:
+                recovery_state = _completion_block_state(
+                    blocker_code="MutationWithoutVerification",
+                    blockers=[f"最近有修改动作（{recent_tools[latest_mutation_idx]}），但缺少后续验证。"],
+                    recovery_next_step="运行 completion_verify 工具验证最近修改，例如 shell.run 跑测试或 file.read 回读关键文件。",
+                    suggested_tools=["shell.run", "file.read"],
+                )
                 return ToolResult(
                     summary=(
                         f"任务 [{task.id}] 暂不允许完成：最近有修改动作"
@@ -412,6 +749,7 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                     ),
                     error="MutationWithoutVerification",
                     skipped=True,
+                    state_delta=recovery_state,
                     metadata=_task_metadata(
                         task,
                         tool_name="task.complete",
@@ -420,6 +758,7 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                         ),
                         last_mutation=recent_tools[latest_mutation_idx],
                         post_mutation_tools=post_mutation_tools,
+                        **recovery_state,
                     ),
                 )
 
@@ -460,7 +799,7 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             summary=f"任务 [{task.id}] 已完成，叙事已编译进语义记忆",
             evidence=f"task_id={task.id} skill_node={node_id}",
             resource_key=str(task.id),
-            state_delta={"task_status": "done", "compiled_skill": node_id},
+            state_delta={"task_id": task.id, "task_status": "done", "compiled_skill": node_id},
             metadata=_task_metadata(
                 task,
                 tool_name="task.complete",
@@ -473,7 +812,7 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         summary=f"任务 [{task.id}] 已完成",
         evidence=f"task_id={task.id}",
         resource_key=str(task.id),
-        state_delta={"task_status": "done"},
+        state_delta={"task_id": task.id, "task_status": "done"},
         metadata=_task_metadata(
             task,
             tool_name="task.complete",
@@ -610,7 +949,7 @@ async def task_fail(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         summary=f"任务 [{task.id}] 已标记失败: {reason}",
         evidence=f"task_id={task.id} reason={reason}",
         resource_key=str(task.id),
-        state_delta={"task_status": "failed", "reason": reason},
+        state_delta={"task_id": task.id, "task_status": "failed", "reason": reason},
         metadata=_task_metadata(
             task,
             tool_name="task.fail",
@@ -637,15 +976,38 @@ async def task_wait(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     task = await _resolve_task(params.get("task_id"), ctx)
     if not task:
         return ToolResult(summary="无活跃任务可等待", skipped=True)
+
+    def _invalid_wait_input(summary: str, *, code: str = "ToolInputInvalid") -> ToolResult:
+        return ToolResult(
+            summary=summary,
+            skipped=True,
+            error=code,
+            state_delta={
+                "tool_input_invalid": True,
+                "recovery_next_step": summary,
+                "suggested_tools": ["task.wait", "task.update", "task.workbench"],
+            },
+            metadata=_task_metadata(
+                task,
+                tool_name="task.wait",
+                log_summary=f"task.wait rejected invalid input id={task.id} code={code}",
+            ),
+        )
+
     wait_kind = (params.get("wait_kind") or "").strip().lower()
     if not wait_kind:
-        return ToolResult(summary="wait_kind 不能为空", skipped=True)
+        return _invalid_wait_input("wait_kind 不能为空；请指定 process/task/signal/time/external 之一。")
     wait_key = (params.get("wait_key") or "").strip()
     valid_wait_kinds = {"process", "task", "signal", "time", "external"}
     if wait_kind not in valid_wait_kinds:
-        return ToolResult(summary=f"不支持的 wait_kind: {wait_kind}", skipped=True)
+        return _invalid_wait_input(
+            f"不支持的 wait_kind: {wait_kind}；请改用 process/task/signal/time/external 之一。"
+        )
     current_step = str(params.get("current_step") or "").strip() if "current_step" in params else None
     next_step = str(params.get("next_step") or "").strip() if "next_step" in params else task.next_step
+    if wait_kind == "external" and not wait_key and not str(next_step or "").strip():
+        recovery = "external wait 缺少 wait_key 时必须写清 next_step，说明收到什么外部信号后如何恢复。"
+        return _invalid_wait_input(recovery, code="WaitConditionAmbiguous")
     await metabolic_mark_task_waiting(
         ctx,
         task.id,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from core.loop.routing_overrides import normalize_routing_overrides, routing_overrides_meta
@@ -12,7 +13,14 @@ from store.episodic import EpisodicMemory
 from tools.registry import ToolResult
 
 from ..cycle.chat import _bind_chat_id
-from ..cycle.focus import adopt_result_task, finalize_focus_task, resolve_focus_task
+from ..cycle.focus import (
+    _clear_terminal_task_attention,
+    _safe_get_task_by_id,
+    adopt_result_task,
+    claim_focus_task,
+    finalize_focus_task,
+    resolve_focus_task,
+)
 from ..shared.common import (
     _JUDGMENT_TIERS,
     _next_initial_tier_hint,
@@ -62,6 +70,31 @@ async def _execute_tick_action(
         current_task_id = str(active_task.id) if active_task else None
         for item in loop._behavior.on_act(tool_id, key_param, current_task_id, action.params):
             loop._wm.add(item)
+        _gate_signals = SimpleNamespace()
+        loop._behavior.apply_cognitive_probe(_gate_signals)
+        _gate_signals.last_action_tool = getattr(loop, "_last_action_tool", "")
+        _gate_signals.last_action_key = getattr(loop, "_last_action_key", "")
+        _gate_signals.last_action_status = getattr(loop, "_last_action_status", "")
+        _gate_signals.last_action_progressful = (
+            getattr(loop, "_last_act_progressful", None)
+            if getattr(loop, "_last_action_status", "")
+            else None
+        )
+        _gate_signals.last_action_progress_reason = (
+            getattr(loop, "_last_act_progress_reason", "")
+            if getattr(loop, "_last_action_status", "")
+            else ""
+        )
+        _gate_signals.active_task_id = getattr(active_task, "id", "") if active_task is not None else ""
+        _gate_signals.active_task_source = getattr(active_task, "source", "") if active_task is not None else ""
+        _gate_signals.active_task_status = getattr(active_task, "status", "") if active_task is not None else ""
+        _gate_signals.active_task_next_step = getattr(active_task, "next_step", "") if active_task is not None else ""
+        gate = getattr(loop._behavior, "apply_execution_gate", None)
+        if gate is not None:
+            action = gate(action, _gate_signals)
+        if action.decision != "act":
+            for item in loop._behavior.on_wait(action.decision, active_task is not None):
+                loop._wm.add(item)
     else:
         for item in loop._behavior.on_wait(action.decision, active_task is not None):
             loop._wm.add(item)
@@ -125,6 +158,7 @@ async def _maybe_run_tick_continue_phase(
         user_message=user_message,
         has_active_task=active_task is not None,
         registry=loop._registry,
+        result=result,
     ):
         return action, result
     return await _run_continue_phase(
@@ -205,6 +239,58 @@ async def _sync_tick_action_state(
     )
     await _bind_chat_id(loop, active_task, chat_id)
     await _maybe_record_success_stall_reflection(loop, active_task, action, result, cycle)
+    return active_task
+
+
+async def _cleanup_terminal_result_attention(
+    loop: Any,
+    action: Any,
+    result: ToolResult | Any,
+    active_task: Task | None,
+    chat_id: str | None,
+) -> Task | None:
+    """Clear stale task anchors even when a terminal tool ran without active_task."""
+    if action.decision != "act":
+        return active_task
+    if str(action.chosen_action_id or "") not in {"task.complete", "task.fail"}:
+        return active_task
+    if getattr(result, "error", None) or getattr(result, "skipped", False):
+        return active_task
+
+    state_delta = result.state_delta if isinstance(getattr(result, "state_delta", None), dict) else {}
+    metadata = result.metadata if isinstance(getattr(result, "metadata", None), dict) else {}
+    terminal_statuses = {"done", "cancelled", "failed"}
+    status = str(state_delta.get("task_status") or "").strip()
+    if status not in terminal_statuses:
+        status = "done" if str(action.chosen_action_id or "") == "task.complete" else "failed"
+
+    raw_task_id: Any = state_delta.get("task_id") or metadata.get("task_id") or getattr(result, "resource_key", "")
+    try:
+        task_id = int(raw_task_id)
+    except (TypeError, ValueError):
+        return active_task
+
+    if active_task is not None and int(getattr(active_task, "id", 0) or 0) != task_id:
+        return active_task
+
+    task = active_task
+    if task is None:
+        task = await _safe_get_task_by_id(getattr(loop, "_task_store", None), task_id)
+    if task is None:
+        return active_task
+
+    if str(getattr(task, "status", "") or "") not in terminal_statuses:
+        refreshed = await _safe_get_task_by_id(getattr(loop, "_task_store", None), task_id)
+        if refreshed is not None:
+            task = refreshed
+    if str(getattr(task, "status", "") or status) not in terminal_statuses:
+        return active_task
+
+    _clear_terminal_task_attention(loop, task)
+    await claim_focus_task(loop, None, chat_id=chat_id or None, clear_current=True)
+    _log.info("[focus] terminal task=%s attention cleaned from result", task_id)
+    if active_task is not None and int(getattr(active_task, "id", 0) or 0) == task_id:
+        return None
     return active_task
 
 
@@ -514,6 +600,7 @@ async def _tick_finalize_impl(
         chat_id=chat_id,
         user_message=user_message,
     )
+    active_task = await _cleanup_terminal_result_attention(loop, action, result, active_task, chat_id)
     active_task = await _apply_tick_model_strategy(loop, action, active_task)
     await _persist_tick_post_state(loop, action, active_task, cycle, ethos_state=ethos_state)
 

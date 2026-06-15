@@ -41,6 +41,7 @@ from provider.catalog import get_run_type_routing as _get_run_type_routing
 from tools.registry import ToolContext, ToolResult, tool_metadata
 
 _log = logging.getLogger("lingzhou.execution")
+_TERMINAL_TASK_ACTIONS = frozenset({"task.complete", "task.fail"})
 
 if TYPE_CHECKING:
     from core.config import Config
@@ -127,6 +128,33 @@ class ExecutionLayer:
         if not sub_actions:
             return ToolResult(summary="parallel_actions 为空，退化为 wait", skipped=True, kind="wait")
 
+        terminal_actions = [a for a in sub_actions if a.chosen_action_id in _TERMINAL_TASK_ACTIONS]
+        if terminal_actions and len(sub_actions) > 1:
+            executable_actions = [a for a in sub_actions if a.chosen_action_id not in _TERMINAL_TASK_ACTIONS]
+            deferred_names = [str(a.chosen_action_id or "") for a in terminal_actions]
+            if not executable_actions:
+                return ToolResult(
+                    summary="终结任务动作不能并发执行，请只保留一个 task.complete 或 task.fail。",
+                    skipped=True,
+                    kind="execute_result",
+                    error="TerminalActionParallelInvalid",
+                    state_delta={
+                        "deferred_terminal_actions": deferred_names,
+                        "recovery_next_step": "将 task.complete/task.fail 作为单独动作重试，不能放在 parallel_actions 同批执行。",
+                    },
+                    metadata=tool_metadata(
+                        "exec.parallel",
+                        "exec.parallel terminal_actions_invalid",
+                        parallel_count=len(sub_actions),
+                        deferred_terminal_actions=deferred_names,
+                    ),
+                )
+            _log.info(
+                "[exec.parallel] deferring terminal task actions until evidence batch completes: %s",
+                deferred_names,
+            )
+            sub_actions = executable_actions
+
         _log.info(
             "[exec.parallel] launching %d tools: %s",
             len(sub_actions), [a.chosen_action_id for a in sub_actions],
@@ -141,16 +169,31 @@ class ExecutionLayer:
         )
         errors = [r.error for r in results if r.error]
         combined_error = "; ".join(errors) if errors else None
+        if terminal_actions:
+            deferred_names = [str(a.chosen_action_id or "") for a in terminal_actions]
+            deferred_line = (
+                f"[{', '.join(deferred_names)}] 已延后：终结任务前需要先让本轮证据/工作台写入落地，"
+                "下一轮再单独执行完成动作。"
+            )
+            merged_summary = "\n".join(part for part in (merged_summary, deferred_line) if part)
+            state_delta = {
+                "deferred_terminal_actions": deferred_names,
+                "recovery_next_step": "先根据本轮工具结果更新任务证据；若 completion_checks 已满足，再单独执行 task.complete。",
+            }
+        else:
+            state_delta = {}
         return ToolResult(
             summary=merged_summary,
             error=combined_error,
             kind="execute_result",
+            state_delta=state_delta,
             priority=max((r.priority for r in results), default=0.9),
             metadata=tool_metadata(
                 "exec.parallel",
                 f"exec.parallel count={len(sub_actions)} errors={len(errors)}",
                 parallel_count=len(sub_actions),
                 errors=errors,
+                deferred_terminal_actions=[str(a.chosen_action_id or "") for a in terminal_actions],
             ),
         )
 

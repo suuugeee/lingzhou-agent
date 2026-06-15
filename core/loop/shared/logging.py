@@ -87,12 +87,22 @@ class MemoryContextScrubber:
 
 def _clip_reply_for_log(text: str, limit: int = DEFAULT_LOG_REPLY_CHARS) -> str:
     cleaned = _strip_memory_context(text).replace("\n", "\\n").strip()
-    return cleaned
+    limit = max(1, int(limit or 1))
+    if len(cleaned) <= limit:
+        return cleaned
+    if limit <= 3:
+        return cleaned[:limit]
+    return cleaned[: limit - 3].rstrip() + "..."
 
 
 def _clip_signal_text(text: str, limit: int = 160) -> str:
     cleaned = " ".join((text or "").split())
-    return cleaned
+    limit = max(1, int(limit or 1))
+    if len(cleaned) <= limit:
+        return cleaned
+    if limit <= 3:
+        return cleaned[:limit]
+    return cleaned[: limit - 3].rstrip() + "..."
 
 
 def _summarize_state_delta(state_delta: dict[str, Any] | None, limit: int = 120) -> str:
@@ -130,45 +140,31 @@ def _format_action_feedback_line(
 
 
 def _fallback_reply_for_user(action: JudgmentOutput, result: ToolResult, active_task: Task | None) -> str:
-    def _fact_line(prefix: str, value: str) -> str:
-        value = value.strip()
-        return f"{prefix}: {value}" if value else ""
-
-    next_step = str(action.next_step or (active_task.next_step if active_task else "") or "").strip()
+    state_delta = result.state_delta if isinstance(result.state_delta, dict) else {}
+    recovery_next_step = str(
+        state_delta.get("recovery_next_step")
+        or state_delta.get("next_verification")
+        or ""
+    ).strip()
+    next_step = str(action.next_step or recovery_next_step or (active_task.next_step if active_task else "") or "").strip()
+    next_clause = f"下一步我会先处理：{_clip_signal_text(next_step, 80)}" if next_step else ""
     if result.error:
-        lines = [
-            _fact_line("状态", "error"),
-            _fact_line("detail", _clip_signal_text(result.summary or result.error, 100)),
-            _fact_line("next", _clip_signal_text(next_step, 60)) if next_step else "",
-        ]
-        return ";".join(line for line in lines if line)
+        detail = _clip_signal_text(result.summary or result.error, 120)
+        return " ".join(part for part in [f"这轮工具执行失败（状态: error）：{detail}。", next_clause] if part).strip()
 
     if action.decision in {"wait", "pause"}:
         raw_basis = action.rationale or ""
         if any(tech in raw_basis for tech in ("缺少 chosen_action_id", "LLM 输出解析失败", "无效 decision", "list index out of range", "not defined")):
             raw_basis = ""
-        lines = [
-            _fact_line("状态", action.decision),
-            _fact_line("basis", _clip_signal_text(raw_basis or "需要更多信息后再继续。", 100)),
-            _fact_line("next", _clip_signal_text(next_step, 60)) if next_step else "",
-        ]
-        return ";".join(line for line in lines if line)
+        basis = _clip_signal_text(raw_basis or "需要更多信息后再继续。", 120)
+        return " ".join(part for part in [f"我需要先停一下：{basis}", next_clause] if part).strip()
 
     task_status = str((result.state_delta or {}).get("task_status") or "").strip()
     if task_status == "waiting":
         wait_kind = str((result.state_delta or {}).get("wait_kind") or "external").strip()
         wait_key = str((result.state_delta or {}).get("wait_key") or "").strip()
         wait_desc = wait_kind + (f"/{wait_key}" if wait_key else "")
-        lines = [
-            _fact_line("状态", "waiting"),
-            _fact_line("wait", wait_desc),
-            _fact_line("next", _clip_signal_text(next_step, 60)) if next_step else "",
-        ]
-        return ";".join(line for line in lines if line)
+        return " ".join(part for part in [f"当前任务已转入等待：{wait_desc}。", next_clause] if part).strip()
 
-    lines = [
-        _fact_line("状态", "progressed"),
-        _fact_line("basis", _clip_signal_text(action.rationale or "已完成本轮处理，正在整理基于证据的答复。", 100)),
-        _fact_line("next", _clip_signal_text(next_step, 60)) if next_step else "",
-    ]
-    return ";".join(line for line in lines if line)
+    basis = _clip_signal_text(action.rationale or "已完成本轮处理，正在整理基于证据的答复。", 120)
+    return " ".join(part for part in [f"我已完成本轮处理：{basis}", next_clause] if part).strip()

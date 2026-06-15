@@ -26,6 +26,92 @@ if TYPE_CHECKING:
 
 WorkerHandler = Callable[["ToolEntry", "JudgmentOutput", ToolContext], Awaitable[ToolResult]]
 
+_WORKBENCH_PREFERENCE_FIELDS = {
+    "domain",
+    "intent",
+    "hypothesis",
+    "working_hypothesis",
+    "recovery_state",
+    "next_verification",
+    "capabilities",
+    "experiments",
+    "evidence",
+    "open_questions",
+    "completion_checks",
+    "progress",
+    "failures",
+}
+
+def _repair_task_workbench_params(entry: ToolEntry, params: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        return params
+    if entry.manifest.name != "task.workbench":
+        return params
+    existing_workbench = params.get("workbench")
+    if isinstance(existing_workbench, dict) and existing_workbench:
+        return params
+
+    workbench_payload: dict[str, Any] = {
+        key: value for key, value in params.items() if key in _WORKBENCH_PREFERENCE_FIELDS
+    }
+    progress_items: list[str] = []
+    for alias in ("current_step", "summary"):
+        value = str(params.get(alias) or "").strip()
+        if value:
+            progress_items.append(value)
+    result_summary = str(params.get("result_summary") or "").strip()
+    if result_summary:
+        workbench_payload.setdefault("evidence", [])
+        if isinstance(workbench_payload["evidence"], list):
+            workbench_payload["evidence"].append(result_summary)
+    if progress_items:
+        workbench_payload.setdefault("progress", [])
+        if isinstance(workbench_payload["progress"], list):
+            workbench_payload["progress"].extend(progress_items)
+    if not workbench_payload:
+        return params
+
+    repaired = dict(params)
+    if "task_id" not in repaired and "id" in repaired:
+        repaired["task_id"] = repaired["id"]
+    repaired["workbench"] = workbench_payload
+    return repaired
+
+
+def _param_template_value(param_type: str) -> Any:
+    if param_type == "string":
+        return "<string>"
+    if param_type == "number":
+        return 0
+    if param_type == "boolean":
+        return False
+    if param_type == "array":
+        return []
+    if param_type == "object":
+        return {}
+    return None
+
+
+def _expected_param_specs(entry: ToolEntry) -> list[dict[str, Any]]:
+    return [
+        {
+            "name": param.name,
+            "type": param.type,
+            "required": bool(param.required),
+            "description": param.description,
+        }
+        for param in entry.manifest.params
+    ]
+
+
+def _retry_params_template(entry: ToolEntry, params: dict[str, Any], missing: list[str]) -> dict[str, Any]:
+    retry = dict(params or {})
+    for param in entry.manifest.params:
+        if param.name not in missing:
+            continue
+        retry[param.name] = _param_template_value(param.type)
+    return retry
+
 
 def _validate_required_params(entry: ToolEntry, params: dict[str, Any]) -> ToolResult | None:
     missing: list[str] = []
@@ -43,21 +129,40 @@ def _validate_required_params(entry: ToolEntry, params: dict[str, Any]) -> ToolR
             missing.append(param.name)
     if not missing:
         return None
+    expected_params = _expected_param_specs(entry)
+    retry_template = _retry_params_template(entry, params, missing)
+    recovery_next_step = (
+        f"按 {entry.manifest.name} 的 manifest 重新调用工具；"
+        f"补齐必填参数 {', '.join(missing)}，不要把这些字段放在顶层以外的错误位置。"
+    )
+    state_delta = {
+        "tool_input_invalid": True,
+        "tool_name": entry.manifest.name,
+        "missing_params": missing,
+        "expected_params": expected_params,
+        "retry_params_template": retry_template,
+        "recovery_next_step": recovery_next_step,
+    }
     return ToolResult(
         summary=f"工具参数缺失: {entry.manifest.name} requires {', '.join(missing)}",
         error="ToolInputInvalid",
         skipped=True,
         kind="error",
+        state_delta=state_delta,
         metadata={
             "tool_name": entry.manifest.name,
             "log_summary": f"{entry.manifest.name} missing_params={','.join(missing)}",
             "missing_params": missing,
+            "expected_params": expected_params,
+            "retry_params_template": retry_template,
+            "recovery_next_step": recovery_next_step,
         },
     )
 
 
 async def _call_handler(entry: ToolEntry, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     """调用工具 handler，兼容同步函数与 dict 返回值（进化工具可能产生这两种情况）。"""
+    params = _repair_task_workbench_params(entry, params)
     validation_error = _validate_required_params(entry, params)
     if validation_error is not None:
         return validation_error

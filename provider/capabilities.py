@@ -17,9 +17,26 @@ def resolve_model_ref_for_input(
     current_model_ref: str | None = None,
 ) -> str:
     """返回满足 capability + input_modality 的 model_ref；无候选时抛 RuntimeError。"""
-    model_ref = (current_model_ref or cfg.model).strip()
+    configured_vision_ref = str(getattr(cfg, "vision_model", "") or "").strip()
+    configured_provider = configured_vision_ref.partition("/")[0]
+    use_configured_vision = (
+        current_model_ref is None
+        and configured_vision_ref
+        and configured_provider in getattr(cfg, "providers", {})
+        and capability == "vision"
+        and input_modality == "image"
+    )
+    if use_configured_vision:
+        model_ref = configured_vision_ref
+    else:
+        model_ref = (current_model_ref or cfg.model).strip()
     if model_supports(model_ref, capability=capability, input_modality=input_modality):
         return model_ref
+
+    if use_configured_vision:
+        raise RuntimeError(
+            f"配置的 vision_model {model_ref} 不支持 {input_modality} 输入或缺少 {capability} 能力"
+        )
 
     fallback_ref = find_model_ref_for_capability(
         capability=capability,

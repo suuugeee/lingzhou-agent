@@ -192,7 +192,23 @@ class EpisodicViewProtocol(Protocol):
     方法签名须与 store/episodic/__init__.py:EpisodicMemory 保持同步。
     """
 
-    def load_for_context(self, task_id: str | None, *, n_recent: int = 20) -> str: ...
+    def load_for_context(self, task_id: str | None, n_recent: int = 20) -> str: ...
+    def load_for_chat_context(
+        self,
+        chat_id: str | None,
+        n_recent: int = 20,
+        *,
+        max_chars: int | None = None,
+    ) -> str: ...
+    def load_for_interlocutor_context(
+        self,
+        interlocutor_id: str | None,
+        n_recent: int = 20,
+        *,
+        max_chars: int | None = None,
+    ) -> str: ...
+    def load_for_task_narrative(self, task_id: str | None, n_recent: int = 20) -> str: ...
+    def load_recent_daily_context(self, days: int = 2, max_chars: int = 1200) -> str: ...
     def search(self, query: str, max_chars: int = 2000, exclude_task_id: str | None = None) -> str: ...
     def get_recent_turns(
         self,

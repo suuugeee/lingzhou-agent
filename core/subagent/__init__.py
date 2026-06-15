@@ -91,8 +91,32 @@ class _SubagentEpisodicView:
     def record_event(self, *args: Any, **kwargs: Any) -> None:
         return None
 
-    def load_for_context(self, task_id: str | None, *, n_recent: int = 20) -> str:
-        return self._parent.load_for_context(task_id, n_recent=n_recent)
+    def load_for_context(self, task_id: str | None, n_recent: int = 20) -> str:
+        return self._parent.load_for_context(task_id, n_recent)
+
+    def load_for_chat_context(
+        self,
+        chat_id: str | None,
+        n_recent: int = 20,
+        *,
+        max_chars: int | None = None,
+    ) -> str:
+        return self._parent.load_for_chat_context(chat_id, n_recent, max_chars=max_chars)
+
+    def load_for_interlocutor_context(
+        self,
+        interlocutor_id: str | None,
+        n_recent: int = 20,
+        *,
+        max_chars: int | None = None,
+    ) -> str:
+        return self._parent.load_for_interlocutor_context(interlocutor_id, n_recent, max_chars=max_chars)
+
+    def load_for_task_narrative(self, task_id: str | None, n_recent: int = 20) -> str:
+        return self._parent.load_for_task_narrative(task_id, n_recent)
+
+    def load_recent_daily_context(self, days: int = 2, max_chars: int = 1200) -> str:
+        return self._parent.load_recent_daily_context(days, max_chars)
 
     def search(self, query: str, max_chars: int = 2000, exclude_task_id: str | None = None) -> str:
         return self._parent.search(query, max_chars=max_chars, exclude_task_id=exclude_task_id)

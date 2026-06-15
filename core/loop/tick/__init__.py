@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from typing import Any
 
 from core.judgment import JudgmentOutput
@@ -66,20 +68,46 @@ async def _finalize_tick_user_reply(
     """口腔器官：基于执行结果生成真正的对外回复。"""
     if user_message:
         reply_draft = str(action.reply_to_user or "").strip()
+        if (
+            reply_draft
+            and action.decision in {"wait", "pause"}
+            and not tool_history
+            and not result.error
+            and not result.skipped
+        ):
+            await _persist_tick_user_reply(loop, action, active_task, chat_id, user_message)
+            return
         action.reply_to_user = ""
         reply_only = await _maybe_fill_tick_user_reply(loop, action, tool_history, user_message, active_task, result)
         reply_only_rationale = str(getattr(reply_only, "rationale", "") or "").strip()
-        reply_only_failed = (
-            bool(result.error)
-            or not reply_only_rationale
-            or reply_only_rationale.startswith(("[reply-only]", "[inner-loop]"))
-        )
-        if not action.reply_to_user and reply_only_failed:
-            _log.warning(
-                "[oral-bypass] reply_only失败，绕过口腔器官回落 draft rationale=%s",
-                (reply_only_rationale[:80] if reply_only_rationale else "empty"),
-            )
-            action.reply_to_user = reply_draft or _fallback_reply_for_user(action, result, active_task)
+        if reply_only and getattr(reply_only, "decision", "") in {"wait", "pause"}:
+            # reply-only 语义上必须是可见响应态，不应在最终状态里保留 act。
+            action.decision = reply_only.decision
+            action.chosen_action_id = ""
+            action.params = {}
+            action.parallel_actions = []
+            action.delegate_tasks = []
+            if not action.rationale and reply_only.rationale:
+                action.rationale = reply_only.rationale
+            if not action.next_step and reply_only.next_step:
+                action.next_step = reply_only.next_step
+            if not action.reflection and reply_only.reflection:
+                action.reflection = reply_only.reflection
+            if not action.speech_intent and reply_only.speech_intent:
+                action.speech_intent = reply_only.speech_intent
+        if not action.reply_to_user:
+            fallback = _fallback_reply_for_user(action, result, active_task)
+            can_reuse_draft = bool(reply_draft) and action.decision in {"wait", "pause"} and not result.error
+            action.reply_to_user = reply_draft if can_reuse_draft else fallback
+            if not action.reply_to_user:
+                action.reply_to_user = (
+                    "已完成本轮处理，接下来我会基于证据继续执行闭环验证。"
+                    if not user_message else "我先整理本轮结果，随后继续推进。"
+                )
+                _log.warning(
+                    "[oral-bypass] reply_only与fallback均未生成可见回复（rationale=%s）",
+                    (reply_only_rationale[:80] if reply_only_rationale else "empty"),
+                )
     elif action.speech_intent and not action.reply_to_user:
         if action.decision != "act":
             action.reply_to_user = action.speech_intent
@@ -123,7 +151,7 @@ async def _maybe_fill_tick_user_reply(
                 user_message=user_message,
                 model_strategy=action.model_strategy,
             ),
-            "low",
+            "medium" if active_task is not None else "low",
         ),
         routing_overrides=loop._pending_routing_overrides,
         reply_only=True,
@@ -133,7 +161,15 @@ async def _maybe_fill_tick_user_reply(
     if not reply_only.reply_to_user:
         return reply_only
 
-    action.reply_to_user = reply_only.reply_to_user
+    reply_text = str(reply_only.reply_to_user or "").strip()
+    if _reply_looks_like_internal_payload(reply_text):
+        _log.warning(
+            "[mouth-check] reply_only produced internal tool payload; falling back to natural reply preview=%s",
+            _clip_reply_for_log(reply_text, 120),
+        )
+        return JudgmentOutput.wait(reason="[reply-only] reply_to_user 包含内部工具载荷")
+
+    action.reply_to_user = reply_text
     if reply_only.rationale:
         action.rationale = reply_only.rationale
     if reply_only.reflection and not action.reflection:
@@ -142,6 +178,54 @@ async def _maybe_fill_tick_user_reply(
         action.next_step = reply_only.next_step
     _check_mouth_consistency(action.reply_to_user, _ar)
     return reply_only
+
+
+def _json_like_internal_payload(value: Any) -> bool:
+    if isinstance(value, dict):
+        internal_keys = {
+            "command",
+            "tool",
+            "params",
+            "chosen_action_id",
+            "parallel_actions",
+            "stdout",
+            "stderr",
+            "exit_code",
+            "workdir",
+        }
+        if any(key in value for key in internal_keys):
+            return True
+        return any(_json_like_internal_payload(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_json_like_internal_payload(item) for item in value)
+    return False
+
+
+def _reply_looks_like_internal_payload(reply: str) -> bool:
+    text = str(reply or "").strip()
+    if not text:
+        return False
+    fenced = re.fullmatch(r"```(?:json|bash|sh)?\s*(.*?)\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    try:
+        parsed = json.loads(text)
+    except Exception:
+        parsed = None
+    if _json_like_internal_payload(parsed):
+        return True
+
+    json_lines = [line.strip() for line in text.splitlines() if line.strip().startswith(("{", "["))]
+    for line in json_lines[:4]:
+        try:
+            parsed_line = json.loads(line)
+        except Exception:
+            continue
+        if _json_like_internal_payload(parsed_line):
+            return True
+
+    return bool(re.search(r'^\s*\{[^}\n]*"(?:command|tool|chosen_action_id|params|workdir)"\s*:', text, flags=re.DOTALL))
 
 
 def _check_mouth_consistency(reply: str, action_result: _ActionResultSummary) -> None:

@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING, Any
 
 from .utils import (
     _cache_put,
-    _clip_text,
     _clip_for_context,
+    _clip_text,
     _context_fmt_cache,
     _format_fact_value,
     _run_summary,
@@ -57,6 +57,16 @@ def _fmt_task(task: Task | None) -> str:
         except Exception:
             pass
     last_run_status = str((task.result_json or {}).get("last_run_status") or "").strip()
+    cortex = (task.result_json or {}).get("cortex") if isinstance(task.result_json, dict) else None
+    if not isinstance(cortex, dict):
+        cortex = {}
+    recovery_state = str(cortex.get("recovery_state") or "").strip()
+    next_verification = str(
+        (cortex.get("next_verification") if isinstance(cortex, dict) else None)
+        or (cortex.get("next_experiment") if isinstance(cortex, dict) else None)
+        or (cortex.get("verification") if isinstance(cortex, dict) else None)
+        or ""
+    ).strip()
     lines = [
         f"ID: {task.id}",
         f"标题: {task.title}{age_str}",
@@ -68,6 +78,10 @@ def _fmt_task(task: Task | None) -> str:
         f"下一步: {task.next_step or '（未指定）'}",
         f"叙事线: {_task_narrative(task)}",
     ]
+    if recovery_state:
+        lines.append(f"恢复状态: {recovery_state}")
+    if next_verification:
+        lines.append(f"下一步验证: {next_verification}")
     raw_plan = task.extras.get("plan") if isinstance(task.extras, dict) else None
     if isinstance(raw_plan, list) and raw_plan:
         status_icons = {"completed": "✅", "in_progress": "🔄", "pending": "⏳"}

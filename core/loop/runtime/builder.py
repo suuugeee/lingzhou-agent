@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -20,7 +21,7 @@ from core.persona import IdentityBootstrapManager
 from core.probe import ProbeManager
 from core.resource_guard import local_embedding_memory_preflight
 from memory.working import WorkingMemory
-from provider import create_provider
+from provider import create_provider, create_provider_with_model
 from provider.base import EmbeddingProvider
 from store.episodic import EpisodicMemory
 from store.semantic import SemanticMemory
@@ -35,6 +36,12 @@ if TYPE_CHECKING:
     from core.config import Config
 
 _log = logging.getLogger("lingzhou.loop")
+
+
+@dataclass
+class EmbeddingRuntime:
+    embed_fn: Callable[..., Any] | None
+    provider: Any | None = None
 
 
 def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
@@ -83,13 +90,13 @@ def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
     evolution = EvolutionEngine(cfg, provider, registry)
     _log.info("[startup] loop cognition layers ready dt=%.3fs", time.monotonic() - stage_started)
 
-    embed_fn = _build_embedding_fn(cfg, provider)
+    embedding_runtime = _build_embedding_runtime(cfg)
     stage_started = time.monotonic()
     _log.info("[startup] semantic init start")
     semantic = SemanticMemory(
         cfg.memory_dir,
         decay_lambda=cfg.memory.semantic_decay_lambda,
-        embed_fn=embed_fn,
+        embed_fn=embedding_runtime.embed_fn,
         embedding_weight=cfg.memory.embedding_weight,
         source_weight=cfg.memory.semantic_source_weight,
         temporal_weight=cfg.memory.semantic_temporal_weight,
@@ -141,6 +148,7 @@ def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
         _task_store=task_store,
         _emotion=emotion,
         _provider=provider,
+        _embedding_provider=embedding_runtime.provider,
         _perception=perception,
         _judgment=judgment,
         _execution=execution,
@@ -164,7 +172,20 @@ def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
     return context
 
 
-def _build_embedding_fn(cfg: Config, provider: Any) -> Callable[..., Any] | None:
+def _build_embedding_runtime(cfg: Config) -> EmbeddingRuntime:
+    mode = str(getattr(cfg.memory, "embedding_provider", "local") or "local").strip()
+    mode_lower = mode.lower()
+    if mode_lower == "none":
+        _log.info("[embedding] disabled by memory.embedding_provider=none")
+        return EmbeddingRuntime(None)
+
+    if mode_lower == "local":
+        return EmbeddingRuntime(_build_local_embedding_fn(cfg))
+
+    return _build_remote_embedding_runtime(cfg, mode)
+
+
+def _build_local_embedding_fn(cfg: Config) -> Callable[..., Any] | None:
     if cfg.memory.local_embed_model:
         preflight = local_embedding_memory_preflight(
             model=cfg.memory.local_embed_model,
@@ -179,11 +200,7 @@ def _build_embedding_fn(cfg: Config, provider: Any) -> Callable[..., Any] | None
                 preflight.required_mib,
                 preflight.reason,
             )
-            return (
-                provider.embed
-                if cfg.memory.embedding_model and isinstance(provider, EmbeddingProvider)
-                else None
-            )
+            return None
         try:
             import importlib
             import os as _os
@@ -202,12 +219,48 @@ def _build_embedding_fn(cfg: Config, provider: Any) -> Callable[..., Any] | None
 
             return _local_embed
         except Exception as exc:
-            _log.warning("[loop] 本地 embedding 模型加载失败，回退到 API: %s", exc)
-            return (
-                provider.embed
-                if cfg.memory.embedding_model and isinstance(provider, EmbeddingProvider)
-                else None
-            )
-    if cfg.memory.embedding_model:
-        return provider.embed if isinstance(provider, EmbeddingProvider) else None
+            _log.warning("[loop] 本地 embedding 模型加载失败，回退到 FTS: %s", exc)
+            return None
+    _log.info("[embedding] local provider enabled but local_embed_model is empty, fallback=%s", cfg.memory.embedding_fallback)
     return None
+
+
+def _provider_embed_fn(cfg: Config, provider: Any | None) -> Callable[..., Any] | None:
+    if cfg.memory.embedding_model and _provider_supports_embedding(provider):
+        provider_ref = str(getattr(provider, "model_ref", provider.__class__.__name__))
+        _log.info("[embedding] provider enabled provider=%s model=%s", provider_ref, cfg.memory.embedding_model)
+        return provider.embed
+    if cfg.memory.embedding_model:
+        provider_ref = str(getattr(provider, "model_ref", provider.__class__.__name__ if provider is not None else "none"))
+        _log.warning("[embedding] provider unavailable provider=%s model=%s fallback=%s", provider_ref, cfg.memory.embedding_model, cfg.memory.embedding_fallback)
+    return None
+
+
+def _build_remote_embedding_runtime(cfg: Config, provider_name: str) -> EmbeddingRuntime:
+    if not cfg.memory.embedding_model:
+        _log.warning("[embedding] memory.embedding_provider=%s ignored: embedding_model is empty", provider_name)
+        return EmbeddingRuntime(None)
+    if provider_name not in cfg.providers:
+        _log.warning("[embedding] memory.embedding_provider=%s not found, fallback=%s", provider_name, cfg.memory.embedding_fallback)
+        return EmbeddingRuntime(None)
+    if cfg.providers[provider_name].mode == "codex":
+        _log.warning("[embedding] provider=%s mode=codex 不支持 embeddings, fallback=%s", provider_name, cfg.memory.embedding_fallback)
+        return EmbeddingRuntime(None)
+    try:
+        provider = create_provider_with_model(cfg, f"{provider_name}/{cfg.memory.embedding_model}")
+    except Exception as exc:
+        _log.warning("[embedding] provider=%s 创建失败, fallback=%s: %s", provider_name, cfg.memory.embedding_fallback, exc)
+        return EmbeddingRuntime(None)
+    if not _provider_supports_embedding(provider):
+        _log.warning("[embedding] provider=%s 不支持 embeddings, fallback=%s", provider_name, cfg.memory.embedding_fallback)
+        return EmbeddingRuntime(None, provider=provider)
+    _log.info("[embedding] independent provider enabled provider=%s model=%s", provider_name, cfg.memory.embedding_model)
+    return EmbeddingRuntime(provider.embed, provider=provider)
+
+
+def _provider_supports_embedding(provider: Any | None) -> bool:
+    if provider is None:
+        return False
+    if str(getattr(provider, "_provider_mode", "") or "").strip() == "codex":
+        return False
+    return isinstance(provider, EmbeddingProvider)

@@ -14,7 +14,6 @@ from tools.registry import (
     tool_metadata,
 )
 
-
 _TEXT_FIELDS = {
     "domain",
     "intent",
@@ -101,6 +100,20 @@ def _clean_workbench_patch(raw: Any) -> tuple[dict[str, Any], list[str]]:
     return patch, warnings
 
 
+def _extract_workbench_input(raw_params: Any) -> tuple[Any, list[str]]:
+    if not isinstance(raw_params, dict):
+        return raw_params, []
+    workbench_value = raw_params.get("workbench")
+    if workbench_value is not None:
+        return workbench_value, []
+    candidate = {
+        key: value for key, value in raw_params.items() if key in _ALLOWED_FIELDS
+    }
+    if candidate:
+        return candidate, ["已自动从顶层字段组装 workbench"]
+    return None, []
+
+
 @tool(ToolManifest(
     name="task.workbench",
     description=(
@@ -120,7 +133,9 @@ async def task_workbench(params: dict[str, Any], ctx: ToolContext) -> ToolResult
     task = await _resolve_task(params.get("task_id"), ctx)
     if not task:
         return ToolResult(summary="未找到任务。请先创建任务，或指定 task_id。", error="NoTask", skipped=True)
-    patch, warnings = _clean_workbench_patch(params.get("workbench"))
+    workbench_input, auto_warnings = _extract_workbench_input(params)
+    patch, warnings = _clean_workbench_patch(workbench_input)
+    warnings = auto_warnings + warnings
     if not patch:
         reason = "; ".join(warnings) if warnings else "workbench 为空"
         return ToolResult(summary=f"工作台未更新: {reason}", error="InvalidWorkbench", skipped=True)

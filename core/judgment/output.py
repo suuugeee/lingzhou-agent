@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from tools.registry import tool_has_capability
+
 from .context.utils import _clip_for_context
 
 if TYPE_CHECKING:
@@ -111,9 +112,23 @@ def _structured_tool_history_window(tool_history: list[dict[str, Any]]) -> tuple
         if not state_delta:
             return {}
         compacted: dict[str, Any] = {}
-        for key in sorted(state_delta):
+        critical_keys = [
+            "recovery_next_step",
+            "next_verification",
+            "next_params",
+            "tool_input_invalid",
+            "completion_blocked",
+            "truncated",
+            "has_more",
+        ]
+        ordered_keys = [
+            key for key in critical_keys if key in state_delta
+        ] + [
+            key for key in sorted(state_delta) if key not in critical_keys
+        ]
+        for key in ordered_keys:
             if len(compacted) >= key_limit:
-                compacted["..."] = f"({len(state_delta) - key_limit} keys omitted)"
+                compacted["..."] = f"({len(ordered_keys) - key_limit} keys omitted)"
                 break
             compact_key = _trim_value(key, 64)
             value = state_delta[key]
@@ -338,7 +353,11 @@ class JudgmentOutput:
 
         return cls(
             decision=cls._coerce_text(data.get("decision", "wait")).lower(),
-            chosen_action_id=cls._coerce_text(data.get("chosen_action_id", "")),
+            chosen_action_id=cls._coerce_text(
+                data.get("chosen_action_id")
+                if data.get("chosen_action_id") is not None
+                else data.get("tool", data.get("action_id", ""))
+            ),
             params=dict(data.get("params") or {}),
             rationale=cls._coerce_text(data.get("rationale", "")),
             reflection=cls._coerce_text(data.get("reflection", "")),

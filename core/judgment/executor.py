@@ -44,6 +44,8 @@ class JudgmentExecutor(
             "thinking": cfg.thinking,
             "skills": "",
         }
+        self._last_prompt_capsule: str = ""
+        self._last_prompt_capsule_source_tokens: int = 0
         self.self_model = SelfModel()
 
     def set_routing_providers(self, providers: dict[str, Provider]) -> None:

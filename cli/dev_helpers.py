@@ -12,6 +12,12 @@ _MODEL_TARGET_ALIASES = {
     "model": "primary",
     "main": "primary",
     "primary": "primary",
+    "vision": "vision",
+    "image": "vision",
+    "image.analyze": "vision",
+    "vision_model": "vision",
+    "识图": "vision",
+    "视图": "vision",
     "reasoner": "reasoner",
     "reader": "reader",
     "repair": "repair",
@@ -53,6 +59,8 @@ def _effective_target_model(cfg_data: dict[str, Any], target: str) -> str:
     normalized = _normalize_model_target(target)
     if normalized == "primary":
         return str(cfg_data.get("model") or "")
+    if normalized == "vision":
+        return str(cfg_data.get("vision_model") or cfg_data.get("model") or "")
     routing = cfg_data.get("routing")
     if isinstance(routing, dict):
         model_ref = routing.get(normalized)
@@ -83,8 +91,17 @@ def _apply_model_target_selection(
             ),
             "runtime_override_tier": None,
         }
+    if normalized == "vision":
+        previous = _effective_target_model(cfg_data, normalized)
+        cfg_data["vision_model"] = new_model
+        return {
+            "target": "vision",
+            "previous": previous,
+            "routing_changed": ["vision_model"],
+            "runtime_override_tier": None,
+        }
     if normalized not in _RUNTIME_ROUTING_TIERS:
-        raise ValueError(f"未知模型目标: {target!r}；可用值: primary, reader, reasoner, repair")
+        raise ValueError(f"未知模型目标: {target!r}；可用值: primary, vision, reader, reasoner, repair")
 
     routing = cfg_data.get("routing")
     if not isinstance(routing, dict):
@@ -257,3 +274,15 @@ def _preferred_model_index(catalog_models: list[dict], current_model_id: str = "
         if model.get("reasoning") or model.get("thinking"):
             return idx
     return 0
+
+
+def _model_supports_vision(model: dict[str, Any]) -> bool:
+    inputs = model.get("input")
+    caps = model.get("capabilities")
+    return (
+        isinstance(inputs, list)
+        and "image" in inputs
+    ) or (
+        isinstance(caps, list)
+        and "vision" in caps
+    )

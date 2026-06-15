@@ -285,6 +285,7 @@ async def memory_search(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         ToolParam("max_seconds", "number", "本轮最多运行秒数；0 或不传表示不限，仍受 batch_size 限制", required=False),
         ToolParam("model", "string", "写入 node_embeddings 的 model 标识，默认当前 local/API embedding 配置", required=False),
         ToolParam("modality", "string", "embedding modality，默认 text", required=False),
+        ToolParam("node_id", "string", "仅回填指定语义记忆节点；用于修复单个节点缺失 embedding", required=False),
     ],
 ))
 async def memory_embed_backfill(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -307,14 +308,45 @@ async def memory_embed_backfill(params: dict[str, Any], ctx: ToolContext) -> Too
     max_seconds = max(0.0, float(params.get("max_seconds") or 0.0))
     modality = _coerce_optional_text(params.get("modality")) or "text"
     model = _embedding_model_name(ctx, params.get("model"))
+    target_node_id = _coerce_optional_text(params.get("node_id"))
 
     get_unembedded = getattr(semantic, "get_unembedded", None)
+    get_node = getattr(semantic, "get", None)
     set_embedding = getattr(semantic, "set_embedding", None)
-    if not callable(get_unembedded) or not callable(set_embedding):
+    if not callable(set_embedding) or (target_node_id and not callable(get_node)) or (not target_node_id and not callable(get_unembedded)):
         return ToolResult(summary="语义记忆不支持 embedding 回填接口", skipped=True, error="EmbeddingBackfillUnsupported")
 
     started = time.monotonic()
-    rows = list(get_unembedded(modality=modality, model=model, limit=batch_size) or [])
+    if target_node_id:
+        node = get_node(target_node_id)
+        if node is None:
+            payload = tool_metadata(
+                "memory.embed_backfill",
+                f"memory.embed_backfill node_id={target_node_id} not_found",
+                requested=1,
+                fetched=0,
+                processed=0,
+                failed=0,
+                elapsed_seconds=round(time.monotonic() - started, 3),
+                sleep_seconds=sleep_seconds,
+                max_text_chars=max_text_chars,
+                max_seconds=max_seconds,
+                modality=modality,
+                model=model,
+                node_id=target_node_id,
+                processed_ids=[],
+                failures=[],
+            )
+            return ToolResult(
+                summary=f"未找到语义记忆节点: {target_node_id}",
+                evidence=json.dumps(payload, ensure_ascii=False),
+                skipped=True,
+                error="SemanticNodeNotFound",
+                metadata=payload,
+            )
+        rows = [(target_node_id, f"{getattr(node, 'title', '') or ''} {getattr(node, 'body', '') or ''}")]
+    else:
+        rows = list(get_unembedded(modality=modality, model=model, limit=batch_size) or [])
     processed = 0
     failed = 0
     failures: list[dict[str, str]] = []
@@ -355,6 +387,7 @@ async def memory_embed_backfill(params: dict[str, Any], ctx: ToolContext) -> Too
         max_seconds=max_seconds,
         modality=modality,
         model=model,
+        node_id=target_node_id or None,
         processed_ids=processed_ids[:20],
         failures=failures[:5],
     )

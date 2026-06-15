@@ -50,6 +50,16 @@ if TYPE_CHECKING:
 
 
 _log = logging.getLogger("lingzhou.judgment")
+_CROSS_TASK_EPISODIC_MAX_CHARS = 4000
+
+
+def _clip_context_artifact(text: Any, max_chars: int) -> str:
+    value = str(text or "")
+    if max_chars <= 0:
+        return ""
+    if len(value) <= max_chars:
+        return value
+    return value[:max_chars]
 
 
 def _build_context_anchors(
@@ -212,7 +222,25 @@ async def _load_context_artifacts(
                 excluded_sources=None if active_source == "self_drive" else ("self_drive",),
             )
     cross_task_t0 = time.perf_counter()
-    cross_task_episodic_text = await loop.run_in_executor(None, episodic.search, search_query, 4000, task_id_str) if task_id_str and search_query else ""
+    cross_task_episodic_text = ""
+    if task_id_str and search_query:
+        raw_cross_task_episodic_text = await loop.run_in_executor(
+            None,
+            episodic.search,
+            search_query,
+            _CROSS_TASK_EPISODIC_MAX_CHARS,
+            task_id_str,
+        )
+        cross_task_episodic_text = _clip_context_artifact(
+            raw_cross_task_episodic_text,
+            _CROSS_TASK_EPISODIC_MAX_CHARS,
+        )
+        if len(str(raw_cross_task_episodic_text or "")) > len(cross_task_episodic_text):
+            _log.warning(
+                "[context] episodic_cross_task_clipped raw_chars=%d max_chars=%d",
+                len(str(raw_cross_task_episodic_text or "")),
+                _CROSS_TASK_EPISODIC_MAX_CHARS,
+            )
     _log.info(
         "[context] episodic search=%r cross_task_hit=%s cross_task_chars=%d dt=%.3fs",
         (search_query or ""),
@@ -553,6 +581,7 @@ async def _assemble_context(
         all_skills=all_skills,
         config_with_breaker=config_with_breaker,
         effective_registry=registry_override or assembler._registry,
+        effective_thinking=effective_thinking,
         runtime_life_snapshot=runtime_life_snapshot,
     )
     ctx = {**task_sections, **memory_sections, **state_sections}

@@ -22,6 +22,7 @@ class RuntimeContext:
     _task_store: Any
     _emotion: Any
     _provider: Any
+    _embedding_provider: Any
     _perception: Any
     _judgment: Any
     _execution: Any

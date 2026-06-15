@@ -36,7 +36,20 @@ def simulate_safe_output(
 def coerce_reply_only_output(output: JudgmentOutput) -> JudgmentOutput:
     """将 continue 续判结果强制修正为 reply_only 模式（禁止 act，必须有 reply_to_user）。"""
     if not output.reply_to_user.strip():
-        return JudgmentOutput.wait(reason="[reply-only] reply_to_user 不能为空")
+        fallback = str(output.rationale or output.speech_intent or output.next_step or "").strip()
+        if not fallback:
+            fallback = "本轮执行已完成，下一步按既定任务目标继续推进。"
+        else:
+            fallback = f"已完成本轮执行：{fallback}"
+        return JudgmentOutput(
+            decision=output.decision if output.decision in {"pause", "wait"} else "wait",
+            chosen_action_id="",
+            params={},
+            rationale=output.rationale,
+            reply_to_user=fallback,
+            next_step=output.next_step,
+            model_strategy=dict(output.model_strategy or {}),
+        )
     return JudgmentOutput(
         decision=output.decision if output.decision in {"pause", "wait"} else "wait",
         chosen_action_id="",
@@ -102,7 +115,18 @@ def normalize_action_shape(
         )
 
     if output.decision != "act":
-        return output
+        return JudgmentOutput(
+            decision=output.decision,
+            chosen_action_id="",
+            params={},
+            rationale=output.rationale,
+            reflection=output.reflection,
+            speech_intent=output.speech_intent,
+            reply_to_user=output.reply_to_user,
+            next_step=output.next_step,
+            model_strategy=dict(output.model_strategy or {}),
+            applied_skills=list(output.applied_skills or []),
+        )
 
     if output.parallel_actions:
         normalized_parallel: list[dict[str, Any]] = []

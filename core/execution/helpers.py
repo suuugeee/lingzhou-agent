@@ -648,11 +648,15 @@ async def finalize_run(
     )
     if _should_record_run_outcome(status):
         tool_name_for_filter = str(result.metadata.get("tool_name") or "")
-        if status == "succeeded" and not _should_record_successful_run(tool_name_for_filter):
+        should_record_memory = not (
+            status == "succeeded" and not _should_record_successful_run(tool_name_for_filter)
+        )
+        semantic_target = ctx.semantic if should_record_memory else None
+        if not should_record_memory:
             _log.debug("[run-finalize] Skipping semantic memory for low-value successful run: %s", tool_name_for_filter)
         await record_run_outcome_memory(
             ctx.episodic,
-            ctx.semantic,
+            semantic_target,
             memory_cfg=getattr(ctx.config, "memory", None),
             run_id=run_id,
             task_id=resolved_task_id,

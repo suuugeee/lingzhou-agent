@@ -459,11 +459,11 @@ def test_chat_pending_messages_are_recoverable_until_processed():
     asyncio.run(_chat_pending_messages_are_recoverable_until_processed())
 
 
-def test_task_wait_allows_external_wait_without_wait_key():
-    asyncio.run(_task_wait_allows_external_wait_without_wait_key())
+def test_task_wait_rejects_external_wait_without_wait_key_or_next_step():
+    asyncio.run(_task_wait_rejects_external_wait_without_wait_key_or_next_step())
 
 
-async def _task_wait_allows_external_wait_without_wait_key():
+async def _task_wait_rejects_external_wait_without_wait_key_or_next_step():
     from store.task import TaskStore
     from tools.task import task_wait
 
@@ -481,6 +481,40 @@ async def _task_wait_allows_external_wait_without_wait_key():
             ctx,
         )
 
+        assert wait_res.skipped is True
+        assert wait_res.error == "WaitConditionAmbiguous"
+        assert wait_res.state_delta["tool_input_invalid"] is True
+
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+        assert task.status == "pending"
+
+        await store.close()
+
+
+def test_task_wait_allows_external_wait_without_wait_key_when_next_step_is_clear():
+    asyncio.run(_task_wait_allows_external_wait_without_wait_key_when_next_step_is_clear())
+
+
+async def _task_wait_allows_external_wait_without_wait_key_when_next_step_is_clear():
+    from store.task import TaskStore
+    from tools.task import task_wait
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "wait-guard-next-step.db")
+        await store.open()
+        task_id = await store.add_task("等待外部路径", goal="验证 task.wait 可用 next_step 作为恢复锚点")
+
+        ctx = _tool_ctx(task_store=store)
+        wait_res = await task_wait(
+            {
+                "task_id": task_id,
+                "wait_kind": "external",
+                "next_step": "收到用户新日志后读取最新 runs 并写入 task.workbench",
+            },
+            ctx,
+        )
+
         assert wait_res.skipped is False
         assert wait_res.error is None
 
@@ -489,12 +523,41 @@ async def _task_wait_allows_external_wait_without_wait_key():
         assert task.status == "waiting"
         assert task.wait_kind == "external"
         assert task.wait_key == ""
+        assert task.next_step == "收到用户新日志后读取最新 runs 并写入 task.workbench"
 
         await store.close()
 
 
 def test_task_wait_rejects_unknown_wait_kind():
     asyncio.run(_task_wait_rejects_unknown_wait_kind())
+
+
+def test_task_wait_rejects_blank_wait_kind_with_recovery_hint():
+    asyncio.run(_task_wait_rejects_blank_wait_kind_with_recovery_hint())
+
+
+async def _task_wait_rejects_blank_wait_kind_with_recovery_hint():
+    from store.task import TaskStore
+    from tools.task import task_wait
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "blank-wait-kind.db")
+        await store.open()
+        task_id = await store.add_task("空等待类型", goal="验证 task.wait 空 wait_kind 可恢复")
+
+        ctx = _tool_ctx(task_store=store)
+        wait_res = await task_wait({"task_id": task_id, "wait_kind": "   "}, ctx)
+
+        assert wait_res.skipped is True
+        assert wait_res.error == "ToolInputInvalid"
+        assert wait_res.state_delta["tool_input_invalid"] is True
+        assert "wait_kind 不能为空" in wait_res.state_delta["recovery_next_step"]
+
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+        assert task.status == "pending"
+
+        await store.close()
 
 
 async def _task_wait_rejects_unknown_wait_kind():
@@ -517,6 +580,9 @@ async def _task_wait_rejects_unknown_wait_kind():
         )
 
         assert wait_res.skipped is True
+        assert wait_res.error == "ToolInputInvalid"
+        assert wait_res.state_delta["tool_input_invalid"] is True
+        assert "process/task/signal/time/external" in wait_res.state_delta["recovery_next_step"]
         assert "不支持的 wait_kind" in wait_res.summary
 
         task = await store.get_task_by_id(task_id)

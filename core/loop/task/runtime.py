@@ -367,6 +367,34 @@ async def _sync_task_progress_state(
 
     latest = await task_store.get_task_by_id(task.id) or task
     planned_next = str(action.next_step or "").strip()
+    state_next = ""
+    state_next_authoritative = False
+    if isinstance(state_delta, dict):
+        cortex_delta = state_delta.get("cortex")
+        cortex_next = ""
+        if isinstance(cortex_delta, dict):
+            cortex_next = str(
+                cortex_delta.get("next_step")
+                or cortex_delta.get("recovery_next_step")
+                or cortex_delta.get("next_verification")
+                or ""
+            ).strip()
+        state_next = str(
+            state_delta.get("next_step")
+            or state_delta.get("recovery_next_step")
+            or state_delta.get("next_verification")
+            or cortex_next
+            or ""
+        ).strip()
+        action_tool = str(getattr(action, "chosen_action_id", "") or "").strip()
+        state_next_authoritative = bool(
+            state_next
+            and (
+                action_tool == "task.workbench"
+                or state_delta.get("completion_blocked") is True
+                or state_delta.get("tool_input_invalid") is True
+            )
+        )
     explicit_current_step = None
     if state_delta is not None and "current_step" in state_delta:
         explicit_current_step = str(state_delta.get("current_step") or "").strip()
@@ -386,11 +414,18 @@ async def _sync_task_progress_state(
             if not next_step or next_step == previous_next_step:
                 next_step = planned_next
                 updated = True
+        elif state_next:
+            if not next_step or next_step == previous_next_step or state_next_authoritative:
+                next_step = state_next
+                updated = True
         elif next_step == previous_next_step:
             next_step = ""
             updated = True
     elif planned_next and not next_step:
         next_step = planned_next
+        updated = True
+    elif state_next and (not next_step or state_next_authoritative):
+        next_step = state_next
         updated = True
 
     if not updated:

@@ -33,6 +33,7 @@ _WM_PRIORITY = 0.72
 # 告警消息回传到 WM 的优先级
 _ALERT_WM_PRIORITY = 0.90
 _CONFIDENCE_WARN_PRIORITY = 0.86
+_PROBE_WM_DETAIL_MAX_CHARS = 1200
 
 
 def _now_iso() -> str:
@@ -298,6 +299,14 @@ def _format_summary(cfg: ProbeConfig, result: ProbeResult) -> str:
     header = f"[探针 {cfg.name}]{purpose_hint} {result.triggered_at} ({result.duration_ms}ms)"
     confidence = f"confidence={result.confidence:.2f}"
     if result.error:
-        return f"{header}\n❌ 错误: {result.error}\n{confidence} ({result.confidence_reason})"
+        detail = str(result.error or "")
+        if len(detail) > _PROBE_WM_DETAIL_MAX_CHARS:
+            detail = detail[:_PROBE_WM_DETAIL_MAX_CHARS] + "\n[探针错误已截断]"
+        return f"{header}\n❌ 错误: {detail}\n{confidence} ({result.confidence_reason})"
     body = result.output if result.output else "(无输出)"
+    if not result.alerted and result.confidence >= 0.6 and not result.deployment_suspect:
+        output_len = len(str(result.output or ""))
+        return f"{header}\n✓ 正常读数已压缩: output_chars={output_len}\n{confidence} ({result.confidence_reason})"
+    if len(body) > _PROBE_WM_DETAIL_MAX_CHARS:
+        body = body[:_PROBE_WM_DETAIL_MAX_CHARS] + "\n[探针输出已截断]"
     return f"{header}\n{body}\n{confidence} ({result.confidence_reason})"

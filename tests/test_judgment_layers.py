@@ -89,7 +89,7 @@ async def test_normalize_judgment_output_unknown_tool_becomes_wait() -> None:
 
 
 @pytest.mark.asyncio
-async def test_problem_solving_guard_blocks_non_workbench_actions() -> None:
+async def test_problem_solving_guard_redirects_non_workbench_actions_to_workbench() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput
 
@@ -123,9 +123,10 @@ async def test_problem_solving_guard_blocks_non_workbench_actions() -> None:
         registry=_Registry(),
     )
 
-    assert out.decision == "wait"
-    assert out.chosen_action_id == ""
-    assert out.params == {}
+    assert out.decision == "act"
+    assert out.chosen_action_id == "task.workbench"
+    assert out.params["workbench"]["domain"] == "problem-solving"
+    assert "missing fields: domain, intent" in out.params["workbench"]["evidence"]
     assert out.reply_to_user == ""
     assert "通用问题解决守卫已触发" in out.rationale
     assert "task.workbench" in out.rationale
@@ -248,6 +249,211 @@ async def test_action_first_wait_falls_back_to_web_fetch_for_captured_url() -> N
     assert "Action-first fallback" in out.rationale
 
 
+@pytest.mark.asyncio
+async def test_recovery_wait_is_forced_to_probe_if_next_verification_contains_probe() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            if name == "probe.run":
+                return object()
+            return None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "problem_solving:\n"
+        "- recovery_state=recovering_from_previous_wait_loop\n"
+        "- next_verification=先执行 probe.run 确认 reasoner_route_drift_watch。\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="当前无用户输入且无外部任务"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "probe.run"
+    assert out.params == {}
+
+
+@pytest.mark.asyncio
+async def test_recovery_wait_falls_back_to_task_list_when_probe_not_available() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "task.list" else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "problem_solving:\n"
+        "- recovery_state=recovering_from_previous_wait_loop\n"
+        "- next_verification=先执行 probe.run 确认 reasoner_route_drift_watch。\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="当前无用户输入且无外部任务"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "task.list"
+    assert out.params == {"status": "all", "limit": 8}
+
+
+@pytest.mark.asyncio
+async def test_recovery_wait_uses_memory_search_top_k_param() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "memory.search" else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "problem_solving:\n"
+        "- recovery_state=recovering_from_previous_wait_loop\n"
+        "- next_verification=搜索历史记录，确认上一次失败参数。\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="当前无用户输入且无外部任务"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "memory.search"
+    assert out.params == {"query": "搜索历史记录，确认上一次失败参数。", "top_k": 5}
+
+
+@pytest.mark.asyncio
+async def test_recovery_wait_does_not_trigger_for_default_placeholders() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object()
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "problem_solving:\n"
+        "- recovery_state=（未进入恢复状态）\n"
+        "- next_verification=（未指定）\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="当前无用户输入且无外部任务"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "wait"
+
+
+@pytest.mark.asyncio
+async def test_recovery_wait_treats_spaced_placeholders_as_default() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object()
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "problem_solving:\n"
+        "- recovery_state=（ 未进入恢复状态 ）\n"
+        "- next_verification=( none )\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="当前无用户输入且无外部任务"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "wait"
+
+
+async def test_recovery_wait_falls_back_to_task_list_when_next_verification_placeholder() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "task.list" else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "problem_solving:\n"
+        "- recovery_state=recovering_from_previous_wait_loop\n"
+        "- next_verification=（未指定）\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(
+            decision="wait",
+            next_step="读取最近日志，确认 active_idle_gap 是否生效。",
+            rationale="当前无用户输入且无外部任务",
+        ),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "task.list"
+    assert out.params == {"status": "all", "limit": 8}
+
+
 def test_judgment_subpackages_importable() -> None:
     for name in ("core.judgment.boundary", "core.judgment.decision", "core.judgment.policy"):
         mod = importlib.import_module(name)
@@ -283,6 +489,18 @@ def test_context_sections_module() -> None:
 
     assert callable(_fmt_wm)
     assert _fmt_current_time() == from_sections()
+
+
+def test_context_token_usage_uses_estimated_tokens_not_chars() -> None:
+    from core.judgment.assembler.sections import _context_token_usage, _top_context_section_tokens
+
+    text = "a" * 1000
+    used, section_tokens = _context_token_usage({"ascii_section": text, "cjk_section": "灵" * 100})
+
+    assert section_tokens["ascii_section"] == 300
+    assert section_tokens["cjk_section"] == 180
+    assert used == 480
+    assert _top_context_section_tokens(section_tokens) == [("ascii_section", 300), ("cjk_section", 180)]
 
 
 def test_trim_messages_omits_whole_messages_not_slices() -> None:
@@ -368,9 +586,13 @@ def test_continue_phase_policy_payload_uses_shared_limits(monkeypatch: pytest.Mo
             "thresholds": {
                 "continue_tool_history_compact_threshold": 10,
                 "continue_tool_history_keep_last": 3,
+                "continue_max_inner_rounds": 5,
             },
         }
     )
     payload = continue_phase_policy_payload(cfg, tool_history_count=10)
     assert payload["tool_history_compact_threshold"] == 10
+    assert payload["tool_history_keep_last"] == 3
+    assert payload["max_inner_rounds"] == 5
+    assert payload["will_hit_inner_round_limit_next"] is True
     assert payload["tool_history_will_compact_next"] is True

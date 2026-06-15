@@ -620,6 +620,18 @@ def test_judgment_output_parse():
     assert out.model_strategy["next_phase_tier"] == "reader"
 
 
+def test_judgment_output_parse_tool_alias():
+    from core.judgment import JudgmentOutput
+
+    raw = (
+        '{"decision":"act","tool":"file.read","params":{"path":"/tmp/demo.txt"},"rationale":"兼容老 schema"}'
+    )
+    out = JudgmentOutput.from_llm(raw)
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "file.read"
+
+
 def test_judgment_output_parse_null_text_fields_as_empty():
     from core.judgment import JudgmentOutput
 
@@ -661,6 +673,25 @@ def test_coerce_reply_only_output_demotes_act_to_wait():
     assert out.chosen_action_id == ""
     assert out.params == {}
     assert out.reply_to_user == "这是最终回复。"
+
+
+def test_coerce_reply_only_output_fills_empty_reply():
+    from core.judgment import JudgmentOutput
+    from core.judgment.boundary import coerce_reply_only_output
+
+    out = coerce_reply_only_output(
+        JudgmentOutput(
+            decision="act",
+            chosen_action_id="file.read",
+            params={"path": "/tmp/demo.txt"},
+            rationale="已读取最近日志。",
+        )
+    )
+
+    assert out.decision == "wait"
+    assert out.chosen_action_id == ""
+    assert out.reply_to_user.startswith("已完成本轮执行：")
+    assert "已读取最近日志。" in out.reply_to_user
 
 
 def test_judgment_prompt_includes_runtime_hint_rules():
@@ -888,13 +919,19 @@ def test_chat_print_input_prompt_when_tty(monkeypatch):
     assert fake_stdout.getvalue() == "小懒> "
 
 
-def test_loop_logging_reply_not_truncated():
+def test_loop_logging_reply_honors_limit():
     from core.loop.shared.logging import _clip_reply_for_log
+
+    assert _clip_reply_for_log("short reply") == "short reply"
 
     text = "x" * 600
 
-    assert _clip_reply_for_log(text) == text
-    assert _clip_reply_for_log(text, limit=10) == text
+    default_clipped = _clip_reply_for_log(text)
+    assert len(default_clipped) == 240
+    assert default_clipped.endswith("...")
+    clipped = _clip_reply_for_log(text, limit=10)
+    assert clipped == "xxxxxxx..."
+    assert len(clipped) == 10
 
 
 def test_cli_help_includes_onboard_command():
@@ -1175,6 +1212,122 @@ def test_create_provider_with_model_exposes_public_model_ref(monkeypatch):
         assert isinstance(provider, EmbeddingProvider)
     finally:
         asyncio.run(provider.close())
+
+
+def test_embedding_runtime_rejects_codex_embedding_provider():
+    from core.config import Config
+    from core.loop.runtime.builder import _build_embedding_runtime
+
+    cfg = Config.model_validate({
+        "providers": {
+            "openai-codex": {
+                "type": "openai_compat",
+                "mode": "codex",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "api_key_env": "OPENAI_CODEX_ACCESS_TOKEN",
+            }
+        },
+        "model": "openai-codex/gpt-5.5",
+        "memory": {
+            "embedding_provider": "openai-codex",
+            "embedding_model": "text-embedding-v3",
+        },
+    })
+    runtime = _build_embedding_runtime(cfg)
+
+    assert runtime.embed_fn is None
+    assert runtime.provider is None
+
+
+def test_embedding_runtime_uses_explicit_independent_provider(monkeypatch):
+    import core.loop.runtime.builder as builder_mod
+    from core.config import Config
+
+    cfg = Config.model_validate({
+        "providers": {
+            "openai-codex": {
+                "type": "openai_compat",
+                "mode": "codex",
+                "base_url": "https://chatgpt.com/backend-api/codex",
+                "api_key_env": "OPENAI_CODEX_ACCESS_TOKEN",
+            },
+            "bailian": {
+                "type": "openai_compat",
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "api_key_env": "DASHSCOPE_API_KEY",
+            },
+        },
+        "model": "openai-codex/gpt-5.5",
+        "memory": {
+            "embedding_provider": "bailian",
+            "embedding_model": "text-embedding-v3",
+        },
+    })
+
+    class _EmbeddingOnly:
+        model_ref = "bailian/text-embedding-v3"
+        _provider_mode = "openai"
+
+        def embed(self, text: str) -> list[float]:
+            return [float(len(text))]
+
+    created: list[str] = []
+
+    def _fake_create_provider_with_model(_cfg: Any, model_ref: str) -> _EmbeddingOnly:
+        created.append(model_ref)
+        return _EmbeddingOnly()
+
+    monkeypatch.setattr(builder_mod, "create_provider_with_model", _fake_create_provider_with_model)
+
+    runtime = builder_mod._build_embedding_runtime(cfg)
+
+    assert created == ["bailian/text-embedding-v3"]
+    assert runtime.provider is not None
+    assert runtime.embed_fn is not None
+    assert runtime.embed_fn("abc") == [3.0]
+
+
+def test_shutdown_runtime_closes_independent_embedding_provider():
+    asyncio.run(_shutdown_runtime_closes_independent_embedding_provider())
+
+
+async def _shutdown_runtime_closes_independent_embedding_provider():
+    from core.loop.runtime.lifecycle import shutdown_runtime
+
+    class _Dispatcher:
+        enabled = False
+
+    class _Probe:
+        def stop(self) -> None:
+            pass
+
+    class _Store:
+        async def close(self) -> None:
+            pass
+
+    class _Closable:
+        def __init__(self) -> None:
+            self.closed = False
+
+        async def close(self) -> None:
+            self.closed = True
+
+    main_provider = _Closable()
+    embedding_provider = _Closable()
+    loop = SimpleNamespace(
+        _tick_dispatcher=_Dispatcher(),
+        _probe_manager=_Probe(),
+        _task_store=_Store(),
+        _provider=main_provider,
+        _embedding_provider=embedding_provider,
+        _routing_providers={},
+        _cfg=SimpleNamespace(state_dir=Path("/tmp/lingzhou-test-no-state")),
+    )
+
+    await shutdown_runtime(loop)
+
+    assert embedding_provider.closed is True
+    assert main_provider.closed is True
 
 
 def test_gateway_start_prefers_config_default_channel_over_raw_json(monkeypatch, tmp_path):
@@ -1699,6 +1852,95 @@ def test_judgment_context_budget_trims_low_priority_sections():
     assert len(budgeted["wm_section"]) <= len(ctx["wm_section"])
 
 
+def test_judgment_context_budget_compacts_static_noise_before_dropping():
+    from core.judgment.context.budget import apply_context_budget
+    from core.judgment.context.utils import _estimate_tokens
+
+    tool_lines = "\n".join([
+        "- `task.workbench`: 更新任务工作台  参数: [workbench(*): 工作台对象, task_id(?): 任务 id]",
+        "- `memory.add_semantic`: 写语义记忆  参数: [title(*): 标题, body(*): 内容, kind(?): 类型]",
+        "- `memory.search`: 搜索语义记忆  参数: [query(*): 查询, top_k(?): 数量]",
+        *[f"- `tool.{i}`: description  参数: [value(?): " + ("x" * 120) + "]" for i in range(120)],
+    ])
+    probe_lines = "\n".join(
+        f"  ✓ [probe-{i}] shell/interval:60 →wm confidence=0.85\n  └ 目的: " + ("p" * 80)
+        for i in range(80)
+    )
+    route_payload = {
+        "active_overrides": {},
+        "available_models": {"reader": "m1", "reasoner": "m2"},
+        "tool_tier_mapping": {f"tool.{i}": "reasoner" for i in range(120)},
+        "tool_capability_mapping": {f"tool.{i}": ["read", "inspect"] for i in range(120)},
+        "current_action_capabilities": ["read"],
+        "continue_phase_policy": {"max_inner_rounds": 4},
+        "budget_state": {"repeat_action_count": 2, "global_cost_posture": "conserve"},
+        "routing_hint": {"phase": "initial"},
+    }
+    wm_lines = "\n".join("- [kind|p=0.9] " + ("w" * 300) for _ in range(40))
+    ctx = {
+        "task_section": "active task",
+        "cortex_workspace_section": "next_verification=读取最近日志",
+        "tools_section": tool_lines,
+        "probe_sensors_section": probe_lines,
+        "model_routing_section": json.dumps(route_payload, ensure_ascii=False, indent=2),
+        "wm_section": "[40/20 条，~20000 tokens / 12000 预算，166%]\n" + wm_lines,
+        "user_message": "",
+    }
+
+    budgeted = apply_context_budget(ctx, token_budget=9000)
+
+    assert _estimate_tokens("".join(budgeted.values())) <= 9000
+    assert "TOOL CATALOG COMPACTED" in budgeted["tools_section"]
+    assert "`tool.0`" in budgeted["tools_section"]
+    assert "`task.workbench` required: workbench" in budgeted["tools_section"]
+    assert "`memory.add_semantic` required: title, body" in budgeted["tools_section"]
+    assert "`memory.search` required: query" in budgeted["tools_section"]
+    assert "PROBE SENSORS COMPACTED" in budgeted["probe_sensors_section"]
+    assert "MODEL ROUTING COMPACTED" in budgeted["model_routing_section"]
+    assert "tool_tier_mapping_keys" in budgeted["model_routing_section"]
+    assert "WM COMPACTED" in budgeted["wm_section"]
+
+
+def test_judgment_context_budget_reserves_prompt_headroom_before_llm_trim():
+    from core.judgment.context.budget import apply_context_budget
+    from core.judgment.context.utils import _estimate_tokens
+
+    tool_lines = "\n".join([
+        "- `task.workbench`: 更新任务工作台  参数: [workbench(*): 工作台对象]",
+        *[f"- `tool.{i}`: description  参数: [value(?): " + ("x" * 140) + "]" for i in range(110)],
+    ])
+    probe_lines = "\n".join(
+        f"  ✓ [probe-{i}] shell/interval:60 →wm confidence=0.85\n  └ 目的: " + ("p" * 60)
+        for i in range(80)
+    )
+    ctx = {
+        "task_section": "active task",
+        "tools_section": tool_lines,
+        "probe_sensors_section": probe_lines,
+        "model_routing_section": json.dumps({
+            "available_models": {"reader": "m1", "reasoner": "m2"},
+            "tool_tier_mapping": {f"tool.{i}": "reasoner" for i in range(120)},
+            "tool_capability_mapping": {f"tool.{i}": ["read", "inspect", "evidence"] for i in range(120)},
+            "budget_state": {"global_cost_posture": "conserve"},
+        }),
+        "wm_section": "[30/20 条，~18000 tokens / 12000 预算，150%]\n"
+        + "\n".join("- [kind|p=0.9] " + ("w" * 300) for _ in range(25)),
+        "user_message": "",
+    }
+
+    hard_budget = 15_000
+    assert _estimate_tokens("".join(ctx.values())) <= hard_budget
+    assert _estimate_tokens("".join(ctx.values())) > int(hard_budget * 0.82)
+
+    budgeted = apply_context_budget(ctx, token_budget=hard_budget)
+
+    assert _estimate_tokens("".join(budgeted.values())) <= int(hard_budget * 0.82)
+    assert "TOOL CATALOG COMPACTED" in budgeted["tools_section"]
+    assert "PROBE SENSORS COMPACTED" in budgeted["probe_sensors_section"]
+    assert "MODEL ROUTING COMPACTED" in budgeted["model_routing_section"]
+    assert "WM COMPACTED" in budgeted["wm_section"]
+
+
 def test_judgment_error_classification_and_cooldown():
     from core.config import Config
     from core.judgment import JudgmentLayer
@@ -1824,6 +2066,101 @@ async def _judgment_executor_retries_with_trimmed_prompt_on_limit_error():
 
 def test_chat_with_retry_trims_before_first_call_when_budget_exceeded():
     asyncio.run(_chat_with_retry_trims_before_first_call_when_budget_exceeded())
+
+
+def test_prompt_trim_compresses_last_user_context_into_cortex_capsule():
+    from core.config import Config
+    from core.judgment.executor import JudgmentExecutor
+    from provider.base import Message
+
+    class _Provider:
+        model_ref = "copilot/adaptive-mini"
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "base_url": "https://api.individual.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            }
+        },
+        "model": "copilot/adaptive-mini",
+    })
+    executor = JudgmentExecutor(_Provider(), cfg)  # type: ignore[arg-type]
+
+    huge_context = (
+        "### 活跃任务\n"
+        "task#3366 status=in_progress\n\n"
+        "### 任务级皮层工作区\n"
+        "task_id=3366 status=in_progress\n"
+        "problem_solving:\n"
+        "- recovery_state=targeted_node_id_backfill_implemented_and_unit_verified\n"
+        "- next_verification=对 node-38d00406366b 执行 memory.embed_backfill(node_id)\n\n"
+        "### 认知信号（当前内部状态异常提示）\n"
+        "⚠️ 最近动作已连续重复 3 次：tool=task.list key=all。\n\n"
+        "### 相关长期记忆\n"
+        + ("外围证据 " * 30000)
+        + "\n\n## 结构化最近工具结果(JSON)\n"
+        '[{"tool":"task.list","result":"count=8"}]\n\n'
+        "请根据以上结果继续执行下一个必要工具，或生成最终回复（reply_to_user 非空）。"
+    )
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content=huge_context),
+    ]
+
+    trimmed = executor._trim_messages_for_prompt_limit(messages, 12000)
+
+    assert trimmed is not messages
+    content = str(trimmed[-1].content)
+    assert executor._last_prompt_capsule == content
+    assert executor._last_prompt_capsule_source_tokens > 12000
+    assert "上下文超限压缩胶囊" in content
+    assert "targeted_node_id_backfill_implemented_and_unit_verified" in content
+    assert "next_verification=对 node-38d00406366b 执行 memory.embed_backfill(node_id)" in content
+    assert "tool=task.list" in content
+    assert "不要继续重复同一低增量工具" in content
+    assert "外围证据 外围证据 外围证据" not in content
+
+
+def test_prompt_trim_clears_stale_capsule_when_no_trim_needed():
+    from core.config import Config
+    from core.judgment.executor import JudgmentExecutor
+    from provider.base import Message
+
+    class _Provider:
+        async def chat(self, messages, *, temperature=None, thinking_override=None):
+            return '{"decision":"wait"}'
+
+        async def close(self):
+            return None
+
+    cfg = Config.model_validate({
+        "providers": {
+            "copilot": {
+                "type": "openai_compat",
+                "base_url": "https://api.individual.githubcopilot.com",
+                "api_key_env": "GITHUB_TOKEN",
+            }
+        },
+        "model": "copilot/adaptive-mini",
+    })
+    executor = JudgmentExecutor(_Provider(), cfg)  # type: ignore[arg-type]
+    executor._last_prompt_capsule = "STALE_CAPSULE"
+    executor._last_prompt_capsule_source_tokens = 999
+
+    messages = [
+        Message(role="system", content="sys"),
+        Message(role="user", content="short context"),
+    ]
+    trimmed = executor._trim_messages_for_prompt_limit(messages, 12000)
+
+    assert trimmed is messages
+    assert executor._last_prompt_capsule == ""
+    assert executor._last_prompt_capsule_source_tokens == 0
 
 
 async def _chat_with_retry_trims_before_first_call_when_budget_exceeded():
@@ -3470,6 +3807,23 @@ def test_image_model_routing_falls_back_to_vision_model():
     assert routed == "bailian/qwen3.6-plus"
 
 
+def test_image_model_routing_prefers_configured_vision_model():
+    from tools.image import _resolve_multimodal_model_ref
+
+    ctx = cast(
+        "Any",
+        SimpleNamespace(
+            config=SimpleNamespace(
+                model="deepseek/deepseek-v4-pro",
+                vision_model="copilot/gpt-5.4",
+                active_provider_name="deepseek",
+                providers={"copilot": object(), "deepseek": object()},
+            )
+        ),
+    )
+    assert _resolve_multimodal_model_ref(ctx, capability="vision", input_modality="image") == "copilot/gpt-5.4"
+
+
 async def _file_list_and_memory_search():
     from pathlib import Path
 
@@ -3995,9 +4349,7 @@ async def _execution_dispatch_records_run():
         assert completed and completed[-1]["run_id"] == runs[0].id
 
         node = semantic.get(f"run-result-{runs[0].id}")
-        assert node is not None
-        assert node.kind == "run_result"
-        assert "succeeded" in node.tags
+        assert node is None
 
         active = await store.get_active()
         assert active is not None

@@ -10,14 +10,13 @@ from core.config import Config
 from core.evolution import EvolutionEngine
 from core.execution import ExecutionLayer
 from core.judgment import JudgmentLayer
-from core.loop.routing_overrides import normalize_routing_overrides
 from core.log_fields import format_log_fields
+from core.loop.routing_overrides import normalize_routing_overrides
 from core.perception import PerceptionLayer
-from core.resource_guard import local_embedding_memory_preflight
 from provider import create_provider
-from provider.base import EmbeddingProvider
 
 from ..runs.driver import RunDriver
+from .builder import EmbeddingRuntime, _build_embedding_runtime
 from .startup import _build_routing_providers
 
 if TYPE_CHECKING:
@@ -32,6 +31,7 @@ _log = logging.getLogger("lingzhou.loop")
 class _HotReloadCandidate:
     cfg: Config
     provider: Any
+    embedding_runtime: EmbeddingRuntime
     routing_providers: dict[str, Any]
     judgment: JudgmentLayer
     execution: ExecutionLayer
@@ -40,9 +40,11 @@ class _HotReloadCandidate:
     replaced_provider_stack: bool
 
     async def close_new_stack(self) -> None:
-        if not self.replaced_provider_stack:
-            return
-        await _close_provider_stack(self.provider, self.routing_providers)
+        await _close_provider_stack(
+            self.provider if self.replaced_provider_stack else None,
+            self.routing_providers if self.replaced_provider_stack else {},
+            self.embedding_runtime.provider,
+        )
 
 
 def _file_mtime(path: Path) -> float:
@@ -61,39 +63,24 @@ def _provider_reload_signature(cfg: Config) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
-async def _close_provider_stack(provider: Any, routing_providers: dict[str, Any]) -> None:
-    with contextlib.suppress(Exception):
-        await provider.close()
+async def _close_provider_stack(
+    provider: Any | None,
+    routing_providers: dict[str, Any],
+    embedding_provider: Any | None = None,
+) -> None:
+    closed: set[int] = set()
+    for target in (embedding_provider, provider):
+        if target is None or id(target) in closed:
+            continue
+        closed.add(id(target))
+        with contextlib.suppress(Exception):
+            await target.close()
     for routing_provider in routing_providers.values():
+        if id(routing_provider) in closed:
+            continue
+        closed.add(id(routing_provider))
         with contextlib.suppress(Exception):
             await routing_provider.close()
-
-
-def _refresh_semantic_embed_runtime(loop: CognitionLoop) -> None:
-    semantic = loop.semantic  # CognitionLoop 公开属性
-    if loop._cfg.memory.local_embed_model:
-        preflight = local_embedding_memory_preflight(
-            model=loop._cfg.memory.local_embed_model,
-            min_available_mib=loop._cfg.memory.local_embed_min_available_mib,
-            guard_enabled=loop._cfg.memory.local_embed_command_guard,
-        )
-        if not preflight.ok:
-            _log.warning(
-                "[hot-reload] 本地 embedding 模型加载被资源守卫跳过: model=%s available_mib=%s required_mib=%s reason=%s",
-                loop._cfg.memory.local_embed_model,
-                preflight.available_mib,
-                preflight.required_mib,
-                preflight.reason,
-            )
-            semantic._embed_fn = (
-                loop._provider.embed
-                if loop._cfg.memory.embedding_model and isinstance(loop._provider, EmbeddingProvider)
-                else None
-            )
-            semantic._embedding_weight = loop._cfg.memory.embedding_weight
-            return
-    semantic._embed_fn = loop._provider.embed if loop._cfg.memory.embedding_model and isinstance(loop._provider, EmbeddingProvider) else None
-    semantic._embedding_weight = loop._cfg.memory.embedding_weight
 
 
 async def _refresh_runtime_routing_overrides(loop: CognitionLoop) -> None:
@@ -135,12 +122,14 @@ async def _build_reload_candidate(
     routing_providers = loop._routing_providers
     new_provider: Any | None = None
     new_routing_providers: dict[str, Any] | None = None
+    embedding_runtime: EmbeddingRuntime | None = None
     try:
         if replaced_provider_stack:
             new_provider = create_provider(new_cfg)
             new_routing_providers = _build_routing_providers(new_cfg)
             provider = new_provider
             routing_providers = new_routing_providers
+        embedding_runtime = _build_embedding_runtime(new_cfg)
         judgment = JudgmentLayer(provider, loop._registry, new_cfg)
         judgment.self_model = loop._judgment.self_model
         judgment.self_model.set_routing(new_cfg)
@@ -149,6 +138,7 @@ async def _build_reload_candidate(
         return _HotReloadCandidate(
             cfg=new_cfg,
             provider=provider,
+            embedding_runtime=embedding_runtime,
             routing_providers=routing_providers,
             judgment=judgment,
             execution=ExecutionLayer(loop._registry, new_cfg),
@@ -157,8 +147,11 @@ async def _build_reload_candidate(
             replaced_provider_stack=replaced_provider_stack,
         )
     except Exception:
-        if new_provider is not None:
-            await _close_provider_stack(new_provider, new_routing_providers or {})
+        await _close_provider_stack(
+            new_provider,
+            new_routing_providers or {},
+            embedding_runtime.provider if embedding_runtime is not None else None,
+        )
         raise
 
 
@@ -170,10 +163,12 @@ async def _commit_hot_reload_candidate(
     auth_mtime: float,
 ) -> None:
     old_provider = loop._provider
+    old_embedding_provider = getattr(loop, "_embedding_provider", None)
     old_routing_providers = loop._routing_providers
 
     loop._cfg = candidate.cfg
     loop._provider = candidate.provider
+    loop._embedding_provider = candidate.embedding_runtime.provider
     loop._routing_providers = candidate.routing_providers
     loop._judgment = candidate.judgment
     loop._execution = candidate.execution
@@ -183,7 +178,8 @@ async def _commit_hot_reload_candidate(
     loop._cfg_mtime = cfg_mtime
     loop._auth_profiles_mtime = auth_mtime
     loop._soul._cfg = candidate.cfg
-    _refresh_semantic_embed_runtime(loop)
+    loop._semantic._embed_fn = candidate.embedding_runtime.embed_fn
+    loop._semantic._embedding_weight = loop._cfg.memory.embedding_weight
     await _refresh_runtime_routing_overrides(loop)
 
     try:
@@ -192,7 +188,9 @@ async def _commit_hot_reload_candidate(
         _log.warning("[hot-reload] 身份前缀刷新失败,保留新运行时: %s", exc)
 
     if candidate.replaced_provider_stack:
-        await _close_provider_stack(old_provider, old_routing_providers)
+        await _close_provider_stack(old_provider, old_routing_providers, old_embedding_provider)
+    elif old_embedding_provider is not None and old_embedding_provider is not loop._embedding_provider:
+        await _close_provider_stack(provider=None, routing_providers={}, embedding_provider=old_embedding_provider)
 
 
 async def _maybe_hot_reload_provider_impl(loop: CognitionLoop) -> None:

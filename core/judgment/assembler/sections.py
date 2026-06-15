@@ -13,12 +13,12 @@ from core.persona.self_model import fmt_self_model
 
 from ..context.budget import apply_context_budget, resolve_judgment_prompt_budget
 from ..context.sections import (
-    _fmt_episodic,
     _fmt_chat_continuity,
     _fmt_chat_history,
     _fmt_chat_memories,
     _fmt_cross_task_episodic,
     _fmt_current_time,
+    _fmt_episodic,
     _fmt_ethos,
     _fmt_life_state,
     _fmt_memories,
@@ -50,7 +50,7 @@ from ..context.tasks import (
     _fmt_task,
     _fmt_waiting_tasks,
 )
-from ..context.utils import _fill_template, _validate_context_schema
+from ..context.utils import _estimate_tokens, _fill_template, _validate_context_schema
 from ..output import _build_team_view_from_cfg
 
 if TYPE_CHECKING:
@@ -68,6 +68,15 @@ if TYPE_CHECKING:
 
 
 _log = logging.getLogger("lingzhou.judgment")
+
+
+def _context_token_usage(ctx: dict[str, Any]) -> tuple[int, dict[str, int]]:
+    section_tokens = {key: _estimate_tokens(str(value or "")) for key, value in ctx.items()}
+    return sum(section_tokens.values()), section_tokens
+
+
+def _top_context_section_tokens(section_tokens: dict[str, int], *, limit: int = 8) -> list[tuple[str, int]]:
+    return sorted(section_tokens.items(), key=lambda item: item[1], reverse=True)[:limit]
 
 
 def _build_context_task_sections(
@@ -205,6 +214,7 @@ def _build_context_state_sections(
     all_skills: list[Skill],
     config_with_breaker: str,
     effective_registry: Any,
+    effective_thinking: str | None,
     runtime_life_snapshot: dict[str, Any] | None,
 ) -> dict[str, Any]:
     _wm_items = wm.get_top(15)
@@ -245,7 +255,7 @@ def _build_context_state_sections(
             user_message=user_message,
             current_action=current_action,
             tool_history=tool_history,
-            effective_thinking=assembler._cfg.thinking,
+            effective_thinking=effective_thinking or assembler._cfg.thinking,
             routing_overrides=routing_overrides,
             registry=effective_registry,
         ),
@@ -269,8 +279,17 @@ def _finalize_context_text(assembler: Any, ctx: dict[str, Any], wm: WorkingMemor
     ctx = apply_context_budget(ctx, budget, skill_min_tokens=assembler._cfg.thresholds.skill_min_budget_tokens)
     assembler._last_context_sections = dict(ctx)
     assembler._last_context_budget = int(budget)
+    used_tokens, section_tokens = _context_token_usage(ctx)
+    assembler._last_context_used_tokens = used_tokens
+    assembler._last_context_section_tokens = section_tokens
     if budget:
-        used = sum(len(v) for v in ctx.values())
         assembler._executor.self_model.context_budget = f"{budget // 1000}K" if budget >= 1000 else str(budget)
-        assembler._executor.self_model.context_pressure = min(1.0, used / max(budget, 1))
+        assembler._executor.self_model.context_pressure = min(1.0, used_tokens / max(budget, 1))
+    _log.info(
+        "[context_sections] budget_tokens=%d used_tokens=%d pressure=%.3f top_tokens=%s",
+        int(budget or 0),
+        used_tokens,
+        min(1.0, used_tokens / max(int(budget or 1), 1)) if budget else 0.0,
+        _top_context_section_tokens(section_tokens),
+    )
     return _fill_template(assembler._judgment_template, ctx)

@@ -39,6 +39,42 @@ def _fmt_drive_template_list(items: Any) -> str:
     return "\n".join(f"- {str(item)}" for item in items)
 
 
+def build_task_anchor_item(
+    active_task: Any,
+    *,
+    progress: str = "",
+    action_feedback: str = "",
+) -> WMItem:
+    """构造统一任务锚点，供 tick 准备与 consolidate 复用。"""
+    result_json = getattr(active_task, "result_json", {}) or {}
+    cortex = result_json.get("cortex", {}) if isinstance(result_json, dict) else {}
+    recovery_state = str((cortex.get("recovery_state") if isinstance(cortex, dict) else None) or "").strip()
+    next_verification = str(
+        (cortex.get("next_verification") if isinstance(cortex, dict) else None)
+        or (cortex.get("next_experiment") if isinstance(cortex, dict) else None)
+        or (cortex.get("verification") if isinstance(cortex, dict) else None)
+        or ""
+    ).strip()
+
+    progress_line = f"\n进度: {progress}" if str(progress or "").strip() else ""
+    feedback_line = f"\n上一动作反馈: {action_feedback}" if str(action_feedback or "").strip() else ""
+    recovery_line = f"\n恢复状态: {recovery_state}" if recovery_state else ""
+    verify_line = f"\n下一步验证: {next_verification}" if next_verification else ""
+    return WMItem(
+        kind="task_anchor",
+        content=(
+            f"[任务锚点] {getattr(active_task, 'title', '') or '(未命名任务)'}\n"
+            f"目标: {getattr(active_task, 'goal', '') or '(未指定)'}\n"
+            f"下一步: {getattr(active_task, 'next_step', '') or '(未指定)'}"
+            f"{progress_line}"
+            f"{feedback_line}"
+            f"{recovery_line}"
+            f"{verify_line}"
+        ),
+        priority=0.95,
+    )
+
+
 async def _create_self_drive_task(loop: Any, task_template: dict[str, Any], signal: Any) -> int | None:
     """把高置信自驱信号转成一个可推进的轻量任务，而不是只停留在 WM 念头。"""
     evidence_needed = [
@@ -375,19 +411,10 @@ async def consolidate(loop: Any, active_task: Any) -> None:
         try:
             progress, progress_found = await loop._task_store.get_fact(f"task:{active_task.id}:progress")
             if progress_found and progress:
-                progress_line = f"\n进度: {progress}"
+                progress_line = str(progress)
         except Exception:
             pass
-        loop._wm.add(WMItem(
-            kind="task_anchor",
-            content=(
-                f"[任务锚点] {active_task.title}\n"
-                f"目标: {active_task.goal or '(未指定)'}\n"
-                f"下一步: {active_task.next_step or '(未指定)'}"
-                f"{progress_line}"
-            ),
-            priority=0.95,
-        ))
+        loop._wm.add(build_task_anchor_item(active_task, progress=progress_line))
 
     # 同步感知基准,避免下一轮因 WM 大小骤降产生假预测误差
     loop._perception.reset_wm_baseline(len(loop._wm))

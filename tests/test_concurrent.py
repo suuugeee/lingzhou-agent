@@ -63,6 +63,47 @@ def test_compact_tool_history_uses_evidence_pointers_for_old_large_results():
     assert "/workspace/core.py" in history[0]["result"]
 
 
+def test_compact_repeated_tool_history_keeps_latest_full_record():
+    """重复低价值工具结果应提前压缩，避免 continue 阶段反复回灌同一大块素材。"""
+    from core.loop.shared.continue_phase import _compact_repeated_tool_history
+
+    large_result = "same file body\n" * 2000
+    history = [
+        {
+            "tool": "file.read",
+            "params": {"path": "/workspace/core.py"},
+            "result": large_result,
+            "summary": large_result,
+            "status": "ok",
+            "error": "",
+            "metadata": {"log_summary": "file.read path=/workspace/core.py chars=30000"},
+        },
+        {"tool": "task.update", "params": {}, "result": "recent", "status": "ok", "error": ""},
+        {
+            "tool": "file.read",
+            "params": {"path": "/workspace/core.py"},
+            "result": large_result,
+            "summary": large_result,
+            "status": "ok",
+            "error": "",
+            "metadata": {"log_summary": "file.read path=/workspace/core.py chars=30000"},
+        },
+    ]
+    original_id = id(history)
+
+    compacted = _compact_repeated_tool_history(history)
+
+    assert compacted is history
+    assert id(history) == original_id
+    assert len(history) == 3
+    assert history[0]["tool"] == "task.update"
+    assert history[1]["tool"] == "[repeat-compacted]"
+    assert "重复低价值工具调用已压缩" in history[1]["result"]
+    assert large_result not in history[1]["result"]
+    assert history[2]["tool"] == "file.read"
+    assert history[2]["result"] == large_result
+
+
 def test_process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch, caplog):
     asyncio.run(_process_pending_chat_turn_defers_when_dispatch_queue_full_without_blocking(monkeypatch, caplog))
 
@@ -753,3 +794,46 @@ async def _dispatch_parallel_merges_results():
 
     # kind 正确
     assert result.kind == "execute_result"
+
+
+def test_dispatch_parallel_defers_terminal_task_action():
+    """task.complete/task.fail 不能和证据写入同批并发，避免 completion 抢跑。"""
+    asyncio.run(_dispatch_parallel_defers_terminal_task_action())
+
+
+async def _dispatch_parallel_defers_terminal_task_action():
+    from core.execution import ExecutionLayer
+    from core.judgment import JudgmentOutput
+    from tools.registry import ToolRegistry, ToolResult
+
+    registry = ToolRegistry()
+
+    class _FakeCfg:
+        class loop:
+            debug = False
+
+    layer = ExecutionLayer(registry, cast("Any", _FakeCfg()))
+    call_log: list[str] = []
+
+    async def _mock_dispatch_act(action, ctx):
+        call_log.append(action.chosen_action_id)
+        return ToolResult(summary=f"ok-{action.chosen_action_id}")
+
+    layer._dispatch_act = _mock_dispatch_act  # type: ignore[method-assign]
+
+    action = JudgmentOutput(
+        decision="act",
+        chosen_action_id="__parallel__",
+        parallel_actions=[
+            {"action_id": "task.workbench", "params": {"workbench": {"evidence": ["done"]}}},
+            {"action_id": "task.complete", "params": {"task_id": 7}},
+        ],
+    )
+
+    result = await layer._dispatch_parallel(action, _tool_ctx())
+
+    assert call_log == ["task.workbench"]
+    assert "task.complete" in result.summary
+    assert "已延后" in result.summary
+    assert result.state_delta["deferred_terminal_actions"] == ["task.complete"]
+    assert "单独执行 task.complete" in result.state_delta["recovery_next_step"]
