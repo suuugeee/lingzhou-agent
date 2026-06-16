@@ -706,7 +706,27 @@ async def _continue_phase_records_workbench_when_inner_round_limit_reached():
     workbench = execution.actions[-1].params["workbench"]
     assert workbench["recovery_state"] == "continue_round_limit_reached"
     assert "本 tick continue 阶段已执行 2 轮工具续判" in workbench["evidence"][0]
-    assert "下一轮先综合本 tick 工具结果" in workbench["next_verification"]
+    assert "基于最近 file.read 成功结果收敛判断" in workbench["next_verification"]
+
+
+def test_continue_round_limit_prefers_runtime_recovery_next_step():
+    from core.loop.shared.continue_phase import _specific_round_limit_next_verification
+
+    next_verification = _specific_round_limit_next_verification([
+        {
+            "tool": "shell.run",
+            "status": "skipped",
+            "error": "ToolInputInvalid",
+            "summary": "shell.run missing_params=command",
+            "state_delta": {
+                "tool_input_invalid": True,
+                "missing_params": ["command"],
+                "recovery_next_step": "按 shell.run 的 manifest 重新调用工具；补齐必填参数 command。",
+            },
+        }
+    ])
+
+    assert next_verification == "按 shell.run 的 manifest 重新调用工具；补齐必填参数 command。"
 
 
 async def _continue_phase_gates_repeated_same_action_before_dispatch():

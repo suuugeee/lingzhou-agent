@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -119,6 +120,16 @@ class SelfModel:
         days, rem = divmod(secs, 86400)
         return f"{days}天{rem // 3600}h"
 
+    @property
+    def born_at_display(self) -> str:
+        """Human-readable birth timestamp from the durable soul:born_at fact."""
+        if self.born_at <= 0:
+            return ""
+        try:
+            return datetime.fromtimestamp(self.born_at).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            return str(int(self.born_at))
+
     def set_routing(self, cfg: Config) -> None:
         self.primary_model = cfg.model
         routing = getattr(cfg, "routing", {}) or {}
@@ -183,6 +194,8 @@ def fmt_self_model(sm: SelfModel) -> str:
         f"操作层: {sm.reader_model}",
         f"思考层: {sm.reasoner_model}",
     ]
+    if sm.born_at > 0:
+        lines.insert(2, f"诞生时间: {sm.born_at_display}（来自持久事实 soul:born_at；回答生日/诞生日时优先使用这个锚点）")
     if sm.recent_error_count > 0:
         lines.append(f"最近错误: {sm.recent_error_count} 次  (最近: {sm.last_error})")
     else:

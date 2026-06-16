@@ -27,6 +27,21 @@ from typer.testing import CliRunner
 # 基础模块
 # ══════════════════════════════════════════════════════════════════════════════
 
+def test_self_model_formats_durable_birth_anchor():
+    from core.persona.self_model import SelfModel, fmt_self_model
+
+    sm = SelfModel(name="lingzhou")
+    sm.started_at = 1_780_538_300
+    sm.born_at = 1_780_538_331
+
+    text = fmt_self_model(sm)
+
+    assert "诞生时间:" in text
+    assert "soul:born_at" in text
+    assert "2026" in text
+    assert "回答生日/诞生日时优先使用这个锚点" in text
+
+
 def test_working_memory():
     from memory.working import WMItem, WorkingMemory
     wm = WorkingMemory(capacity=5)

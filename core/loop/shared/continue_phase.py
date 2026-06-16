@@ -367,6 +367,35 @@ def _compact_tool_history(history: list[dict[str, Any]], *, keep_last: int) -> l
     return history
 
 
+def _specific_round_limit_next_verification(tool_history: list[dict[str, Any]]) -> str:
+    """Choose a concrete recovery action when continue rounds hit the cap."""
+    fallback = "根据最近一次工具结果选择一个具体验证动作；若已有足够证据，直接面向用户收敛答复或完成任务。"
+    for entry in reversed(tool_history):
+        if not isinstance(entry, dict):
+            continue
+        state_delta = entry.get("state_delta") if isinstance(entry.get("state_delta"), dict) else {}
+        for key in ("recovery_next_step", "next_verification"):
+            value = _clip_for_context(str(state_delta.get(key) or ""), 240)
+            if value:
+                return value
+        tool = str(entry.get("tool") or "").strip()
+        error = str(entry.get("error") or "").strip()
+        if error == "ToolInputInvalid":
+            missing = state_delta.get("missing_params") if isinstance(state_delta, dict) else None
+            missing_text = ", ".join(str(item) for item in missing) if isinstance(missing, list) else ""
+            if tool and missing_text:
+                return f"按 {tool} 的 manifest 重新调用工具；补齐必填参数 {missing_text}。"
+            if tool:
+                return f"按 {tool} 的 manifest 修正参数后重试一次。"
+        if error:
+            return f"修复最近一次 {tool or '工具'} 失败（{_clip_for_context(error, 80)}），再用不同证据路径验证任务是否推进。"
+        if str(entry.get("status") or "") == "ok" and tool and not tool.startswith("task."):
+            summary = _clip_for_context(str(entry.get("summary") or entry.get("result") or ""), 140)
+            if summary:
+                return f"基于最近 {tool} 成功结果收敛判断；仅当仍缺证据时，选择一个不同于 {tool} 的验证动作。"
+    return fallback
+
+
 async def _record_continue_round_limit(
     *,
     loop: Any,
@@ -382,6 +411,7 @@ async def _record_continue_round_limit(
         for entry in tool_history[-max(1, min(6, len(tool_history))):]
         if str(entry.get("tool") or "")
     ]
+    next_verification = _specific_round_limit_next_verification(tool_history)
     action = build_workbench_action(
         workbench={
             "domain": "runtime-loop",
@@ -392,7 +422,7 @@ async def _record_continue_round_limit(
             ],
             "hypothesis": "当前任务仍需推进，但继续留在同一 tick 内追加工具会削弱总结与用户可见收敛。",
             "recovery_state": "continue_round_limit_reached",
-            "next_verification": "下一轮先综合本 tick 工具结果，确认是否已经足够回答/完成；若不足，再选择一个最高信息增量的验证动作。",
+            "next_verification": next_verification,
             "completion_checks": [
                 "已停止在同一 tick 内继续追加工具调用。",
                 "已把本轮工具结果收敛为下一轮的验证入口。",
@@ -402,7 +432,7 @@ async def _record_continue_round_limit(
             f"continue 阶段达到 {max_inner_rounds} 轮上限，先写入任务皮层收敛状态，"
             "避免单 tick 内无限续判。"
         ),
-        next_step="下一轮先综合本 tick 工具结果，再决定是否继续取证。",
+        next_step=next_verification,
     )
     result = await loop._execution.dispatch(action, ctx)
     tool_history.append(_tool_history_entry(action, result))
