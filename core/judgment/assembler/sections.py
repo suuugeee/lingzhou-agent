@@ -284,7 +284,7 @@ def _finalize_context_text(assembler: Any, ctx: dict[str, Any], wm: WorkingMemor
     assembler._last_context_used_tokens = used_tokens
     assembler._last_context_section_tokens = section_tokens
     top_sections = _top_context_section_tokens(section_tokens)
-    logger.info(
+    _log.info(
         "[judgment.context] usage used=%s budget=%s top_context_section_tokens_json=%s",
         used_tokens,
         budget,
