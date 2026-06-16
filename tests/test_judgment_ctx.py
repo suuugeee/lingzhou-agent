@@ -147,6 +147,35 @@ def test_semantic_multi_anchor_empty_anchors():
         assert sm.retrieve_multi_anchor(["", "  "]) == []
 
 
+def test_memory_query_ignores_runtime_process_scaffolding_next_step():
+    from core.judgment.assembler.assemble_context import (
+        _build_context_anchors,
+        _memory_search_query_for_task,
+    )
+
+    task = SimpleNamespace(
+        id=42,
+        title="自驱巡检：分析记忆召回质量",
+        goal="定位长期记忆召回差强人意的原因",
+        next_step="下一轮先综合本 tick 工具结果，再决定是否继续取证。",
+        source="self_drive",
+    )
+
+    query = _memory_search_query_for_task(task, "")
+    anchors = _build_context_anchors(
+        SimpleNamespace(),
+        task,
+        "",
+        "",
+        None,
+        [],
+    )
+
+    assert query == "定位长期记忆召回差强人意的原因"
+    assert anchors[0] == "定位长期记忆召回差强人意的原因"
+    assert "下一轮先综合本 tick 工具结果" not in " ".join(anchors)
+
+
 def test_fill_template_raises_when_variable_missing():
     from core.judgment.context.utils import _fill_template
 
@@ -3046,6 +3075,39 @@ def test_fallback_reply_for_user_does_not_echo_tool_summary_on_success():
     assert reply.startswith("我已完成本轮处理")
     assert "关键证据" in reply
     assert "/tmp/a.py" not in reply
+
+
+def test_fallback_reply_for_user_filters_internal_action_first_rationale():
+    from core.loop.shared.logging import _fallback_reply_for_user
+    from tools.registry import ToolResult
+
+    action = _judgment_output(
+        decision="act",
+        chosen_action_id="file.read",
+        rationale="Action-first fallback: 用户给出文件路径且本轮不能空等，先读取路径形成证据。",
+    )
+    result = ToolResult(summary="读取完成")
+
+    reply = _fallback_reply_for_user(action, result, None)
+    assert "Action-first" not in reply
+    assert "本轮不能空等" not in reply
+    assert "正在整理基于证据的答复" in reply
+
+
+def test_fallback_reply_for_user_filters_internal_gate_wait_rationale():
+    from core.loop.shared.logging import _fallback_reply_for_user
+    from tools.registry import ToolResult
+
+    action = _judgment_output(
+        decision="wait",
+        rationale="行为门控制动：file.read /tmp/a 已连续重复 3 次，继续执行没有新增证据。",
+    )
+    result = ToolResult(summary="")
+
+    reply = _fallback_reply_for_user(action, result, None)
+    assert "行为门控" not in reply
+    assert "file.read" not in reply
+    assert "需要更多信息后再继续" in reply
 
 
 @pytest.mark.asyncio

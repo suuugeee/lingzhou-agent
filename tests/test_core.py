@@ -675,7 +675,27 @@ def test_coerce_reply_only_output_demotes_act_to_wait():
     assert out.reply_to_user == "这是最终回复。"
 
 
-def test_coerce_reply_only_output_fills_empty_reply():
+def test_coerce_reply_only_output_does_not_echo_internal_rationale():
+    from core.judgment import JudgmentOutput
+    from core.judgment.boundary import coerce_reply_only_output
+
+    out = coerce_reply_only_output(
+        JudgmentOutput(
+            decision="act",
+            chosen_action_id="file.read",
+            params={"path": "/tmp/demo.txt"},
+            rationale="Action-first fallback: 用户给出文件路径且本轮不能空等，先读取路径形成证据。",
+        )
+    )
+
+    assert out.decision == "wait"
+    assert out.chosen_action_id == ""
+    assert "Action-first" not in out.reply_to_user
+    assert "已完成本轮执行" not in out.reply_to_user
+    assert "整理现有证据" in out.reply_to_user
+
+
+def test_coerce_reply_only_output_does_not_echo_plain_rationale():
     from core.judgment import JudgmentOutput
     from core.judgment.boundary import coerce_reply_only_output
 
@@ -690,8 +710,8 @@ def test_coerce_reply_only_output_fills_empty_reply():
 
     assert out.decision == "wait"
     assert out.chosen_action_id == ""
-    assert out.reply_to_user.startswith("已完成本轮执行：")
-    assert "已读取最近日志。" in out.reply_to_user
+    assert "已读取最近日志" not in out.reply_to_user
+    assert "整理现有证据" in out.reply_to_user
 
 
 def test_judgment_prompt_includes_runtime_hint_rules():
@@ -1899,6 +1919,32 @@ def test_judgment_context_budget_compacts_static_noise_before_dropping():
     assert "MODEL ROUTING COMPACTED" in budgeted["model_routing_section"]
     assert "tool_tier_mapping_keys" in budgeted["model_routing_section"]
     assert "WM COMPACTED" in budgeted["wm_section"]
+
+
+def test_judgment_context_budget_drops_catalogs_before_memory_sections():
+    from core.judgment.context.budget import apply_context_budget
+
+    ctx = {
+        "task_section": "active task",
+        "tools_section": "tool catalog " * 1200,
+        "probe_sensors_section": "probe sensors " * 1000,
+        "skills_catalog_section": "skill catalog " * 900,
+        "model_routing_section": "routing " * 900,
+        "wm_section": "working memory " * 600,
+        "chat_memory_section": "用户偏好：优先沿用真实路径和最小改动。",
+        "memories_section": "长期记忆：lingzhou 的问题常见于低信息循环和 stale task state。",
+        "cross_task_episodic_section": "跨任务线索：上次修过 file.read/file.list 低增量循环。",
+        "chat_continuity_section": "当前 chat 连续性：用户正在要求解决专注和记忆缺陷。",
+        "episodic_section": "当前任务叙事：已定位上下文预算热点。",
+        "user_message": "请解决记忆力严重缺陷",
+    }
+
+    budgeted = apply_context_budget(ctx, token_budget=220)
+
+    assert budgeted["tools_section"] == ""
+    assert budgeted["probe_sensors_section"] == ""
+    assert budgeted["chat_memory_section"]
+    assert budgeted["memories_section"]
 
 
 def test_judgment_context_budget_reserves_prompt_headroom_before_llm_trim():

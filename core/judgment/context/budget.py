@@ -176,20 +176,35 @@ def apply_context_budget(
         return _context_fmt_cache[cache_key]
 
     budgeted = dict(ctx)
-    priority = [
+    # Low-value/reconstructable sections are dropped before memory-bearing sections.
+    # This keeps recall usable under pressure instead of preserving tool/probe catalogs.
+    drop_priority = [
+        "tools_section",
+        "probe_sensors_section",
         "skills_catalog_section",
-        "current_interlocutor_profile_section",
-        "current_interlocutor_continuity_section",
-        "chat_memory_section",
-        "memories_section",
-        "cross_task_episodic_section",
-        "chat_continuity_section",
-        "daily_continuity_section",
-        "episodic_section",
-        "skills_section",
+        "model_routing_section",
+        "shell_capabilities_section",
         "wm_proposal_sections",
         "wm_section",
-        "tools_section",
+        "failures_section",
+        "durable_failure_section",
+        "cognitive_signals_section",
+        "signals_section",
+        "perception_replay_section",
+        "perception_section",
+        "blind_spot_section",
+        "risk_sections",
+        "uncertainty_sections",
+        "skills_section",
+        "daily_continuity_section",
+        "episodic_section",
+        "cross_task_episodic_section",
+        "chat_continuity_section",
+        "memories_section",
+        "chat_memory_section",
+        "current_interlocutor_continuity_section",
+        "current_interlocutor_profile_section",
+        "task_section",
     ]
 
     def total_tokens(items: dict[str, str]) -> int:
@@ -205,8 +220,8 @@ def apply_context_budget(
         _cache_put(cache_key, budgeted)
         return budgeted
 
-    drop_order = list(reversed(priority))
-    drop_order.extend(key for key in budgeted if key not in priority and key != "user_message")
+    drop_order = list(drop_priority)
+    drop_order.extend(key for key in budgeted if key not in drop_priority and key != "user_message")
 
     for key in drop_order:
         if current_total <= target_budget:

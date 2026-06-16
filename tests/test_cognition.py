@@ -287,6 +287,10 @@ def test_self_drive_signal_does_not_duplicate_pending_growth_task():
     asyncio.run(_self_drive_signal_does_not_duplicate_pending_growth_task())
 
 
+def test_self_drive_signal_preserves_in_progress_focus_when_exploration_stuck():
+    asyncio.run(_self_drive_signal_preserves_in_progress_focus_when_exploration_stuck())
+
+
 def test_self_drive_feedback_receives_tick_event():
     from core.loop.tick.exec import _update_self_drive_from_tick
     from tools.registry import ToolResult
@@ -526,6 +530,48 @@ async def _self_drive_signal_does_not_duplicate_pending_growth_task():
             wm_items = loop._wm.get_top(10)
             self_drive_items = [item for item in wm_items if item["kind"] == "self_drive"]
             assert self_drive_items == []
+        finally:
+            await loop.task_store.close()
+            await loop.provider.close()
+
+
+async def _self_drive_signal_preserves_in_progress_focus_when_exploration_stuck():
+    os.environ.setdefault("DASHSCOPE_API_KEY", "test-key")
+    os.environ.setdefault("GITHUB_TOKEN", "test-token")
+    from core.config import Config
+    from core.loop import CognitionLoop
+    from core.loop.cycle.focus import claim_focus_task
+
+    cfg = Config.load(_proj_root() / "lingzhou.json.example")
+    with tempfile.TemporaryDirectory() as d:
+        cfg.loop.db_path = f"{d}/state/runtime.db"
+        cfg.loop.memory_dir = f"{d}/memory"
+        cfg.loop.workspace_dir = f"{d}/workspace"
+        cfg.loop.act = False
+        cfg.evolution.enabled = False
+
+        loop = CognitionLoop(cfg)
+        await loop.task_store.open()
+        try:
+            existing_id = await loop.task_store.add_task(
+                "已有进行中自驱任务",
+                goal="保持当前焦点，不再创建新探索",
+                source="self_drive",
+                status="in_progress",
+                next_step="继续读取当前关键链路",
+            )
+            existing = await loop.task_store.get_task_by_id(existing_id)
+            assert existing is not None
+            await claim_focus_task(loop, existing, clear_current=True)
+            loop._behavior._wait_streak = cfg.thresholds.curiosity_idle_min_cycles
+            loop._behavior._read_streak_count = cfg.loop.behavior_streak_threshold + 2
+
+            await loop._emit_self_drive_signal()
+
+            tasks = await loop.task_store.list_tasks(limit=20)
+            self_drive_tasks = [task for task in tasks if task.source == "self_drive"]
+            assert [task.id for task in self_drive_tasks] == [existing_id]
+            assert [item for item in loop._wm.get_top(10) if item["kind"] == "self_drive"] == []
         finally:
             await loop.task_store.close()
             await loop.provider.close()

@@ -101,9 +101,10 @@ def _build_recovery_fallback_action(
         and _has_tool("memory.search")
     ):
         return "memory.search", {"query": next_verification[:420], "top_k": 5}
-    if "task.list" in lowered and _has_tool("task.list"):
-        return "task.list", {"status": "all", "limit": 8}
-    if _has_tool("task.list"):
+    if (
+        any(marker in lowered for marker in ("task.list", "任务列表", "任务状态", "列出任务"))
+        and _has_tool("task.list")
+    ):
         return "task.list", {"status": "all", "limit": 8}
     return None
 

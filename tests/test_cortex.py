@@ -163,6 +163,41 @@ def test_action_first_signal_keeps_analysis_questions_as_analysis():
     assert "analysis_marker" in signal.markers
 
 
+def test_action_first_signal_keeps_identity_birthday_question_as_recall():
+    signal = extract_action_first_signal("你的生日是什么时候")
+
+    assert signal.intent == "converse"
+    assert signal.must_act is False
+    assert "question_like" in signal.markers
+    assert signal.captured_inputs == []
+
+
+def test_action_first_signal_does_not_force_conversational_memory_hint_without_path():
+    signal = extract_action_first_signal("你或许可以去旧记忆上面找一下。")
+
+    assert signal.must_act is False
+    assert "soft_inspection_marker" in signal.markers
+    assert signal.captured_inputs == []
+
+
+def test_action_first_signal_forces_soft_inspection_with_current_strong_input():
+    signal = extract_action_first_signal("看一下 /Users/suge/Downloads/daemon-stdout.log")
+
+    assert signal.intent == "execute"
+    assert signal.must_act is True
+    assert "soft_inspection_marker" in signal.markers
+    assert {"kind": "path", "value": "/Users/suge/Downloads/daemon-stdout.log"} in signal.captured_inputs
+
+
+def test_action_first_signal_does_not_force_example_feedback():
+    signal = extract_action_first_signal("这个是宽泛的例子，我只是把案例问题告诉你。")
+
+    assert signal.intent == "converse"
+    assert signal.must_act is False
+    assert "feedback_like" in signal.markers
+    assert signal.captured_inputs == []
+
+
 def test_action_first_cortex_patch_persists_inputs_without_dropping_existing_state():
     patch = build_action_first_cortex_patch(
         existing_cortex={
@@ -178,6 +213,27 @@ def test_action_first_cortex_patch_persists_inputs_without_dropping_existing_sta
     assert cortex["action_first"]["must_act"] is True
     assert {"kind": "url", "value": "https://example.com/a.yaml"} in cortex["captured_inputs"]
     assert {"kind": "path", "value": "/tmp/old.yaml"} in cortex["captured_inputs"]
+
+
+def test_action_first_cortex_patch_clears_stale_inputs_for_conversational_feedback():
+    patch = build_action_first_cortex_patch(
+        existing_cortex={
+            "domain": "logs",
+            "captured_inputs": [{"kind": "path", "value": "/Users/suge/Downloads/daemon-stdout.log"}],
+            "action_first": {
+                "intent": "execute",
+                "must_act": True,
+                "minimum_next_action": "先对用户给定的强输入做最小可验证动作",
+            },
+        },
+        user_message="这个是宽泛的例子，我只是把案例问题告诉你。",
+    )
+
+    cortex = patch["cortex"]
+    assert "captured_inputs" not in cortex
+    assert cortex["action_first"]["intent"] == "converse"
+    assert cortex["action_first"]["must_act"] is False
+    assert "minimum_next_action" not in cortex["action_first"]
 
 
 def test_cortex_workspace_formats_action_first_state():

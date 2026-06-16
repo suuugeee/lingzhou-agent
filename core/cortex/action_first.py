@@ -40,6 +40,37 @@ _EXECUTE_MARKERS = (
     "改",
     "补",
 )
+_HARD_EXECUTE_MARKERS = (
+    "执行",
+    "运行",
+    "下载",
+    "拉取",
+    "写入",
+    "覆盖",
+    "更新",
+    "配置",
+    "重载",
+    "切换",
+    "推送",
+    "提交",
+    "测试",
+    "验证",
+    "解决",
+    "修复",
+    "重试",
+    "推进",
+    "实现",
+    "改",
+    "补",
+)
+_SOFT_INSPECTION_MARKERS = (
+    "确认",
+    "检查",
+    "查一下",
+    "看一下",
+    "找一下",
+    "继续",
+)
 _STATUS_MARKERS = (
     "好了吗",
     "完成了吗",
@@ -60,6 +91,8 @@ _ANALYSIS_MARKERS = (
     "方案",
     "架构",
 )
+_QUESTION_RE = re.compile(r"[？?]\s*$|(?:吗|呢|么|什么|怎么|为何|为什么|为啥|是否|哪[个里])")
+_FEEDBACK_RE = re.compile(r"(?:不是|并非|只是|只是在|我只是|我说的是|意思是|指的是|例子|案例)")
 
 
 @dataclass(frozen=True)
@@ -80,6 +113,14 @@ def _clip_text(value: Any, *, limit: int = 260) -> str:
 
 def _has_any(text: str, markers: tuple[str, ...]) -> bool:
     return any(marker in text for marker in markers)
+
+
+def _is_question_like(text: str) -> bool:
+    return bool(_QUESTION_RE.search(text))
+
+
+def _is_feedback_like(text: str) -> bool:
+    return bool(_FEEDBACK_RE.search(text))
 
 
 def _dedupe_inputs(items: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -117,25 +158,46 @@ def extract_action_first_signal(user_message: str) -> ActionFirstSignal:
 
     markers: list[str] = []
     execute_like = _has_any(text, _EXECUTE_MARKERS)
+    hard_execute_like = _has_any(text, _HARD_EXECUTE_MARKERS)
+    soft_inspection_like = _has_any(text, _SOFT_INSPECTION_MARKERS)
     status_like = _has_any(text, _STATUS_MARKERS)
     analysis_like = _has_any(text, _ANALYSIS_MARKERS)
+    question_like = _is_question_like(text)
+    feedback_like = _is_feedback_like(text)
     if execute_like:
         markers.append("execute_marker")
+    if hard_execute_like:
+        markers.append("hard_execute_marker")
+    if soft_inspection_like:
+        markers.append("soft_inspection_marker")
     if status_like:
         markers.append("status_query")
     if analysis_like:
         markers.append("analysis_marker")
+    if question_like:
+        markers.append("question_like")
+    if feedback_like:
+        markers.append("feedback_like")
     if captured_inputs:
         markers.append("strong_input")
 
-    must_act = bool((execute_like or status_like) and not (analysis_like and not captured_inputs))
-    if captured_inputs and execute_like:
-        must_act = True
-    intent = "execute" if must_act else ("analyze" if analysis_like else "unknown")
-
+    must_act = False
     if status_like:
+        must_act = True
+    elif hard_execute_like:
+        must_act = not (question_like and not captured_inputs)
+    elif soft_inspection_like and captured_inputs:
+        must_act = True
+    if analysis_like and not captured_inputs:
+        must_act = False
+    if feedback_like and not captured_inputs:
+        must_act = False
+
+    intent = "execute" if must_act else ("analyze" if analysis_like else ("converse" if question_like or feedback_like else "unknown"))
+
+    if must_act and status_like:
         minimum_next_action = "检查已有运行/文件/远端/服务状态；若未完成，继续执行最小验证动作。"
-    elif captured_inputs:
+    elif must_act and captured_inputs:
         minimum_next_action = "先对用户给定的强输入做最小可验证动作，不要只记录或承诺下一轮处理。"
     elif must_act:
         minimum_next_action = "本轮至少执行一个能产生新证据的工具动作。"
@@ -162,12 +224,15 @@ def build_action_first_cortex_patch(
         return {}
     cortex = dict(existing_cortex or {})
     previous_inputs = cortex.get("captured_inputs")
-    inputs = _dedupe_inputs([
-        *signal.captured_inputs,
-        *(previous_inputs if isinstance(previous_inputs, list) else []),
-    ])
-    if inputs:
-        cortex["captured_inputs"] = inputs
+    if signal.captured_inputs or signal.must_act or signal.intent == "execute":
+        inputs = _dedupe_inputs([
+            *signal.captured_inputs,
+            *(previous_inputs if isinstance(previous_inputs, list) else []),
+        ])
+        if inputs:
+            cortex["captured_inputs"] = inputs
+    else:
+        cortex.pop("captured_inputs", None)
 
     action_first = dict(cortex.get("action_first") if isinstance(cortex.get("action_first"), dict) else {})
     action_first.update({
@@ -178,6 +243,8 @@ def build_action_first_cortex_patch(
     })
     if signal.minimum_next_action:
         action_first["minimum_next_action"] = signal.minimum_next_action
+    else:
+        action_first.pop("minimum_next_action", None)
     cortex["action_first"] = action_first
     return {"cortex": cortex}
 

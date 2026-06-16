@@ -36,11 +36,9 @@ def simulate_safe_output(
 def coerce_reply_only_output(output: JudgmentOutput) -> JudgmentOutput:
     """将 continue 续判结果强制修正为 reply_only 模式（禁止 act，必须有 reply_to_user）。"""
     if not output.reply_to_user.strip():
-        fallback = str(output.rationale or output.speech_intent or output.next_step or "").strip()
+        fallback = str(output.speech_intent or "").strip()
         if not fallback:
-            fallback = "本轮执行已完成，下一步按既定任务目标继续推进。"
-        else:
-            fallback = f"已完成本轮执行：{fallback}"
+            fallback = "我还没有形成足够可靠的答复，需要先整理现有证据。"
         return JudgmentOutput(
             decision=output.decision if output.decision in {"pause", "wait"} else "wait",
             chosen_action_id="",

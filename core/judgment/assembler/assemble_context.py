@@ -51,6 +51,13 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger("lingzhou.judgment")
 _CROSS_TASK_EPISODIC_MAX_CHARS = 4000
+_PROCESS_SCAFFOLDING_MARKERS = (
+    "下一轮先综合本 tick 工具结果",
+    "continue 阶段达到单 tick 工具续判上限",
+    "continue 阶段停止低信息探索",
+    "已停止在同一 tick 内继续追加工具调用",
+    "已停止同 tick 内连续低信息探索",
+)
 
 
 def _clip_context_artifact(text: Any, max_chars: int) -> str:
@@ -60,6 +67,25 @@ def _clip_context_artifact(text: Any, max_chars: int) -> str:
     if len(value) <= max_chars:
         return value
     return value[:max_chars]
+
+
+def _is_process_scaffolding_text(text: Any) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return any(marker in value for marker in _PROCESS_SCAFFOLDING_MARKERS)
+
+
+def _memory_search_query_for_task(task: Any | None, user_message: str) -> str:
+    if task is None:
+        return user_message
+    if user_message:
+        return user_message
+    for candidate in (getattr(task, "next_step", None), getattr(task, "goal", None), getattr(task, "title", None)):
+        normalized = str(candidate or "").strip()
+        if normalized and not _is_process_scaffolding_text(normalized):
+            return normalized
+    return str(getattr(task, "goal", None) or getattr(task, "title", None) or getattr(task, "next_step", None) or "")
 
 
 def _build_context_anchors(
@@ -72,7 +98,7 @@ def _build_context_anchors(
 ) -> list[str]:
     anchors: list[str] = []
     if task:
-        primary_anchor = task.next_step or task.goal or task.title
+        primary_anchor = _memory_search_query_for_task(task, user_message="")
         if primary_anchor:
             anchors.append(primary_anchor)
         task_source = str(getattr(task, "source", "") or "")
@@ -127,7 +153,7 @@ async def _resolve_context_scope(
                 break
     include_open_task_overview = task is None
     task_id_str = str(task.id) if task else None
-    search_query = (user_message or (task.next_step or task.goal or task.title)) if task else user_message
+    search_query = _memory_search_query_for_task(task, user_message)
     resolved_chat_id = str(chat_id or "").strip()
     if not resolved_chat_id and task is not None:
         try:

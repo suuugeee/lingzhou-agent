@@ -185,6 +185,12 @@ async def emit_self_drive_signal(loop: Any) -> None:
     # 为 LLM 提供可裁决上下文：待处理自驱任务数 + 最近一次自驱完成时长。
     runnable = await loop._task_store.list_runnable_tasks(limit=20)
     pending_sd = [task for task in runnable if getattr(task, "source", None) == "self_drive"]
+    if pending_sd:
+        _log.info(
+            "[self_drive] skip signal pending_self_drive_tasks=%d active_focus_preserved",
+            len(pending_sd),
+        )
+        return
     recent_done = await loop._task_store.list_tasks(status="done", limit=10)
     last_done_ago = "无"
     for item in recent_done:
@@ -200,9 +206,7 @@ async def emit_self_drive_signal(loop: Any) -> None:
     task_template = loop._self_drive.generate_exploration_task(
         signal.suggested_domain or "self_evolution"
     )
-    created_task_id: int | None = None
-    if not pending_sd:
-        created_task_id = await _create_self_drive_task(loop, task_template, signal)
+    created_task_id = await _create_self_drive_task(loop, task_template, signal)
     if signal.drive_type == "consolidate":
         drive_content = (
             "[自驱事件]\n"

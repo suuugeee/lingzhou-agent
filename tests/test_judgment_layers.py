@@ -286,7 +286,7 @@ async def test_recovery_wait_is_forced_to_probe_if_next_verification_contains_pr
 
 
 @pytest.mark.asyncio
-async def test_recovery_wait_falls_back_to_task_list_when_probe_not_available() -> None:
+async def test_recovery_wait_does_not_substitute_unrequested_task_list_when_probe_not_available() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput
 
@@ -303,6 +303,39 @@ async def test_recovery_wait_falls_back_to_task_list_when_probe_not_available() 
         "problem_solving:\n"
         "- recovery_state=recovering_from_previous_wait_loop\n"
         "- next_verification=先执行 probe.run 确认 reasoner_route_drift_watch。\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="当前无用户输入且无外部任务"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "wait"
+    assert out.chosen_action_id == ""
+
+
+@pytest.mark.asyncio
+async def test_recovery_wait_uses_task_list_when_next_verification_requests_task_list() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "task.list" else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "problem_solving:\n"
+        "- recovery_state=recovering_from_previous_wait_loop\n"
+        "- next_verification=列出任务状态，确认是否还有用户请求未处理。\n"
         "\n### 近期关键事实\n"
     )
 
@@ -417,7 +450,7 @@ async def test_recovery_wait_treats_spaced_placeholders_as_default() -> None:
     assert out.decision == "wait"
 
 
-async def test_recovery_wait_falls_back_to_task_list_when_next_verification_placeholder() -> None:
+async def test_recovery_wait_does_not_fallback_when_next_verification_placeholder() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput
 
@@ -449,9 +482,8 @@ async def test_recovery_wait_falls_back_to_task_list_when_next_verification_plac
         registry=_Registry(),
     )
 
-    assert out.decision == "act"
-    assert out.chosen_action_id == "task.list"
-    assert out.params == {"status": "all", "limit": 8}
+    assert out.decision == "wait"
+    assert out.chosen_action_id == ""
 
 
 def test_judgment_subpackages_importable() -> None:
