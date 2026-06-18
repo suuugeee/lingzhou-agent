@@ -1723,6 +1723,45 @@ async def test_chat_with_retry_applies_retry_after_backoff_and_fallback(monkeypa
     assert sleep_calls == []
 
 
+def test_pick_retry_provider_accepts_excluded_model_refs_signature():
+    from core.judgment import ModelSelection
+    from core.judgment.decision.helpers import _pick_retry_provider
+
+    class _Executor:
+        def _select_provider(self, **kwargs):
+            assert kwargs["excluded_model_refs"] == {"copilot/gpt-5.4"}
+            assert kwargs["excluded_provider_names"] == {"copilot"}
+            assert kwargs["prefer_tier"] == "reader"
+            return object(), ModelSelection(
+                phase="initial",
+                tier="reader",
+                model_ref="bailian/qwen3.6-plus",
+                thinking="off",
+            )
+
+    provider, selection = _pick_retry_provider(
+        _Executor(),
+        selection=ModelSelection(
+            phase="initial",
+            tier="reasoner",
+            model_ref="copilot/gpt-5.4",
+            thinking="off",
+        ),
+        phase="initial",
+        user_message="hello",
+        current_action="",
+        tool_history=None,
+        thinking_override=None,
+        routing_overrides=None,
+        fallback_prefer_tier="reader",
+        excluded_model_refs={"copilot/gpt-5.4"},
+        excluded_provider_names={"copilot"},
+    )
+
+    assert provider is not None
+    assert selection.model_ref == "bailian/qwen3.6-plus"
+
+
 @pytest.mark.asyncio
 async def test_chat_with_retry_reasoner_phase_fallback_skips_reader_by_default(monkeypatch):
     from core.config import Config

@@ -205,8 +205,8 @@ def _pick_retry_provider(
     thinking_override: str | None,
     routing_overrides: dict[str, str] | None,
     fallback_prefer_tier: str | None,
-    blocked_model_refs: set[str],
-    blocked_provider_names: set[str],
+    excluded_model_refs: set[str],
+    excluded_provider_names: set[str],
 ) -> tuple[Provider, ModelSelection]:
     """在重试场景下按偏序选择备选模型。"""
     fallback_tier = retry_fallback_tier(
@@ -222,8 +222,8 @@ def _pick_retry_provider(
         prefer_tier=fallback_tier,
         thinking_override=thinking_override,
         routing_overrides=routing_overrides,
-        excluded_model_refs=blocked_model_refs,
-        excluded_provider_names=blocked_provider_names,
+        excluded_model_refs=excluded_model_refs,
+        excluded_provider_names=excluded_provider_names,
     )
 
 
