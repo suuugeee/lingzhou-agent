@@ -12,6 +12,76 @@ from core.cortex import (
 from store.task import Failure, Run, Task
 
 
+def test_verification_state_from_cortex_respects_control_marker():
+    from core.cortex import intent as cortex_intent
+
+    text = cortex_intent.control_next_verification(
+        "运行 pytest 后再 verify blocker details."
+    )
+
+    assert cortex_intent.has_actionable_next_verification(text) is False
+    assert cortex_intent.verification_state_from_cortex({"next_verification": text}) == (
+        "resolved",
+        "运行 pytest 后再 verify blocker details.",
+    )
+
+
+def test_build_verification_state_classifies_next_verification_once():
+    from core.cortex import intent as cortex_intent
+
+    pending = cortex_intent.build_verification_state(
+        {"next_verification": "运行 pytest 验证 workbench 下一步。"}
+    )
+    resolved = cortex_intent.build_verification_state(
+        {"next_verification": "none：当前证据已足够完成。"}
+    )
+
+    assert pending == {
+        "status": "pending",
+        "goal": "运行 pytest 验证 workbench 下一步。",
+        "source": "workbench",
+    }
+    assert resolved == {
+        "status": "resolved",
+        "goal": "none：当前证据已足够完成。",
+        "source": "workbench",
+    }
+
+
+def test_next_verification_completion_text_classification():
+    from core.cortex import intent as cortex_intent
+
+    assert cortex_intent.has_actionable_next_verification("确认已完成测试并读取最新 pytest 结果") is True
+    assert cortex_intent.has_actionable_next_verification("已完成，无需继续验证") is False
+    assert cortex_intent.has_actionable_next_verification("already done; no need to rerun") is False
+    assert cortex_intent.has_actionable_next_verification("none：当前证据已足够完成；除非后续 schema 迁移或查询失败，否则不再重复读取同一路径。") is False
+    assert cortex_intent.has_actionable_next_verification("[[control-next-verification]] Try task.complete to close and then verify blocker details.") is False
+    assert cortex_intent.has_actionable_next_verification("[[control-next-verification]] 运行 pytest 后再 verify blocker details.") is False
+
+
+def test_successful_verification_run_tool_classification():
+    from types import SimpleNamespace
+
+    from core.cortex import intent as cortex_intent
+
+    assert cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="succeeded", tool_name="shell.run")
+    )
+    assert not cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="succeeded", tool_name="task.workbench")
+    )
+    assert not cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="failed", tool_name="shell.run")
+    )
+    assert not cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="succeeded", tool_name="memory.add_semantic")
+    )
+    assert cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="succeeded", tool_name="memory.add_semantic"),
+        next_verification="沉淀一条语义记忆：记录本次恢复规则。",
+    )
+
+
 def test_cortex_workspace_derives_task_context_from_existing_artifacts():
     task = Task(
         id=42,

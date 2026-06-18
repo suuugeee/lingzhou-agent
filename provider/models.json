@@ -1,19 +1,17 @@
 {
   "_doc": "内置模型目录。context_window 用于推导 judgment 输入预算；max_tokens 是输出上限（provider 侧约束，代码不发送 max_tokens 参数）。用户可通过 lingzhou.json 的 context_window_tokens 字段覆盖此处的值。api/input/request_params/capabilities 属于模型能力元数据，会一并进入运行时 catalog。",
-
   "run_type_routing": {
     "_doc": "run_type → 默认模型档位映射（Phase 3c）。task_default 表示继承活跃任务的 model_tier；其他值直接选路由档位。可在 lingzhou.json 通过 model.run_type_routing 覆盖。",
-    "judge":      "reader",
+    "judge": "reader",
     "tool_chain": "task_default",
     "chat_reply": "reader",
-    "evolve":     "reasoner",
-    "subagent":   "task_default",
-    "probe":      "reader",
-    "llm":        "reader",
-    "exec":       "task_default",
+    "evolve": "reasoner",
+    "subagent": "task_default",
+    "probe": "reader",
+    "llm": "reader",
+    "exec": "task_default",
     "multimodal": "task_default"
   },
-
   "deepseek": {
     "base_url": "https://api.deepseek.com",
     "_doc": [
@@ -26,32 +24,52 @@
         "id": "deepseek-v4-flash",
         "context_window": 1000000,
         "max_tokens": 384000,
-        "capabilities": ["text_generation", "thinking"],
-        "thinking": { "supported": true, "budget_min": 1024, "budget_max": 32768 }
+        "capabilities": [
+          "text_generation",
+          "thinking"
+        ],
+        "thinking": {
+          "supported": true,
+          "budget_min": 1024,
+          "budget_max": 32768
+        }
       },
       {
         "id": "deepseek-v4-pro",
         "context_window": 1000000,
         "max_tokens": 384000,
-        "capabilities": ["text_generation", "thinking"],
-        "thinking": { "supported": true, "budget_min": 1024, "budget_max": 65536 }
+        "capabilities": [
+          "text_generation",
+          "thinking"
+        ],
+        "thinking": {
+          "supported": true,
+          "budget_min": 1024,
+          "budget_max": 65536
+        }
       },
       {
         "id": "deepseek-chat",
         "context_window": 131072,
         "max_tokens": 8192,
-        "capabilities": ["text_generation"]
+        "capabilities": [
+          "text_generation"
+        ]
       },
       {
         "id": "deepseek-reasoner",
         "context_window": 131072,
         "max_tokens": 65536,
-        "capabilities": ["text_generation", "thinking"],
-        "thinking": { "supported": true }
+        "capabilities": [
+          "text_generation",
+          "thinking"
+        ],
+        "thinking": {
+          "supported": true
+        }
       }
     ]
   },
-
   "bailian": {
     "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "sp_base_url": "https://coding.dashscope.aliyuncs.com/v1",
@@ -60,48 +78,83 @@
         "id": "qwen3.6-plus",
         "context_window": 1000000,
         "max_tokens": 65536,
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
-        "thinking": { "supported": true, "budget_min": 1024, "budget_max": 38912 }
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "thinking",
+          "vision"
+        ],
+        "thinking": {
+          "supported": true,
+          "budget_min": 1024,
+          "budget_max": 38912
+        }
       },
       {
         "id": "qwen3.5-plus",
         "context_window": 131072,
         "max_tokens": 8192,
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
-        "thinking": { "supported": true, "budget_min": 1024, "budget_max": 4096 }
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "thinking",
+          "vision"
+        ],
+        "thinking": {
+          "supported": true,
+          "budget_min": 1024,
+          "budget_max": 4096
+        }
       },
       {
         "id": "qwen3-max",
         "context_window": 262144,
         "max_tokens": 65536,
-        "capabilities": ["text_generation", "thinking"],
-        "thinking": { "supported": true, "budget_min": 1024, "budget_max": 38912 }
+        "capabilities": [
+          "text_generation",
+          "thinking"
+        ],
+        "thinking": {
+          "supported": true,
+          "budget_min": 1024,
+          "budget_max": 38912
+        }
       },
       {
         "id": "qwen3-max-2026-01-23",
         "context_window": 262144,
         "max_tokens": 65536,
-        "capabilities": ["text_generation", "thinking"],
-        "thinking": { "supported": true, "budget_min": 1024, "budget_max": 38912 }
+        "capabilities": [
+          "text_generation",
+          "thinking"
+        ],
+        "thinking": {
+          "supported": true,
+          "budget_min": 1024,
+          "budget_max": 38912
+        }
       },
       {
         "id": "qwen3-coder-plus",
         "context_window": 1000000,
         "max_tokens": 65536,
-        "capabilities": ["text_generation"]
+        "capabilities": [
+          "text_generation"
+        ]
       },
       {
         "id": "qwen3-coder-next",
         "context_window": 262144,
         "max_tokens": 65536,
-        "capabilities": ["text_generation"]
-      },
-      {
-        "id": "qwen-plus",
-        "context_window": 131072,
-        "max_tokens": 8192
+        "capabilities": [
+          "text_generation"
+        ]
       },
       {
         "id": "qwen-max",
@@ -117,32 +170,51 @@
         "id": "glm-5",
         "context_window": 131072,
         "max_tokens": 16384,
-        "capabilities": ["text_generation", "thinking"],
-        "thinking": { "supported": true }
+        "capabilities": [
+          "text_generation",
+          "thinking"
+        ],
+        "thinking": {
+          "supported": true
+        }
       },
       {
         "id": "glm-4.7",
         "context_window": 202752,
         "max_tokens": 16384,
-        "capabilities": ["text_generation", "thinking"],
-        "thinking": { "supported": true }
+        "capabilities": [
+          "text_generation",
+          "thinking"
+        ],
+        "thinking": {
+          "supported": true
+        }
       },
       {
         "id": "kimi-k2.5",
         "context_window": 262144,
         "max_tokens": 65536,
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"]
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "thinking",
+          "vision"
+        ]
       },
       {
         "id": "MiniMax-M2.5",
         "context_window": 1000000,
         "max_tokens": 65536,
-        "capabilities": ["text_generation", "thinking"]
+        "capabilities": [
+          "text_generation",
+          "thinking"
+        ]
       }
     ]
   },
-
   "copilot": {
     "base_url": "https://api.individual.githubcopilot.com",
     "_doc": [
@@ -162,10 +234,19 @@
         "max_tokens": 65536,
         "reasoning": true,
         "api": "responses",
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "thinking",
+          "vision"
+        ],
         "request_params": {
-          "unsupported": ["temperature"]
+          "unsupported": [
+            "temperature"
+          ]
         }
       },
       {
@@ -174,10 +255,19 @@
         "max_tokens": 128000,
         "reasoning": true,
         "api": "responses",
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "thinking",
+          "vision"
+        ],
         "request_params": {
-          "unsupported": ["temperature"]
+          "unsupported": [
+            "temperature"
+          ]
         }
       },
       {
@@ -186,25 +276,46 @@
         "max_tokens": 65536,
         "reasoning": true,
         "api": "responses",
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "thinking",
+          "vision"
+        ],
         "request_params": {
-          "unsupported": ["temperature"]
+          "unsupported": [
+            "temperature"
+          ]
         }
       },
       {
         "id": "gpt-4.5",
         "context_window": 131072,
         "max_tokens": 16384,
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "vision"]
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "vision"
+        ]
       },
       {
         "id": "claude-sonnet-4.5",
         "context_window": 200000,
         "max_tokens": 16384,
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "vision"]
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "vision"
+        ]
       },
       {
         "id": "o3",
@@ -212,8 +323,15 @@
         "max_tokens": 100000,
         "reasoning": true,
         "api": "chat_completions",
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "thinking",
+          "vision"
+        ],
         "request_params": {
           "completion_limit_param": "max_completion_tokens"
         }
@@ -224,15 +342,21 @@
         "max_tokens": 100000,
         "reasoning": true,
         "api": "chat_completions",
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
+        "input": [
+          "text",
+          "image"
+        ],
+        "capabilities": [
+          "text_generation",
+          "thinking",
+          "vision"
+        ],
         "request_params": {
           "completion_limit_param": "max_completion_tokens"
         }
       }
     ]
   },
-
   "openai-codex": {
     "base_url": "https://chatgpt.com/backend-api/codex",
     "_doc": [
@@ -240,54 +364,44 @@
       "需要先执行 lingzhou auth login-codex 完成浏览器/device OAuth。",
       "mode=codex 固定使用 responses API；Codex backend 不支持 temperature/embeddings。"
     ],
+    "model_defaults": {
+      "api": "responses",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "capabilities": [
+        "text_generation",
+        "thinking",
+        "vision"
+      ],
+      "request_params": {
+        "unsupported": [
+          "temperature"
+        ]
+      }
+    },
     "models": [
       {
         "id": "gpt-5.5",
         "context_window": 272000,
-        "max_tokens": 128000,
-        "reasoning": true,
-        "api": "responses",
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
-        "request_params": {
-          "unsupported": ["temperature"]
-        }
+        "max_tokens": 128000
       },
       {
         "id": "gpt-5.5-pro",
         "context_window": 272000,
-        "max_tokens": 128000,
-        "reasoning": true,
-        "api": "responses",
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
-        "request_params": {
-          "unsupported": ["temperature"]
-        }
+        "max_tokens": 128000
       },
       {
         "id": "gpt-5.4",
         "context_window": 272000,
-        "max_tokens": 128000,
-        "reasoning": true,
-        "api": "responses",
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
-        "request_params": {
-          "unsupported": ["temperature"]
-        }
+        "max_tokens": 128000
       },
       {
         "id": "gpt-5.4-mini",
         "context_window": 272000,
-        "max_tokens": 128000,
-        "reasoning": true,
-        "api": "responses",
-        "input": ["text", "image"],
-        "capabilities": ["text_generation", "thinking", "vision"],
-        "request_params": {
-          "unsupported": ["temperature"]
-        }
+        "max_tokens": 128000
       }
     ]
   }

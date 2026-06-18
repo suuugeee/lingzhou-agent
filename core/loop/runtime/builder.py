@@ -44,6 +44,10 @@ class EmbeddingRuntime:
     provider: Any | None = None
 
 
+def _elapsed(started: float) -> float:
+    return time.monotonic() - started
+
+
 def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
     """构造完整运行时器官上下文。"""
     init_started = time.monotonic()
@@ -53,7 +57,7 @@ def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
     repo_root = Path(__file__).resolve().parents[3]
     tools_dir = repo_root / "tools"
     registry.discover(tools_dir)
-    _log.info("[startup] loop tools discovered dt=%.3fs", time.monotonic() - stage_started)
+    _log.info("[startup] loop tools discovered dt=%.3fs", _elapsed(stage_started))
 
     stage_started = time.monotonic()
     from core.plugin import PluginManager
@@ -65,7 +69,7 @@ def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
     plugin_manager.register_all(tool_registry=registry)
     plugin_manager.start_all()
     _log.info("[plugin] 已加载 %d 个插件", len(plugin_manager.list_plugins()))
-    _log.info("[startup] loop plugins ready dt=%.3fs", time.monotonic() - stage_started)
+    _log.info("[startup] loop plugins ready dt=%.3fs", _elapsed(stage_started))
 
     stage_started = time.monotonic()
     wm = WorkingMemory(
@@ -75,7 +79,7 @@ def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
     )
     episodic = EpisodicMemory(cfg.memory_dir, max_events=cfg.memory.max_events)
     task_store = TaskStore(Path(cfg.db_path))
-    _log.info("[startup] loop base memory ready dt=%.3fs", time.monotonic() - stage_started)
+    _log.info("[startup] loop base memory ready dt=%.3fs", _elapsed(stage_started))
 
     emotion = EmotionState.from_config(cfg)
 
@@ -88,7 +92,7 @@ def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
     execution = ExecutionLayer(registry, cfg)
     run_driver = RunDriver(execution)
     evolution = EvolutionEngine(cfg, provider, registry)
-    _log.info("[startup] loop cognition layers ready dt=%.3fs", time.monotonic() - stage_started)
+    _log.info("[startup] loop cognition layers ready dt=%.3fs", _elapsed(stage_started))
 
     embedding_runtime = _build_embedding_runtime(cfg)
     stage_started = time.monotonic()
@@ -102,7 +106,7 @@ def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
         temporal_weight=cfg.memory.semantic_temporal_weight,
         temporal_window_days=cfg.memory.semantic_temporal_window_days,
     )
-    _log.info("[startup] semantic init done dt=%.3fs", time.monotonic() - stage_started)
+    _log.info("[startup] semantic init done dt=%.3fs", _elapsed(stage_started))
     metabolic = MetabolicEngine(task_store, semantic_memory=semantic)
 
     stage_started = time.monotonic()
@@ -167,8 +171,8 @@ def build_runtime_context(cfg: Config, owner: Any) -> RuntimeContext:
         _auth_profiles_mtime=AUTH_PROFILES_PATH.stat().st_mtime if AUTH_PROFILES_PATH.exists() else 0.0,
         _tick_dispatcher=tick_dispatcher,
     )
-    _log.info("[startup] loop runtime objects ready dt=%.3fs", time.monotonic() - stage_started)
-    _log.info("[startup] loop construct complete dt=%.3fs", time.monotonic() - init_started)
+    _log.info("[startup] loop runtime objects ready dt=%.3fs", _elapsed(stage_started))
+    _log.info("[startup] loop construct complete dt=%.3fs", _elapsed(init_started))
     return context
 
 

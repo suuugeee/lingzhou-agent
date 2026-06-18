@@ -148,6 +148,7 @@ def test_semantic_multi_anchor_empty_anchors():
 
 
 def test_memory_query_ignores_runtime_process_scaffolding_next_step():
+    from core.cortex import intent as cortex_intent
     from core.judgment.assembler.assemble_context import (
         _build_context_anchors,
         _memory_search_query_for_task,
@@ -157,7 +158,7 @@ def test_memory_query_ignores_runtime_process_scaffolding_next_step():
         id=42,
         title="自驱巡检：分析记忆召回质量",
         goal="定位长期记忆召回差强人意的原因",
-        next_step="下一轮先综合本 tick 工具结果，再决定是否继续取证。",
+        next_step=cortex_intent.control_next_verification("下一轮先综合本 tick 工具结果，再决定是否继续取证。"),
         source="self_drive",
     )
 
@@ -393,11 +394,12 @@ def test_prefer_tier_for_task_uses_pending_then_task_default():
 
     assert _prefer_tier_for_task(None, task) is None
     assert _prefer_tier_for_task("reader", task) == "reader"
+    assert _prefer_tier_for_task(" Reader ", task) == "reader"
     assert _prefer_tier_for_task("repair", task) == "repair"
     assert _prefer_tier_for_task("reader", task, has_user_message=True) == "reasoner"
     assert _prefer_tier_for_task(None, task, has_user_message=True) == "reasoner"
 
-    task.model_tier = "reasoner"
+    task.model_tier = " Reasoner "
     assert _prefer_tier_for_task(None, task) == "reasoner"
 
     task.model_tier = "invalid"
@@ -408,7 +410,7 @@ def test_prefer_tier_for_task_uses_pending_then_task_default():
         _judgment_output(
             decision="act",
             chosen_action_id="file.read",
-            model_strategy={"next_phase_tier": "reader"},
+            model_strategy={"next_phase_tier": " Reader "},
         )
     ) == "reader"
 
@@ -4255,6 +4257,7 @@ async def test_sync_task_progress_state_uses_next_verification_when_no_recovery_
 
 
 async def test_sync_task_progress_state_uses_nested_cortex_next_verification():
+    from core.cortex import intent as cortex_intent
     from core.loop.task.runtime import _sync_task_progress_state
     from store.task import TaskStore
 
@@ -4274,7 +4277,9 @@ async def test_sync_task_progress_state_uses_nested_cortex_next_verification():
             state_delta={
                 "cortex": {
                     "domain": "runtime-loop",
-                    "next_verification": "下一轮先综合本 tick 工具结果，再选择最高信息增量验证动作。",
+                    "next_verification": cortex_intent.control_next_verification(
+                        "下一轮先综合本 tick 工具结果，再选择最高信息增量验证动作。"
+                    ),
                 }
             },
         )

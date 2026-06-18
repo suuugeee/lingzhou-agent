@@ -9,8 +9,9 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from core.loop.routing_overrides import normalize_routing_overrides
+from core.loop.routing_overrides import normalize_routing_overrides_payload
 from core.metabolic import add_run, set_soul_fact
+from core.execution.run_profile import RUN_TYPE_JUDGE, run_type_profile
 from core.persona.self_model import SelfModel
 from provider import create_provider_with_model
 from provider.models_gen import ensure_models_json
@@ -266,8 +267,10 @@ async def _restore_state_from_db_impl(loop: Any) -> None:
     overrides_json, overrides_found = await loop._task_store.get_fact("pref:routing_overrides")
     if overrides_found and overrides_json:
         try:
-            overrides = json.loads(overrides_json)
-            loop._pending_routing_overrides = normalize_routing_overrides(overrides)
+            loop._pending_routing_overrides = normalize_routing_overrides_payload(
+                overrides_json,
+                catalog_path=loop._cfg.workspace_dir / "models.json",
+            )
             if loop._pending_routing_overrides:
                 _log.info("[routing] 从 DB 恢复 routing_overrides: %s", loop._pending_routing_overrides)
         except Exception:
@@ -289,9 +292,11 @@ async def _restore_state_from_db_impl(loop: Any) -> None:
     try:
         _existing_pending = await loop._task_store.get_pending_runs(limit=1)
         if not _existing_pending:
+            judge_profile = run_type_profile(RUN_TYPE_JUDGE)
             _bootstrap_run_id = await add_run(
                 loop,
-                run_type="judge",
+                run_type=judge_profile.run_type,
+                worker_type=judge_profile.worker_type,
                 status="pending",
                 log_text="[startup] bootstrap pending Run — awaiting first poll",
                 source="loop/runtime/startup/bootstrap",

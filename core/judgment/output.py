@@ -14,9 +14,19 @@ from typing import TYPE_CHECKING, Any
 from tools.registry import tool_has_capability
 
 from .context.utils import _clip_for_context
+from .tiers import (
+    DEFAULT_TIER,
+    JUDGMENT_TIERS,
+    READER_TIER,
+    REASONER_TIER,
+    is_judgment_tier,
+    normalize_tier,
+    tier_role_description,
+)
 
 if TYPE_CHECKING:
     from tools.registry import ToolRegistry
+
 
 def _tool_manifest(tool_id: str, registry: ToolRegistry | None = None) -> Any | None:
     if registry is None or not tool_id:
@@ -25,25 +35,37 @@ def _tool_manifest(tool_id: str, registry: ToolRegistry | None = None) -> Any | 
     return entry.manifest if entry else None
 
 
+def _tier_for_manifest_fields(
+    prefer_tier: str | None,
+    progress_category: str,
+    caps: tuple[str, ...],
+) -> str:
+    if is_judgment_tier(prefer_tier):
+        return normalize_tier(prefer_tier)
+    cap_set = set(caps)
+    if "completion_mutation" in cap_set or "completion_verify" in cap_set or "multimodal" in cap_set:
+        return REASONER_TIER
+    if "completion_info_only" in cap_set and "completion_mutation" not in cap_set:
+        return READER_TIER
+    if progress_category in {"mutation", "io"}:
+        return REASONER_TIER
+    if progress_category == "info":
+        return READER_TIER
+    return REASONER_TIER
+
+
+def _tier_for_manifest(manifest: Any) -> str:
+    return _tier_for_manifest_fields(
+        manifest.prefer_tier,
+        manifest.progress_category or "",
+        tuple(sorted(manifest.capabilities or ())),
+    )
+
+
 def is_reader_tool(tool_id: str, registry: ToolRegistry | None = None) -> bool:
     """判断工具是否属于 reader tier，完全依赖 ToolManifest（蓝图模式 2）。"""
     manifest = _tool_manifest(tool_id, registry)
-    if manifest is None:
-        return False
-    if manifest.prefer_tier == "reader":
-        return True
-    if manifest.prefer_tier in {"reasoner", "repair"}:
-        return False
-    caps = set(manifest.capabilities or ())
-    if "completion_mutation" in caps or "completion_verify" in caps or "multimodal" in caps:
-        return False
-    if "completion_info_only" in caps and "completion_mutation" not in caps:
-        return True
-    if manifest.progress_category == "info":
-        return True
-    if manifest.progress_category in {"mutation", "io"}:
-        return False
-    return False
+    return bool(manifest is not None and _tier_for_manifest(manifest) == READER_TIER)
 
 
 def is_plan_alignment_exempt(tool_id: str, registry: ToolRegistry | None = None) -> bool:
@@ -66,30 +88,11 @@ def registry_manifest_signature(registry: ToolRegistry) -> tuple[
     )
 
 
-def _tier_for_manifest_fields(
-    prefer_tier: str | None,
-    progress_category: str,
-    caps: tuple[str, ...],
-) -> str:
-    if prefer_tier in {"reader", "reasoner", "repair"}:
-        return prefer_tier
-    cap_set = set(caps)
-    if "completion_mutation" in cap_set or "completion_verify" in cap_set or "multimodal" in cap_set:
-        return "reasoner"
-    if "completion_info_only" in cap_set and "completion_mutation" not in cap_set:
-        return "reader"
-    if progress_category in {"mutation", "io"}:
-        return "reasoner"
-    if progress_category == "info":
-        return "reader"
-    return "reasoner"
-
-
 @functools.lru_cache(maxsize=16)
 def _tool_tier_mapping_cached(
     signature: tuple[tuple[str, str | None, str, tuple[str, ...]], ...],
 ) -> dict[str, tuple[str, ...]]:
-    mapping: dict[str, list[str]] = {"reader": [], "reasoner": [], "repair": []}
+    mapping: dict[str, list[str]] = {tier: [] for tier in JUDGMENT_TIERS}
     for name, prefer_tier, progress_category, caps in signature:
         tier = _tier_for_manifest_fields(prefer_tier, progress_category, caps)
         mapping.setdefault(tier, []).append(name)
@@ -97,7 +100,7 @@ def _tool_tier_mapping_cached(
 
 
 def tool_tier_mapping(registry: ToolRegistry | None = None) -> dict[str, list[str]]:
-    mapping: dict[str, list[str]] = {"reader": [], "reasoner": [], "repair": []}
+    mapping: dict[str, list[str]] = {tier: [] for tier in JUDGMENT_TIERS}
     if registry is None:
         return mapping
     cached = _tool_tier_mapping_cached(registry_manifest_signature(registry))
@@ -201,19 +204,16 @@ def _build_team_view_from_cfg(cfg: Any) -> str:
     """从配置构建思考模型的团队视图（不依赖运行时 model list）。"""
     routing = getattr(cfg, "routing", {}) or {}
     lines = ["## 团队架构（你作为思考模型，统筹以下资源）"]
-    for tier in ("reader", "reasoner", "repair"):
+    for tier in JUDGMENT_TIERS:
         model = routing.get(tier, cfg.model)
-        role = {
-            "reader": "工具执行层 — 快速/低成本，由系统自动调度执行轻量工具",
-            "reasoner": "思考层 — 你本人，负责所有决策、规划、推理与用户交互",
-            "repair": "修复层 — 格式修复/小修小补",
-        }.get(tier, tier)
+        role = tier_role_description(tier) or tier
         lines.append(f"- {tier}: {model}")
         lines.append(f"  {role}")
     lines.append("")
     lines.append("调度规则:")
-    lines.append("- 你是 reasoner（思考层），负责所有判断与决策")
-    lines.append("- reader 由系统自动调度，无需也不可通过 next_phase_tier 手动指定")
+    reasoner_role = tier_role_description(REASONER_TIER) or "思考层"
+    lines.append(f"- 你是 {REASONER_TIER}（{reasoner_role}），负责所有判断与决策")
+    lines.append("- reader 可通过 model_strategy.next_phase_tier 明确请求，但系统仍会按任务场景做二次校验")
     lines.append("- 关键决策、代码修改、用户交互必须由你亲自处理")
     return "\n".join(lines)
 
@@ -225,21 +225,11 @@ def tool_tier(tool_id: str, registry: ToolRegistry | None = None) -> str:
     数据驱动的工具可以声明 prefer_tier，无需改此处。
     """
     manifest = _tool_manifest(tool_id, registry)
-    if manifest is not None and manifest.prefer_tier:
-        return manifest.prefer_tier
     if manifest is not None:
-        caps = set(manifest.capabilities or ())
-        if "completion_mutation" in caps or "completion_verify" in caps or "multimodal" in caps:
-            return "reasoner"
-        if "completion_info_only" in caps and "completion_mutation" not in caps:
-            return "reader"
-        if manifest.progress_category in {"mutation", "io"}:
-            return "reasoner"
-        if manifest.progress_category == "info":
-            return "reader"
+        return _tier_for_manifest(manifest)
     if is_reader_tool(tool_id, registry):
-        return "reader"
-    return "reasoner"
+        return READER_TIER
+    return DEFAULT_TIER
 
 
 # ── 路由/健康数据类 ──────────────────────────────────────────────────────────

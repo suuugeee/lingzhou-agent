@@ -8,7 +8,7 @@ from __future__ import annotations
 from typing import Any
 
 from core.metabolic.fact_lifecycle import resolve_metabolic
-from core.metabolic.proposal import StateProposal
+from core.metabolic.lifecycle_utils import build_proposal
 
 
 def _validate_soul_key(key: str) -> str:
@@ -38,14 +38,14 @@ async def set_soul_fact(
         return False
 
     await metabolic.submit(
-        StateProposal(
+        build_proposal(
             op="soul_change",
             key=fact_key,
             value=value,
             scope=scope,
             source=source,
             run_id=run_id,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
+            decision_basis=decision_basis,
         )
     )
     return True

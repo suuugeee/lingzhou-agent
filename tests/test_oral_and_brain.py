@@ -679,8 +679,27 @@ class TestSalienceGateEdgeCases:
         from memory.working import WorkingMemory
         return WorkingMemory(capacity=capacity)
 
+    def test_task_switch_preserve_kinds_are_kept_by_salience_gate(self):
+        from memory.working import TASK_SWITCH_PRESERVE_KINDS, WorkingMemory
+
+        wm = WorkingMemory(capacity=20)
+        for kind in TASK_SWITCH_PRESERVE_KINDS:
+            wm.add(_wm_item(kind, f"{kind} 上下文", priority=0.1))
+        wm.add(_wm_item("noise", "无关垃圾项", priority=0.1))
+
+        dropped = wm.salience_gate(
+            "切换任务",
+            preserve_kinds=set(TASK_SWITCH_PRESERVE_KINDS),
+            priority_floor=0.72,
+        )
+        kinds = {i["kind"] for i in wm.get_top()}
+        assert TASK_SWITCH_PRESERVE_KINDS.issubset(kinds)
+        assert dropped >= 1
+
     def test_preserve_kinds_overrides_priority_floor(self):
         """priority=0 的 preserve_kinds 条目在任何情况下都不被丢弃。"""
+        from memory.working import TASK_SWITCH_PRESERVE_KINDS
+
         wm = self._wm()
         wm.add(_wm_item("bootstrap_identity", "核心身份", priority=0.0))
         wm.add(_wm_item("task_anchor", "任务锚点", priority=0.0))
@@ -688,7 +707,7 @@ class TestSalienceGateEdgeCases:
 
         dropped = wm.salience_gate(
             "今天天气怎么样",
-            preserve_kinds={"bootstrap_identity", "task_anchor"},
+            preserve_kinds=set(TASK_SWITCH_PRESERVE_KINDS),
             priority_floor=0.9,  # 极高 floor
         )
         kinds = {i["kind"] for i in wm.get_top()}
@@ -754,13 +773,15 @@ class TestSalienceGateEdgeCases:
 
     def test_gate_with_all_preserve_kinds_drops_nothing(self):
         """所有条目均在 preserve_kinds 中→一条都不丢。"""
+        from memory.working import TASK_SWITCH_PRESERVE_KINDS
+
         wm = self._wm()
         wm.add(_wm_item("bootstrap_identity", "身份", priority=0.1))
         wm.add(_wm_item("task_anchor", "任务", priority=0.1))
 
         dropped = wm.salience_gate(
             "随便什么消息",
-            preserve_kinds={"bootstrap_identity", "task_anchor"},
+            preserve_kinds=set(TASK_SWITCH_PRESERVE_KINDS),
             priority_floor=0.9,
         )
         assert dropped == 0

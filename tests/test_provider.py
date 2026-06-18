@@ -993,7 +993,8 @@ def test_codex_responses_stream_parses_sse_output_text(monkeypatch):
         def resolve_url(self, path: str) -> str:
             return f"https://chatgpt.com/backend-api/codex{path}"
 
-        async def request_headers(self) -> dict[str, str]:
+        async def request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+            del force_refresh
             return {"Authorization": "Bearer codex-token"}
 
     class _FakeAsyncClient:
@@ -1046,10 +1047,239 @@ def test_codex_responses_stream_parses_sse_output_text(monkeypatch):
 
     assert result == "hello world"
     assert fake_client.calls[0]["payload"]["stream"] is True
+
+
+def test_codex_responses_refreshes_once_on_revoked_oauth_token(monkeypatch):
+    import httpx
+
+    from provider.base import Message
+    from provider.openai_compat import OpenAICompatProvider
+
+    class _FakeMode:
+        def __init__(self) -> None:
+            self.force_refresh_values: list[bool] = []
+
+        def resolve_url(self, path: str) -> str:
+            return f"https://chatgpt.com/backend-api/codex{path}"
+
+        async def request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+            self.force_refresh_values.append(force_refresh)
+            token = "refreshed-token" if force_refresh else "revoked-token"
+            return {"Authorization": f"Bearer {token}"}
+
+    class _FakeAsyncClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.is_closed = False
+            self.timeout = SimpleNamespace(read=30.0, connect=30.0)
+
+        async def post(self, url, *, content=None, headers=None, timeout=None):
+            self.calls.append({
+                "url": url,
+                "payload": json.loads(content or "{}"),
+                "headers": headers,
+                "timeout": timeout,
+            })
+            request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses")
+            if len(self.calls) == 1:
+                return httpx.Response(
+                    401,
+                    text=json.dumps({
+                        "error": {
+                            "message": "Encountered invalidated oauth token for user, failing request",
+                            "code": "token_revoked",
+                        },
+                        "status": 401,
+                    }),
+                    request=request,
+                )
+            body = "\n\n".join([
+                'event: response.completed\n'
+                'data: {"type":"response.completed","response":{"output_text":"ok after refresh","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}',
+                "data: [DONE]",
+            ])
+            return httpx.Response(200, text=body, request=request)
+
+    monkeypatch.setattr("provider.openai_compat.lookup_model_ref", lambda model_ref, catalog_path=None: {
+        "api": "responses",
+        "reasoning": True,
+        "request_params": {"unsupported": ["temperature"]},
+    } if model_ref == "openai-codex/gpt-5.4" else None)
+
+    fake_mode = _FakeMode()
+    fake_client = _FakeAsyncClient()
+    provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+    provider.model_ref = "openai-codex/gpt-5.4"
+    provider._provider_mode = "codex"
+    provider._model = "gpt-5.4"
+    provider._temperature = 0.7
+    provider._thinking_level = "low"
+    provider._extra_body = {}
+    provider._client = cast("Any", fake_client)
+    provider._mode = fake_mode
+    provider.last_usage = {}
+
+    result = asyncio.run(provider.chat([Message(role="user", content="hi")]))
+
+    assert result == "ok after refresh"
+    assert fake_mode.force_refresh_values == [False, True]
+    assert fake_client.calls[0]["headers"]["Authorization"] == "Bearer revoked-token"
+    assert fake_client.calls[1]["headers"]["Authorization"] == "Bearer refreshed-token"
     assert fake_client.calls[0]["payload"]["store"] is False
     assert provider.last_usage["prompt_tokens"] == 3
     assert provider.last_usage["completion_tokens"] == 2
     assert provider.last_usage["total_tokens"] == 5
+
+
+def test_codex_chat_completions_refreshes_once_on_invalidated_oauth_token(monkeypatch):
+    import httpx
+
+    from provider.base import Message
+    from provider.openai_compat import OpenAICompatProvider
+
+    class _FakeMode:
+        def __init__(self) -> None:
+            self.force_refresh_values: list[bool] = []
+
+        def resolve_url(self, path: str) -> str:
+            return f"https://chatgpt.com/backend-api/codex{path}"
+
+        async def request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+            self.force_refresh_values.append(force_refresh)
+            token = "refreshed-token" if force_refresh else "revoked-token"
+            return {"Authorization": f"Bearer {token}"}
+
+    class _FakeAsyncClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.is_closed = False
+            self.timeout = SimpleNamespace(read=30.0, connect=30.0)
+
+        async def post(self, url, *, content=None, headers=None, timeout=None):
+            self.calls.append({
+                "url": url,
+                "payload": json.loads(content or "{}"),
+                "headers": headers,
+                "timeout": timeout,
+            })
+            request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex/chat/completions")
+            if len(self.calls) == 1:
+                return httpx.Response(
+                    401,
+                    text=json.dumps({
+                        "error": {
+                            "message": "Your authentication token has been invalidated. Please try signing in again.",
+                            "code": "token_invalidated",
+                        },
+                        "status": 401,
+                    }),
+                    request=request,
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": "ok after refresh"}}],
+                    "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+                },
+                request=request,
+            )
+
+    monkeypatch.setattr("provider.openai_compat.lookup_model_ref", lambda model_ref, catalog_path=None: {
+        "api": "chat_completions",
+        "reasoning": True,
+    } if model_ref == "openai-codex/gpt-5.5" else None)
+
+    fake_mode = _FakeMode()
+    fake_client = _FakeAsyncClient()
+    provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+    provider.model_ref = "openai-codex/gpt-5.5"
+    provider._provider_mode = "codex"
+    provider._model = "gpt-5.5"
+    provider._temperature = 0.7
+    provider._thinking_level = "low"
+    provider._extra_body = {}
+    provider._client = cast("Any", fake_client)
+    provider._mode = fake_mode
+    provider.last_usage = {}
+
+    result = asyncio.run(provider.chat([Message(role="user", content="hi")]))
+
+    assert result == "ok after refresh"
+    assert fake_mode.force_refresh_values == [False, True]
+    assert fake_client.calls[0]["headers"]["Authorization"] == "Bearer revoked-token"
+    assert fake_client.calls[1]["headers"]["Authorization"] == "Bearer refreshed-token"
+    assert provider.last_usage["prompt_tokens"] == 1
+    assert provider.last_usage["completion_tokens"] == 1
+    assert provider.last_usage["total_tokens"] == 2
+
+
+def test_codex_refresh_raises_when_force_refresh_token_unchanged(monkeypatch):
+    import httpx
+
+    from provider.base import Message
+    from provider.openai_compat import OpenAICompatProvider
+
+    class _FakeMode:
+        def __init__(self) -> None:
+            self.force_refresh_values: list[bool] = []
+
+        def resolve_url(self, path: str) -> str:
+            return f"https://chatgpt.com/backend-api/codex{path}"
+
+        async def request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+            self.force_refresh_values.append(force_refresh)
+            return {"Authorization": "Bearer revoked-token"}
+
+    class _FakeAsyncClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.is_closed = False
+            self.timeout = SimpleNamespace(read=30.0, connect=30.0)
+
+        async def post(self, url, *, content=None, headers=None, timeout=None):
+            self.calls.append({
+                "url": url,
+                "payload": json.loads(content or "{}"),
+                "headers": headers,
+                "timeout": timeout,
+            })
+            request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses")
+            return httpx.Response(
+                401,
+                text=json.dumps({
+                    "error": {
+                        "message": "Encountered invalidated oauth token for user, failing request",
+                        "code": "token_revoked",
+                    },
+                    "status": 401,
+                }),
+                request=request,
+            )
+
+    monkeypatch.setattr("provider.openai_compat.lookup_model_ref", lambda model_ref, catalog_path=None: {
+        "api": "responses",
+        "reasoning": True,
+        "request_params": {"unsupported": ["temperature"]},
+    } if model_ref == "openai-codex/gpt-5.4" else None)
+
+    fake_mode = _FakeMode()
+    fake_client = _FakeAsyncClient()
+    provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+    provider.model_ref = "openai-codex/gpt-5.4"
+    provider._provider_mode = "codex"
+    provider._model = "gpt-5.4"
+    provider._temperature = 0.7
+    provider._thinking_level = "low"
+    provider._extra_body = {}
+    provider._client = cast("Any", fake_client)
+    provider._mode = fake_mode
+    provider.last_usage = {}
+
+    with pytest.raises(RuntimeError, match="OpenAI Codex OAuth token 已被服务端撤销"):
+        asyncio.run(provider.chat([Message(role="user", content="hi")]))
+
+    assert fake_mode.force_refresh_values == [False, True]
+    assert len(fake_client.calls) == 1
 
 
 def test_copilot_gpt5_responses_payload_omits_temperature():

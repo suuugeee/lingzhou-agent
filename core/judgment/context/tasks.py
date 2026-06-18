@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 from .utils import (
     _cache_put,
@@ -17,6 +17,14 @@ from .utils import (
 
 if TYPE_CHECKING:
     from store.task import Failure, Run, Task
+
+
+def _cached_task_section(cache_key: str, build: Callable[[], str]) -> str:
+    if cache_key in _context_fmt_cache:
+        return _context_fmt_cache[cache_key]
+    result = build()
+    _cache_put(cache_key, result)
+    return result
 
 
 def _task_narrative(task: Task | None) -> str:
@@ -123,12 +131,12 @@ def _fmt_task(task: Task | None) -> str:
 
 def _fmt_recent_runs(runs: list[Run]) -> str:
     cache_key = f"_fmt_recent_runs:{hash(tuple(run.id for run in runs)) if runs else 'none'}"
-    if cache_key in _context_fmt_cache:
-        return _context_fmt_cache[cache_key]
+    return _cached_task_section(cache_key, lambda: _build_recent_runs_section(runs))
+
+
+def _build_recent_runs_section(runs: list[Run]) -> str:
     if not runs:
-        result = "（暂无近期运行记录）"
-        _cache_put(cache_key, result)
-        return result
+        return "（暂无近期运行记录）"
     lines: list[str] = []
     for run in runs:
         summary = _clip_for_context(_run_summary(run), 120)
@@ -140,25 +148,21 @@ def _fmt_recent_runs(runs: list[Run]) -> str:
         if summary:
             line += f" summary={summary}"
         lines.append(line)
-    result = "\n".join(lines)
-    _cache_put(cache_key, result)
-    return result
+    return "\n".join(lines)
 
 
 def _fmt_context_facts(facts: list[tuple[str, str]]) -> str:
     cache_key = f"_fmt_context_facts:{hash(tuple(facts)) if facts else 'none'}"
-    if cache_key in _context_fmt_cache:
-        return _context_fmt_cache[cache_key]
+    return _cached_task_section(cache_key, lambda: _build_context_facts_section(facts))
+
+
+def _build_context_facts_section(facts: list[tuple[str, str]]) -> str:
     if not facts:
-        result = "（暂无近期关键事实）"
-        _cache_put(cache_key, result)
-        return result
-    result = "\n".join(
+        return "（暂无近期关键事实）"
+    return "\n".join(
         f"- {key} = {_format_fact_value(value)}"
         for key, value in facts
     )
-    _cache_put(cache_key, result)
-    return result
 
 
 def _fmt_evolution_breakers(facts: list[tuple[str, str]]) -> str:

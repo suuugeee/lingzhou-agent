@@ -33,21 +33,23 @@ class ExecutorPromptMixin:
         return model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
 
     @staticmethod
+    def _positive_int_or_none(value: Any) -> int | None:
+        try:
+            parsed = int(value)
+        except Exception:
+            return None
+        return parsed if parsed > 0 else None
+
+    @staticmethod
     def _extract_prompt_limit(err_text: str) -> tuple[int | None, int | None]:
         text = err_text or ""
-        match = _PROMPT_LIMIT_RE.search(text)
-        if match:
-            try:
-                prompt = int(match.group(1))
-                limit = int(match.group(2))
-                return prompt, limit
-            except Exception:
-                return None, None
-        for pattern in _PROMPT_LIMIT_PATTERNS[1:]:
+        for idx, pattern in enumerate(_PROMPT_LIMIT_PATTERNS):
             m = pattern.search(text)
             if not m:
                 continue
             try:
+                if idx == 0:
+                    return int(m.group(1)), int(m.group(2))
                 return None, int(m.group(1))
             except Exception:
                 continue
@@ -58,18 +60,13 @@ class ExecutorPromptMixin:
         text = err_text or ""
         match = _OUTPUT_AVAILABLE_RE.search(text)
         if match:
-            try:
-                value = int(match.group(1))
-                return value if value > 0 else None
-            except Exception:
-                return None
+            return ExecutorPromptMixin._positive_int_or_none(match.group(1))
         match = _OUTPUT_WINDOW_RE.search(text)
         if not match:
             return None
         try:
             _, context_window, input_tokens = match.groups()
-            value = int(context_window) - int(input_tokens)
-            return value if value > 0 else None
+            return ExecutorPromptMixin._positive_int_or_none(int(context_window) - int(input_tokens))
         except Exception:
             return None
 

@@ -14,6 +14,24 @@ from cli.common import DEFAULT_CONFIG_PATH, console, load_cfg, resolve_config_pa
 from core.http_proxy import resolve_env_proxy_url
 
 _ENV_VAR_RE = _re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_BUILTIN_PROVIDERS = {
+    "bailian": {
+        "mode": "openai",
+        "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        "sp_base_url": "https://coding.dashscope.aliyuncs.com/v1",
+        "api_key_env": "DASHSCOPE_API_KEY",
+    },
+    "copilot": {
+        "mode": "copilot",
+        "base_url": "https://api.individual.githubcopilot.com",
+        "api_key_env": "GITHUB_TOKEN",
+    },
+    "openai-codex": {
+        "mode": "codex",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+        "api_key_env": "OPENAI_CODEX_ACCESS_TOKEN",
+    },
+}
 
 
 def _is_env_var_name(value: str) -> bool:
@@ -105,24 +123,6 @@ def _setup_impl(
 
     # ── 1. 选择 provider ──────────────────────────────────────────────────
     catalog_providers = list_providers()
-    _BUILTIN_PROVIDERS = {
-        "bailian": {
-            "mode": "openai",
-            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-            "sp_base_url": "https://coding.dashscope.aliyuncs.com/v1",
-            "api_key_env": "DASHSCOPE_API_KEY",
-        },
-        "copilot": {
-            "mode": "copilot",
-            "base_url": "https://api.individual.githubcopilot.com",
-            "api_key_env": "GITHUB_TOKEN",
-        },
-        "openai-codex": {
-            "mode": "codex",
-            "base_url": "https://chatgpt.com/backend-api/codex",
-            "api_key_env": "OPENAI_CODEX_ACCESS_TOKEN",
-        },
-    }
 
     console.print("\n[bold]步骤 1 / 6 — 选择 LLM provider[/bold]")
     for i, p in enumerate(catalog_providers, 1):
@@ -319,7 +319,14 @@ def _run_init(
                 await store.set_fact("soul:name", cfg.soul.name, scope="soul")
                 await store.set_fact("soul:init_at", _dt.datetime.now(_dt.UTC).isoformat(), scope="soul")
 
-            soul = IdentityBootstrapManager(cfg, store, WorkingMemory())
+            soul = IdentityBootstrapManager(
+                cfg,
+                store,
+                WorkingMemory(
+                    capacity=cfg.memory.working_capacity,
+                    token_budget=cfg.effective_wm_token_budget(),
+                ),
+            )
             await soul.init_files()
             await soul.sync_md()
         finally:

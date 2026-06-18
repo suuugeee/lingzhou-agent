@@ -12,6 +12,18 @@ from datetime import UTC, datetime
 from typing import Any
 
 
+TASK_SWITCH_PRESERVE_KINDS: frozenset[str] = frozenset({
+    "bootstrap_identity",
+    "self_awareness",
+    "task_anchor",
+    "task_reflection",
+    "task_result",
+    "task_replan",
+    "routing_guard",
+    "progress_crystal",
+})
+
+
 def _estimate_tokens(text: str) -> int:
     if not text:
         return 0
@@ -97,6 +109,10 @@ class WorkingMemory:
         self._items: list[WMItem] = []
         self._multi_item_kinds = {"meta_reflection"}
 
+    def _replace_items(self, items: list[WMItem]) -> None:
+        self._items = items
+        heapq.heapify(self._items)
+
     @property
     def total_tokens(self) -> int:
         """当前 WM 所有条目的估算 token 总数。"""
@@ -114,8 +130,7 @@ class WorkingMemory:
         若 item.kind 非空，先移除同 kind 旧条目（防御性去重，避免同 kind 条目累积）。
         """
         if item.kind and item.kind not in self._multi_item_kinds:
-            self._items = [i for i in self._items if i.kind != item.kind]
-            heapq.heapify(self._items)  # 修复堆损坏：过滤后重建堆，再 push
+            self._replace_items([i for i in self._items if i.kind != item.kind])
         heapq.heappush(self._items, item)
         # 先按条目数收敛
         while len(self._items) > self._capacity:
@@ -136,11 +151,9 @@ class WorkingMemory:
         """清空工作记忆。preserve_kinds 中列出的类型条目保留（如身份锚点 bootstrap_identity）。
         kinds 中列出的类型条目清除。若两者都指定，优先 preserve_kinds。"""
         if preserve_kinds:
-            self._items = [item for item in self._items if item.kind in preserve_kinds]
-            heapq.heapify(self._items)
+            self._replace_items([item for item in self._items if item.kind in preserve_kinds])
         elif kinds:
-            self._items = [item for item in self._items if item.kind not in kinds]
-            heapq.heapify(self._items)
+            self._replace_items([item for item in self._items if item.kind not in kinds])
         else:
             self._items.clear()
 
@@ -183,8 +196,7 @@ class WorkingMemory:
                 continue
             dropped += 1
         if dropped or boosted_any:
-            self._items = kept
-            heapq.heapify(self._items)
+            self._replace_items(kept)
         return dropped
 
     def __len__(self) -> int:

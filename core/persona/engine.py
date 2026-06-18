@@ -17,6 +17,14 @@ if TYPE_CHECKING:
 _log = logging.getLogger("lingzhou.persona")
 
 
+def _loads_json_dict(raw: str) -> dict[str, Any]:
+    try:
+        value = json.loads(raw)
+    except Exception:
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 class PersonaEngine:
     """人格器官：管理长期气质与行为倾向的 ethos 基线。"""
 
@@ -34,10 +42,7 @@ class PersonaEngine:
         ethos_json, found = await self._task_store.get_fact("soul:ethos_baseline")
         if not found or not ethos_json:
             return {}
-        try:
-            return json.loads(ethos_json)
-        except Exception:
-            return {}
+        return _loads_json_dict(ethos_json)
 
     async def ethos_values(self) -> EthosValues | None:
         """读取并解析 ethos_baseline；尚未初始化时返回 None。"""

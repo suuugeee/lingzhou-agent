@@ -11,8 +11,15 @@ from core.log_fields import format_log_fields
 
 from ..runtime.reload import _maybe_hot_reload_provider_impl
 from .chat import _process_pending_chat_turn
-from .dispatcher import TickJob
-from .focus import resolve_focus_task
+from .focus import (
+    resolve_focus_task,
+    _tick_dispatcher_state,
+    _tick_dispatcher_enabled,
+    _tick_dispatcher_has_capacity,
+    _tick_dispatcher_has_work,
+    resolve_tick_dispatch_context,
+    try_dispatch_tick_job,
+)
 
 _log = logging.getLogger("lingzhou.loop")
 
@@ -20,35 +27,39 @@ _log = logging.getLogger("lingzhou.loop")
 async def _run_cycle_impl(loop: Any, cycle: int) -> int:
     cycle, handled_chat = await _process_pending_chat_turn(loop, cycle)
     if not handled_chat:
-        # Phase 3d：优先认领 DB pending Runs（bootstrap/崩溃恢复路径）
         run_driver = getattr(loop, "_run_driver", None)
         if run_driver is not None:
             polled_cycle = await run_driver.poll_pending_runs(loop, cycle)
             if polled_cycle is not None:
                 return polled_cycle
 
-        if getattr(loop, "_tick_dispatcher", None) is not None and loop._tick_dispatcher.enabled:
-            dispatcher = loop._tick_dispatcher
-            if dispatcher.has_running() or dispatcher.has_pending():
+        dispatcher_state = _tick_dispatcher_state(loop)
+        if dispatcher_state.enabled:
+            if dispatcher_state.has_work:
                 _log.debug(
                     "[tick-dispatch] active work running=%d pending=%d, skip auto tick",
-                    dispatcher.running_count,
-                    dispatcher.pending_count,
+                    dispatcher_state.running_count,
+                    dispatcher_state.pending_count,
                 )
                 return cycle
-            active_task = await resolve_focus_task(loop)
+            dispatch_context = await resolve_tick_dispatch_context(
+                loop,
+                cycle,
+                source="auto",
+            )
+            active_task = dispatch_context.active_task
             if active_task is None and not getattr(loop, "_auto_tick_due", True):
                 _log.debug("[tick-dispatch] auto tick not due, wait for idle gap")
                 return cycle
-            dispatch_cycle = await loop._next_dispatch_cycle()
-            chain_key = loop._resolve_tick_chain_key(active_task=active_task, source="auto")
-            accepted = await dispatcher.enqueue(
-                TickJob(cycle=dispatch_cycle, chain_key=chain_key, source="auto")
+            dispatch_result = await try_dispatch_tick_job(
+                loop,
+                cycle,
+                source="auto",
             )
-            if accepted:
+            if dispatch_result.accepted:
                 if active_task is None:
                     loop._auto_tick_due = False
-                cycle = dispatch_cycle
+                cycle = dispatch_result.context.dispatch_cycle
             else:
                 _log.debug("[tick-dispatch] queue full, skip auto tick")
         else:
@@ -57,23 +68,51 @@ async def _run_cycle_impl(loop: Any, cycle: int) -> int:
     return cycle
 
 
+def _arousal_idle_factor(loop: Any) -> float:
+    cfg = loop._cfg
+    arousal = float(getattr(getattr(loop, "_emotion", None), "arousal", 0.5))
+    return max(
+        cfg.loop.arousal_min_factor,
+        1.0 - cfg.loop.arousal_sensitivity * (arousal - cfg.loop.arousal_neutral),
+    )
+
+
+def _task_signature(task: Any | None) -> tuple[Any, Any]:
+    return (task.id if task else None, task.status if task else None)
+
+
+def _resolve_wait_gap_seconds(
+    loop: Any,
+    *,
+    after_task: Any | None,
+    arousal_factor: float,
+    has_work: bool = False,
+) -> float:
+    cfg = loop._cfg
+    if has_work:
+        return max(float(cfg.loop.min_act_gap) / 1000.0, 0.2)
+    if loop._pending_idle_gap is not None:
+        return loop._pending_idle_gap
+    if after_task is not None or getattr(loop, "_bootstrap_mode", "none") == "full":
+        return cfg.loop.active_idle_gap / 1000.0 * arousal_factor
+    return cfg.loop.max_idle_gap / 1000.0 * arousal_factor
+
+
 async def _wait_after_cycle_impl(loop: Any) -> None:
     cfg = loop._cfg
     # arousal 调制系数：高唤醒→更短间隔（最多缩 20%），低唤醒→更长间隔（最多扩 20%）
     # 不干预 LLM 主动设置的 _pending_idle_gap，只影响配置兜底值
-    _arousal = float(getattr(getattr(loop, "_emotion", None), "arousal", 0.5))
-    _arousal_factor = max(cfg.loop.arousal_min_factor, 1.0 - cfg.loop.arousal_sensitivity * (_arousal - cfg.loop.arousal_neutral))
+    _arousal_factor = _arousal_idle_factor(loop)
 
-    dispatcher = getattr(loop, "_tick_dispatcher", None)
-    if dispatcher is not None and dispatcher.enabled:
-        has_work = dispatcher.has_running() or dispatcher.has_pending()
+    if _tick_dispatcher_enabled(loop):
+        has_work = _tick_dispatcher_has_work(loop)
         after_task = await resolve_focus_task(loop)
-        if has_work:
-            gap = max(float(cfg.loop.min_act_gap) / 1000.0, 0.2)
-        elif after_task is not None:
-            gap = cfg.loop.active_idle_gap / 1000.0 * _arousal_factor
-        else:
-            gap = cfg.loop.max_idle_gap / 1000.0 * _arousal_factor
+        gap = _resolve_wait_gap_seconds(
+            loop,
+            after_task=after_task,
+            arousal_factor=_arousal_factor,
+            has_work=has_work,
+        )
         await _wait_for_event_impl(loop, gap, after_task)
         if not has_work and after_task is None:
             loop._auto_tick_due = True
@@ -91,15 +130,12 @@ async def _wait_after_cycle_impl(loop: Any) -> None:
         #   ② 有活跃 task（上轮 decision≠act，或 act 后 task 仍在）→ active_idle_gap（较短，保持响应）
         #   ③ bootstrap 未完成 → 同 ② 缩短间隔（避免引导阶段空等 max_idle_gap）
         #   ④ 真正空闲（无 task、无 bootstrap）→ max_idle_gap（节省 CPU/计费）
-        if loop._pending_idle_gap is not None:
-            gap = loop._pending_idle_gap                                       # ① LLM 主动调度
-        elif after_task is not None:
-            gap = cfg.loop.active_idle_gap / 1000.0 * _arousal_factor         # ② 有活跃任务
-        elif getattr(loop, '_bootstrap_mode', 'none') == "full":
-            # bootstrap 未完成时，等同于有隐式未完成工作：缩短轮询间隔提升响应度
-            gap = cfg.loop.active_idle_gap / 1000.0 * _arousal_factor         # ③ bootstrap 阶段
-        else:
-            gap = cfg.loop.max_idle_gap / 1000.0 * _arousal_factor            # ④ 完全空闲
+        gap = _resolve_wait_gap_seconds(
+            loop,
+            after_task=after_task,
+            arousal_factor=_arousal_factor,
+            has_work=False,
+        )
         await _wait_for_event_impl(loop, gap, after_task)
     await _maybe_hot_reload_provider_impl(loop)
 
@@ -108,10 +144,7 @@ async def _wait_for_event_impl(loop: Any, max_wait: float, before_task: Any) -> 
     """事件驱动等待: chat 消息、task 状态变化、探针告警、超时任一发生即唤醒。"""
     cfg = loop._cfg
     poll = max(cfg.loop.wake_poll_interval / 1000.0, 0.05)  # 最小 50ms，防止 wake_poll_interval=0 导致紧密轮询
-    before_sig = (
-        before_task.id if before_task else None,
-        before_task.status if before_task else None,
-    )
+    before_sig = _task_signature(before_task)
     event_loop = asyncio.get_running_loop()
     deadline = event_loop.time() + max_wait
     # 获取探针告警事件（ProbeManager 在 attach 时创建）
@@ -137,14 +170,12 @@ async def _wait_for_event_impl(loop: Any, max_wait: float, before_task: Any) -> 
         if pending_check_dt >= 1.0:
             _log.warning("[wake] has_pending_chat_message slow dt=%.3fs", pending_check_dt)
         if has_pending_chat:
-            dispatcher = getattr(loop, "_tick_dispatcher", None)
-            can_accept = getattr(dispatcher, "can_accept", None) if dispatcher is not None else None
-            if dispatcher is None or not dispatcher.enabled or not callable(can_accept) or can_accept():
+            if _tick_dispatcher_has_capacity(loop):
                 _log.info("[wake] %s", format_log_fields(reason="chat_pending"))
                 break
         if cfg.loop.wake_on_task_change:
             now = await resolve_focus_task(loop)
-            now_sig = (now.id if now else None, now.status if now else None)
+            now_sig = _task_signature(now)
             if now_sig != before_sig:
                 _log.info(
                     "[wake] %s",

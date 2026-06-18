@@ -20,6 +20,24 @@ _FACT_CONTEXT_EXCLUDE_PREFIXES = (
 )
 
 
+def _should_include_fact_key(
+    key: str,
+    *,
+    seen: set[str],
+    task_prefix: str,
+    exclude_prefixes: tuple[str, ...],
+) -> bool:
+    if key in seen:
+        return False
+    if exclude_prefixes and key.startswith(exclude_prefixes):
+        return False
+    if key.startswith("task:") and task_prefix and not key.startswith(task_prefix):
+        return False
+    if key.startswith("task:") and not task_prefix:
+        return False
+    return True
+
+
 async def _load_context_facts_snapshot(
     task_store: TaskStore,
     task: Task | None,
@@ -41,13 +59,12 @@ async def _load_context_facts_snapshot(
     async def _add_facts(items: list[tuple[str, str]], limit: int) -> int:
         added = 0
         for key, value in items:
-            if key in seen:
-                continue
-            if exclude_prefixes_tuple and key.startswith(exclude_prefixes_tuple):
-                continue
-            if key.startswith("task:") and task_prefix and not key.startswith(task_prefix):
-                continue
-            if key.startswith("task:") and not task_prefix:
+            if not _should_include_fact_key(
+                key,
+                seen=seen,
+                task_prefix=task_prefix,
+                exclude_prefixes=exclude_prefixes_tuple,
+            ):
                 continue
             seen.add(key)
             selected.append((key, value))

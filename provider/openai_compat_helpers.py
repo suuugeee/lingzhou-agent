@@ -80,15 +80,16 @@ def _extract_responses_stream_data(text: str) -> dict[str, Any]:
             continue
         if not isinstance(event, dict):
             continue
-        if event.get("type") == "error":
+        event_type = event.get("type")
+        if event_type == "error":
             error = event.get("error") or event
             message = error.get("message") if isinstance(error, dict) else None
             raise RuntimeError(str(message or error))
-        if isinstance(event.get("delta"), str) and event.get("type") == "response.output_text.delta":
+        if isinstance(event.get("delta"), str) and event_type == "response.output_text.delta":
             deltas.append(str(event["delta"]))
         response = event.get("response")
         if isinstance(response, dict):
-            if event.get("type") == "response.completed":
+            if event_type == "response.completed":
                 completed = response
             if isinstance(response.get("usage"), dict):
                 usage = response["usage"]

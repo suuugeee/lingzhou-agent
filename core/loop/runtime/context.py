@@ -12,6 +12,14 @@ from pathlib import Path
 from typing import Any
 
 
+def _recent_action_feedback() -> deque[str]:
+    return deque(maxlen=3)
+
+
+def _conversation_history() -> deque[tuple[str, str]]:
+    return deque(maxlen=6)
+
+
 @dataclass
 class RuntimeContext:
     _cfg: Any
@@ -56,12 +64,12 @@ class RuntimeContext:
     _last_action_state_delta: str = ""
     _success_stall_task_id: str | None = None
     _success_stall_streak: int = 0
-    _recent_action_feedback: deque[str] = field(default_factory=lambda: deque(maxlen=3))
+    _recent_action_feedback: deque[str] = field(default_factory=_recent_action_feedback)
     _last_action_sig: str = ""
     _last_result_fp: str = ""
     _idle_cycles: int = 0
     _last_curiosity_signal_idle_cycle: int = 0
-    _conv_history: deque[tuple[str, str]] = field(default_factory=lambda: deque(maxlen=6))
+    _conv_history: deque[tuple[str, str]] = field(default_factory=_conversation_history)
     _last_heartbeat_at: float = 0.0
     _bootstrap_mode: str = "none"
     _ticks_since_judge: int = 0

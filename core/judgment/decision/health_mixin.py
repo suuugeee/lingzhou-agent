@@ -14,7 +14,41 @@ if TYPE_CHECKING:
 _log = logging.getLogger("lingzhou.judgment")
 
 # LLM 兜底分类仅识别以下标签（避免 LLM 自由发挥）
-_VALID_LLM_CODES = frozenset({"config", "quota", "429", "402", "401", "403", "400", "timeout", "other"})
+_VALID_LLM_CODES = frozenset({
+    "config",
+    "quota",
+    "429",
+    "402",
+    "401",
+    "403",
+    "unsupported_model",
+    "400",
+    "timeout",
+    "other",
+})
+_BLOCKED_CANDIDATE_CODES = frozenset({
+    "config",
+    "quota",
+    "401",
+    "403",
+    "402",
+    "unsupported_model",
+})
+_PROVIDER_BLOCKED_CODES = frozenset({"401", "403"})
+_FIXED_COOLDOWN_SECONDS = {
+    "config": 3600.0,
+    "quota": 3600.0,
+    "402": 86400.0,
+    "unsupported_model": 86400.0,
+}
+_UNSUPPORTED_MODEL_MARKERS = (
+    "unsupported model",
+    "model is not supported",
+    "model not supported",
+    "invalid model",
+    "unknown model",
+)
+_TIMEOUT_MARKERS = ("readtimeout", "timeout")
 
 _LLM_CLASSIFY_PROMPT = """\
 你是一个错误分类器。根据下面的错误信息，判断它属于哪种错误类型。
@@ -25,6 +59,7 @@ quota   — 配额耗尽
 402     — 余额不足或需要付款
 401     — 鉴权失败
 403     — 权限不足
+unsupported_model — 模型不支持 / 模型不存在
 400     — 请求格式错误
 timeout — 超时
 other   — 其他
@@ -46,41 +81,71 @@ class ExecutorHealthMixin:
             self._model_health[model_ref] = health
         return health
 
+    def _is_codex_token_revoked(self, text: str) -> bool:
+        """识别 Codex/OAuth 类 token 被回收、失效的语义错误。"""
+        markers = (
+            "token revoked",
+            "token invalidated",
+            "authentication token invalidated",
+            "oauth token revoked",
+            "oauth token invalidated",
+            "token has been revoked",
+            "token 已被服务端撤销",
+            "openai codex oauth token 已被服务端撤销",
+            "lingzhou auth login-codex",
+        )
+        return any(marker in text for marker in markers)
+
+    @staticmethod
+    def _contains_status_code(text: str, code: str) -> bool:
+        return f" {code} " in f" {text} "
+
+    @staticmethod
+    def _contains_any(text: str, terms: tuple[str, ...]) -> bool:
+        return any(term in text for term in terms)
+
     def _classify_error_code(self, err_text: str) -> str:
         """仅识别有明确结构信号的错误（HTTP 状态码、协议关键词）。
         语义性错误（如配置缺失）留给 LLM 兜底感知，不在此做关键词枚举。
         """
         text = (err_text or "").lower()
+        if "unsupported" in text and "model" in text and "not supported" in text:
+            return "unsupported_model"
+        if "model " in text and "`" in text and " not supported" in text:
+            return "unsupported_model"
+        if "model not found" in text or "unknown model" in text:
+            return "unsupported_model"
         # quota 超限：先于 429 独立识别，部分 provider 通过 403/400 返回
         if "quota" in text and any(
             m in text for m in ("exceeded", "exhausted", "limit", "超限", "超额", "insufficient")
         ):
             return "quota"
-        if " 429 " in f" {text} " or "too many requests" in text:
-            return "429"
-        if " 402 " in f" {text} " or "payment required" in text or "insufficient balance" in text:
-            return "402"
-        if " 401 " in f" {text} " or "unauthorized" in text:
+        if self._is_codex_token_revoked(text):
             return "401"
-        if " 403 " in f" {text} " or "forbidden" in text:
+        if self._contains_status_code(text, "429") or "too many requests" in text:
+            return "429"
+        if self._contains_status_code(text, "402") or self._contains_any(
+            text, ("payment required", "insufficient balance")
+        ):
+            return "402"
+        if self._contains_status_code(text, "401") or "unauthorized" in text:
+            return "401"
+        if self._contains_status_code(text, "403") or "forbidden" in text:
             return "403"
-        if " 400 " in f" {text} " or "bad request" in text:
+        if self._contains_status_code(text, "400") or "bad request" in text:
             return "400"
-        if "readtimeout" in text or "timeout" in text:
+        if self._contains_any(text, _TIMEOUT_MARKERS):
             return "timeout"
         return "other"
 
     def _cooldown_seconds(self, code: str, failure_streak: int) -> float:
         streak = max(1, failure_streak)
         # 配置/quota 类错误与 streak 无关，等人修配置或等配额重置
-        if code == "config":
-            return 3600.0
-        if code == "quota":
-            return 3600.0
+        fixed = _FIXED_COOLDOWN_SECONDS.get(code)
+        if fixed is not None:
+            return fixed
         if code == "429":
             return min(180.0, 30.0 * streak)
-        if code == "402":
-            return 86400.0
         if code in {"401", "403"}:
             return min(300.0, 120.0 + 30.0 * (streak - 1))
         if code == "400":
@@ -90,7 +155,26 @@ class ExecutorHealthMixin:
             return min(120.0, 30.0 * streak)
         return min(90.0, 15.0 * streak)
 
-    def _mark_model_failure(self, model_ref: str, err_text: str) -> None:
+    def _classify_unsupport_marker(self, err_text: str) -> bool:
+        text = (err_text or "").lower()
+        return any(marker in text for marker in _UNSUPPORTED_MODEL_MARKERS)
+
+    def _is_blocked_candidate_after_failure(
+        self,
+        model_ref: str,
+        code: str,
+        err_text: str,
+    ) -> bool:
+        if code in _BLOCKED_CANDIDATE_CODES:
+            return True
+        if code == "400" and self._classify_unsupport_marker(err_text):
+            return True
+        return False
+
+    def _is_provider_blocked_after_failure(self, code: str) -> bool:
+        return code in _PROVIDER_BLOCKED_CODES
+
+    def _mark_model_failure(self, model_ref: str, err_text: str) -> str:
         code = self._classify_error_code(err_text)
         health = self._get_health(model_ref)
         health.failure_streak += 1
@@ -101,6 +185,7 @@ class ExecutorHealthMixin:
         # 规则无法识别时，fire-and-forget 用 LLM 补充感知，回写更精确的 code
         if code == "other":
             self._schedule_llm_classify(model_ref, err_text)
+        return code
 
     def _pick_classify_provider(self, failed_model_ref: str) -> Provider | None:
         """挑一个与 failed_model_ref 不同、且当前可用的 provider 做分类调用。主 provider 最优先。"""

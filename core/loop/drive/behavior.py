@@ -56,6 +56,10 @@ def _normalize_next_step(next_step: str) -> str:
     return cortex_intent.normalize_intent_text(next_step)
 
 
+def _fingerprint(value: str, *, length: int = 12) -> str:
+    return hashlib.md5((value or "").encode("utf-8", errors="replace")).hexdigest()[:length]
+
+
 class BehaviorTracker:
 
     """行为模式追踪器：检测循环并把信号交给 LLM。"""
@@ -314,7 +318,7 @@ class BehaviorTracker:
                 "继续执行同一动作无法提供新增证据，应先综合已有结果或切换验证方式。",
             ],
             hypothesis="当前卡点不是缺少工具调用，而是缺少对重复结果的综合判断和策略切换。",
-            next_verification=(
+            next_verification=cortex_intent.control_next_verification(
                 f"不要再重复执行 {repeat_tool or '同一工具'} {repeat_key or ''}；"
                 "先总结已有证据，或改用不同工具/参数验证同一假设。"
             ),
@@ -344,7 +348,7 @@ class BehaviorTracker:
                 "继续列同一目录无法提供新增证据，应先基于已有目录结果选择具体文件、命令或结论。",
             ]
             hypothesis = "当前循环不是缺少目录信息，而是缺少从目录清单到具体验证对象的收敛。"
-            next_verification = (
+            next_verification = cortex_intent.control_next_verification(
                 f"不要再列出 {repeat_path}；从已有目录结果中选择最相关文件读取，"
                 "或改用 grep/测试/配置查询等更具体证据源。"
             )
@@ -364,7 +368,9 @@ class BehaviorTracker:
                 "继续读取同一路径无法提供新增证据，应先总结已读内容或切换验证手段。",
             ]
             hypothesis = "当前循环不是缺少读取能力，而是缺少读取后的证据综合和下一步改道。"
-            next_verification = f"不要再读取 {repeat_path}；基于已读结果写出判断，或改用 grep/测试/配置查询等不同证据源验证。"
+            next_verification = cortex_intent.control_next_verification(
+                f"不要再读取 {repeat_path}；基于已读结果写出判断，或改用 grep/测试/配置查询等不同证据源验证。"
+            )
             completion_checks = [
                 "已停止重复读取同一路径。",
                 "已把已有读取结果转化为结论或新的验证动作。",
@@ -407,7 +413,7 @@ class BehaviorTracker:
                 f"未推进原因: {reason or '系统未给出额外原因'}",
             ],
             hypothesis="当前不是缺少更多列表/搜索，而是需要先综合已有证据，明确下一条高信息增量验证。",
-            next_verification=(
+            next_verification=cortex_intent.control_next_verification(
                 "不要继续同类 list/search 枚举；先总结已有结果，"
                 "若仍需取证，改用更具体的文件读取、测试、配置查询或用户可见结论。"
             ),
@@ -518,7 +524,7 @@ class BehaviorTracker:
             _p = params or {}
             _content_sig = str(_p.get("old_text") or _p.get("content") or "")[:80]
             if _content_sig:
-                _fp = hashlib.md5(_content_sig.encode("utf-8", errors="replace")).hexdigest()[:8]
+                _fp = _fingerprint(_content_sig, length=8)
                 _effective_key = f"{key_param}#{_fp}"
 
         # action streak 检测（非 file.read）
@@ -552,7 +558,7 @@ class BehaviorTracker:
         """
         if tool_has_capability(self._registry, tool_id, "result_streak_only"):
             return
-        fp = hashlib.md5((result_summary or "").encode("utf-8", errors="replace")).hexdigest()[:12]
+        fp = _fingerprint(result_summary or "")
         if fp and fp != self._last_act_result_fp:
             # 结果发生变化 → 实际有进展，将 streak 计数折回 1
             self._action_streak_count = 1
@@ -578,7 +584,7 @@ class BehaviorTracker:
         from memory.working import WMItem
 
         _body = result_summary.split("\n", 1)[1] if "\n" in result_summary else result_summary
-        _digest = hashlib.md5(_body.encode("utf-8", errors="replace")).hexdigest()[:12]
+        _digest = _fingerprint(_body)
         _fp = (path, max_chars, _digest)
 
         self._recent_read_fps.append(_fp)
@@ -662,7 +668,7 @@ class BehaviorTracker:
         """
         from memory.working import WMItem
 
-        digest = hashlib.md5(result_summary.encode("utf-8", errors="replace")).hexdigest()[:12]
+        digest = _fingerprint(result_summary)
         fp = (path, digest)
 
         self._recent_list_fps.append(fp)
@@ -737,7 +743,7 @@ class BehaviorTracker:
 
         # 规范化：去首尾空白、折叠空白、转小写
         normalized = " ".join(rationale.strip().split()).lower()
-        fp = hashlib.md5(normalized.encode("utf-8", errors="replace")).hexdigest()[:12]
+        fp = _fingerprint(normalized)
 
         self._rationale_hashes.append(fp)
         if self._belief_stale_hash == fp:

@@ -199,8 +199,8 @@
   },
 
   "memory": {
-    "working_capacity": 20,
-    "wm_token_budget_ratio": 0.08,
+    "working_capacity": 40,
+    "wm_token_budget_ratio": 0.2,
     "wm_item_max_tokens": 300,
     "semantic_top_k": 5,
     "failure_limit": 10,
@@ -390,7 +390,7 @@
     "chat_history_turn_limit": 3,
     "chat_history_max_chars": 300,
     "shell_timeout": 30.0,
-    "wm_pri_signal": 0.90,
+    "wm_pri_signal": 0.72,
     "wm_pri_history": 0.88,
     "wm_pri_identity": 0.85,
     "wm_pri_error": 0.30

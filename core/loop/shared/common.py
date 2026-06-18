@@ -8,22 +8,31 @@ from typing import TYPE_CHECKING, Any
 
 from core.judgment import JudgmentOutput, tool_tier
 from core.perception import PerceptionReplaySummary
+from core.judgment.tiers import JUDGMENT_TIER_SET, READER_TIER, REASONER_TIER, normalize_tier
 
 if TYPE_CHECKING:
     from core.config import Config
     from store.task import Task
     from tools.registry import ToolResult
 
-# 判断层执行 tier（用于 task 模型档位校验，不含 reader）
-_JUDGMENT_TIERS: frozenset[str] = frozenset({"reasoner", "repair"})
-# tier hint 白名单（包含 reader，供显式 prefer_tier / next_phase_tier 使用）
-_HINT_TIERS: frozenset[str] = frozenset({"reasoner", "repair", "reader"})
+# 判断层执行 tier（用于 task 模型档位校验与持久化，含 reader）
+_JUDGMENT_TIERS = JUDGMENT_TIER_SET
+# tier hint 白名单（供显式 prefer_tier / next_phase_tier 使用）
+_HINT_TIERS = _JUDGMENT_TIERS
 
 # 上下文截断具名常量(语义记忆 & 日志截断阈值;调整后重启即生效,不影响已存数据)
 _LOG_RATIONALE_CHARS = 120
 _SEM_TITLE_CHARS = 60
 _SEM_TAG_TASK_CHARS = 20
 _EVENT_TITLE_CHARS = 40
+_RECOVERABLE_TASK_COMPLETE_ERRORS = frozenset({
+    "SelfDriveGrowthIncomplete",
+    "WorkbenchVerificationPending",
+    "ActionFirstCompletionBlocked",
+    "InsufficientEvidence",
+    "MutationWithoutVerification",
+    "UserInboxPending",
+})
 
 _VALENCE_HINT_RE = re.compile(r"(?:valence|情绪效价)\s*[:=：]\s*(0(?:\.\d+)?|1(?:\.0+)?)", re.IGNORECASE)
 
@@ -61,8 +70,9 @@ def _infer_valence_from_text(text: str, current: float, emotion_cfg: Any) -> flo
 def _next_thinking_override(model_strategy: dict[str, Any] | None) -> str | None:
     raw = (model_strategy or {}).get("thinking_override")
     valid = {"off", "minimal", "low", "medium", "high"}
-    if isinstance(raw, str) and raw in valid:
-        return raw
+    normalized = str(raw or "").strip().lower()
+    if normalized in valid:
+        return normalized
     return None
 
 
@@ -110,31 +120,39 @@ def _should_continue_within_tick(
     ):
         return True
     if tool_name == "task.complete":
-        recoverable_errors = {
-            "SelfDriveGrowthIncomplete",
-            "WorkbenchVerificationPending",
-            "ActionFirstCompletionBlocked",
-            "InsufficientEvidence",
-            "MutationWithoutVerification",
-            "UserInboxPending",
-        }
-        return result is not None and result.skipped and str(result.error or "") in recoverable_errors
+        return result is not None and result.skipped and str(result.error or "") in _RECOVERABLE_TASK_COMPLETE_ERRORS
     if tool_name == "task.fail":
         return False
     # mutation tool in a user-prompted tick with active task: don't auto-continue
-    return not (user_message and has_active_task and tool_tier(action.chosen_action_id or "", registry) != "reader")
+    return not (
+        user_message
+        and has_active_task
+        and tool_tier(action.chosen_action_id or "", registry) != READER_TIER
+    )
 
 
 def _next_initial_tier_hint(action: JudgmentOutput) -> str | None:
-    next_tier = str((action.model_strategy or {}).get("next_phase_tier", "") or "")
+    next_tier = normalize_tier((action.model_strategy or {}).get("next_phase_tier"), fallback="")
     return next_tier if next_tier in _HINT_TIERS else None
 
 
 def _task_model_tier(task: Task | None) -> str | None:
     if not task:
         return None
-    tier = (task.model_tier or "").strip()
+    tier = normalize_tier(task.model_tier, fallback="")
     return tier if tier in _JUDGMENT_TIERS else None
+
+
+def _coerce_task_model_tier(
+    action: JudgmentOutput,
+    task: Task | None,
+) -> tuple[str | None, str | None, str | None]:
+    next_tier = _next_initial_tier_hint(action)
+    task_tier = _task_model_tier(task)
+    persist_tier = next_tier or task_tier
+    if not persist_tier:
+        return None, None, None
+    return persist_tier, next_tier, task_tier
 
 
 def _prefer_tier_for_task(
@@ -144,9 +162,10 @@ def _prefer_tier_for_task(
     has_user_message: bool = False,
 ) -> str | None:
     if has_user_message:
-        return "reasoner"
-    if pending_tier in _HINT_TIERS:
-        return pending_tier
+        return REASONER_TIER
+    normalized_pending_tier = normalize_tier(pending_tier, fallback="")
+    if normalized_pending_tier in _HINT_TIERS:
+        return normalized_pending_tier
     return _task_model_tier(task)
 
 

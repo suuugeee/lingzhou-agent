@@ -159,21 +159,28 @@ def save_codex_oauth_tokens(tokens: dict[str, Any], *, path: Path | None = None)
     )
 
 
-def _jwt_expiring(access_token: str, skew_seconds: int = 0) -> bool:
+def _decode_jwt_payload(access_token: str) -> dict[str, Any] | None:
     if not access_token or "." not in access_token:
-        return False
+        return None
     try:
         parts = access_token.split(".")
         if len(parts) < 2:
-            return False
+            return None
         payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
         payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8"))
-        exp = payload.get("exp")
-        if not isinstance(exp, (int, float)):
-            return False
-        return float(exp) <= time.time() + max(0, int(skew_seconds))
+        return payload if isinstance(payload, dict) else None
     except Exception:
+        return None
+
+
+def _jwt_expiring(access_token: str, skew_seconds: int = 0) -> bool:
+    payload = _decode_jwt_payload(access_token)
+    if not payload:
         return False
+    exp = payload.get("exp")
+    if not isinstance(exp, (int, float)):
+        return False
+    return float(exp) <= time.time() + max(0, int(skew_seconds))
 
 
 def _codex_env_token() -> TokenResolution | None:
@@ -265,14 +272,8 @@ def build_codex_headers(access_token: str) -> dict[str, str]:
         "User-Agent": "codex_cli_rs/0.0.0 (Lingzhou)",
         "originator": "codex_cli_rs",
     }
-    try:
-        parts = access_token.split(".")
-        if len(parts) >= 2:
-            payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
-            payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode("ascii")).decode("utf-8"))
-            account_id = str(payload.get("chatgpt_account_id") or "").strip()
-            if account_id:
-                headers["ChatGPT-Account-ID"] = account_id
-    except Exception:
-        pass
+    payload = _decode_jwt_payload(access_token) or {}
+    account_id = str(payload.get("chatgpt_account_id") or "").strip()
+    if account_id:
+        headers["ChatGPT-Account-ID"] = account_id
     return headers

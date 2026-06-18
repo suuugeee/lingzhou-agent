@@ -19,6 +19,7 @@ from tools.registry import (
     tool,
     tool_metadata,
 )
+from core.judgment.decision.helpers import _decision_basis_from_parts as _decision_basis
 
 
 @tool(ToolManifest(
@@ -122,7 +123,7 @@ async def task_plan(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         task.id,
         {"plan": clean_plan},
         source="tools/task.plan",
-        decision_basis=f"update task plan for {task.title}: {len(clean_plan)} steps"[:240],
+        decision_basis=_decision_basis("update task plan", task.title, "steps", len(clean_plan)),
     )
 
     # 生成摘要

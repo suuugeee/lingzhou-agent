@@ -72,7 +72,7 @@ class ConcurrentTickDispatcher:
     async def enqueue(self, job: TickJob) -> bool:
         if self._pending_count >= self._max_queue:
             return False
-        queue = self._queues.setdefault(job.chain_key, asyncio.Queue())
+        queue = self._queue_for_chain(job.chain_key)
         queue.put_nowait(job)
         self._pending_count += 1
         worker = self._workers.get(job.chain_key)
@@ -80,25 +80,38 @@ class ConcurrentTickDispatcher:
             self._workers[job.chain_key] = asyncio.create_task(self._run_chain(job.chain_key))
         return True
 
+    def _queue_for_chain(self, chain_key: str) -> asyncio.Queue[TickJob]:
+        return self._queues.setdefault(chain_key, asyncio.Queue())
+
+    @staticmethod
+    def _cycle_of_job(job: TickJob) -> int:
+        return int(getattr(job, "cycle", 0) or 0)
+
+    @staticmethod
+    def _next_job(queue: asyncio.Queue[TickJob]) -> TickJob | None:
+        try:
+            return queue.get_nowait()
+        except asyncio.QueueEmpty:
+            return None
+
     async def _run_chain(self, chain_key: str) -> None:
-        queue = self._queues.setdefault(chain_key, asyncio.Queue())
+        queue = self._queue_for_chain(chain_key)
         try:
             while True:
-                try:
-                    job = queue.get_nowait()
-                except asyncio.QueueEmpty:
+                job = self._next_job(queue)
+                if job is None:
                     break
 
                 self._pending_count = max(0, self._pending_count - 1)
                 async with self._semaphore:
                     self._running_count += 1
                     try:
-                        await self._run_job_with_guard(job)
+                            await self._run_job_with_guard(job)
                     except Exception:
                         _log.exception(
                             "[tick-dispatch] chain=%s cycle=%s failed",
                             chain_key,
-                            getattr(job, "cycle", 0),
+                            self._cycle_of_job(job),
                         )
                     finally:
                         self._running_count = max(0, self._running_count - 1)
@@ -118,7 +131,7 @@ class ConcurrentTickDispatcher:
             _log.error(
                 "[tick-dispatch] chain=%s cycle=%s job_timeout=%ss",
                 job.chain_key,
-                getattr(job, "cycle", 0),
+                self._cycle_of_job(job),
                 f"{guard:.1f}",
             )
             raise RuntimeError(
@@ -128,17 +141,19 @@ class ConcurrentTickDispatcher:
 
 def _tick_job_guard_seconds(cfg: Any | None) -> float | None:
     """Return explicit dispatcher timeout, or None to let inner timeouts own cancellation."""
-    explicit = None
     try:
         loop_cfg = getattr(cfg, "loop", None)
         explicit = getattr(loop_cfg, "tick_job_timeout", None) if loop_cfg is not None else None
     except Exception:
         explicit = None
-    if explicit is not None:
-        try:
-            value = float(explicit)
-            if value > 0:
-                return value
-        except Exception:
-            pass
-    return None
+    return _positive_float_or_none(explicit)
+
+
+def _positive_float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None

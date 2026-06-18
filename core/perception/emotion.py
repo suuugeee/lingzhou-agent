@@ -23,6 +23,10 @@ def _clamp_signed(x: float) -> float:
     return max(-1.0, min(1.0, x))
 
 
+def _cfg_value(cfg: Any | None, name: str, default: Any) -> Any:
+    return getattr(cfg, name, default)
+
+
 # ── OCC 评价维度 ───────────────────────────────────────────────────────────────
 
 @dataclass
@@ -89,8 +93,8 @@ class EmotionState:
         设计原则：感知信号 → 评价维度 → core affect → 离散情感 → 调节策略。
         LLM 不参与情绪计算（LLM 自报告自身情绪属自引用错误）。
         """
-        failure_normalization_count = getattr(emotion_cfg, "failure_normalization_count", 3.0)
-        high_error_normalization_streak = getattr(emotion_cfg, "high_error_normalization_streak", 3.0)
+        failure_normalization_count = _cfg_value(emotion_cfg, "failure_normalization_count", 3.0)
+        high_error_normalization_streak = _cfg_value(emotion_cfg, "high_error_normalization_streak", 3.0)
         prediction = clamp01(prediction_error)
         wm_trust = clamp01(1.0 - wm_pressure)
         failures = clamp01(failure_count / failure_normalization_count)
@@ -99,13 +103,13 @@ class EmotionState:
         has_task = 1.0 if has_active_task else 0.0
         recovering = 1.0 if replay_trend == "recovering" else 0.0
         high_err = clamp01(high_error_streak / high_error_normalization_streak)
-        feeling_min_intensity = getattr(emotion_cfg, "feeling_min_intensity", 0.15)
-        regulation_down_regulate_arousal_high = getattr(emotion_cfg, "regulation_down_regulate_arousal_high", 0.75)
-        regulation_down_regulate_valence_low = getattr(emotion_cfg, "regulation_down_regulate_valence_low", 0.30)
-        regulation_down_regulate_worsening_valence = getattr(emotion_cfg, "regulation_down_regulate_worsening_valence", 0.45)
-        regulation_up_regulate_recovering_valence = getattr(emotion_cfg, "regulation_up_regulate_recovering_valence", 0.55)
-        regulation_up_regulate_signal_valence = getattr(emotion_cfg, "regulation_up_regulate_signal_valence", 0.60)
-        regulation_high_error_streak_guard = getattr(emotion_cfg, "regulation_high_error_streak_guard", 2)
+        feeling_min_intensity = _cfg_value(emotion_cfg, "feeling_min_intensity", 0.15)
+        regulation_down_regulate_arousal_high = _cfg_value(emotion_cfg, "regulation_down_regulate_arousal_high", 0.75)
+        regulation_down_regulate_valence_low = _cfg_value(emotion_cfg, "regulation_down_regulate_valence_low", 0.30)
+        regulation_down_regulate_worsening_valence = _cfg_value(emotion_cfg, "regulation_down_regulate_worsening_valence", 0.45)
+        regulation_up_regulate_recovering_valence = _cfg_value(emotion_cfg, "regulation_up_regulate_recovering_valence", 0.55)
+        regulation_up_regulate_signal_valence = _cfg_value(emotion_cfg, "regulation_up_regulate_signal_valence", 0.60)
+        regulation_high_error_streak_guard = _cfg_value(emotion_cfg, "regulation_high_error_streak_guard", 2)
 
         # ── OCC 评价维度 ────────────────────────────────────────────────────────
         app = Appraisal(

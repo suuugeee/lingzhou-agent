@@ -13,6 +13,8 @@ from tools.registry import tool_has_capability
 if TYPE_CHECKING:
     from core.config import Config
 
+_TASK_EXPLORATION_CAPABILITIES = ("ask_evidence", "completion_info_only", "completion_verify")
+
 
 @dataclass(frozen=True, slots=True)
 class ToolHistoryBudget:
@@ -48,6 +50,23 @@ def routing_posture(
     return "conserve"
 
 
+def _tool_name(item: dict[str, Any]) -> str:
+    return str(item.get("tool") or "")
+
+
+def _action_signature(item: dict[str, Any]) -> str:
+    return f"{_tool_name(item)}|{action_key_param(item.get('params') or {})}"
+
+
+def _is_successful_ask_evidence(registry: Any, item: dict[str, Any]) -> bool:
+    result = str(item.get("result") or "").strip()
+    return (
+        tool_has_capability(registry, _tool_name(item), "ask_evidence")
+        and bool(result)
+        and not result.startswith("ERROR[")
+    )
+
+
 def analyze_tool_history_budget(
     registry: Any,
     cfg: Config,
@@ -66,37 +85,28 @@ def analyze_tool_history_budget(
             1
             for item in history
             if any(
-                tool_has_capability(registry, str(item.get("tool") or ""), capability)
-                for capability in ("ask_evidence", "completion_info_only", "completion_verify")
+                tool_has_capability(registry, _tool_name(item), capability)
+                for capability in _TASK_EXPLORATION_CAPABILITIES
             )
         )
         if len(history) >= 2:
-            last_tool = str(history[-1].get("tool", ""))
-            last_action_sig = f"{last_tool}|{action_key_param(history[-1].get('params') or {})}"
+            last_tool = _tool_name(history[-1])
+            last_action_sig = _action_signature(history[-1])
             repeat_action_count = trailing_repeat_count(
                 history,
-                lambda item: (
-                    f"{str(item.get('tool', ''))}|{action_key_param(item.get('params') or {})}"
-                    == last_action_sig
-                ),
+                lambda item: _action_signature(item) == last_action_sig,
             )
             if last_tool == "file.read":
                 last_path = json.dumps(history[-1].get("params", {}), ensure_ascii=False)
                 repeat_read_count = trailing_repeat_count(
                     history,
                     lambda item: (
-                        str(item.get("tool", "")) == "file.read"
+                        _tool_name(item) == "file.read"
                         and json.dumps(item.get("params", {}), ensure_ascii=False) == last_path
                     ),
                 )
 
-    ask_evidence_hits = sum(
-        1
-        for item in history
-        if tool_has_capability(registry, str(item.get("tool") or ""), "ask_evidence")
-        and str(item.get("result") or "").strip()
-        and not str(item.get("result") or "").startswith("ERROR[")
-    )
+    ask_evidence_hits = sum(1 for item in history if _is_successful_ask_evidence(registry, item))
     posture = routing_posture(
         user_message=user_message,
         task_explore_count=task_explore_count,

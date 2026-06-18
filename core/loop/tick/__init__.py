@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from core.judgment import JudgmentOutput
+from core.judgment.tiers import REPLY_ONLY_FALLBACK_TIER
 from tools.registry import ToolResult
 
 from ..cycle.chat import _resolve_reply_chat_id
@@ -144,7 +145,7 @@ async def _maybe_fill_tick_user_reply(
         user_message=user_message,
         active_task=active_task,
         speech_intent=action.speech_intent,
-        prefer_tier="reasoner",
+        prefer_tier=REPLY_ONLY_FALLBACK_TIER,
         thinking_override=_thinking_floor(
             _resolve_thinking_override(
                 cfg,

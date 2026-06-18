@@ -17,6 +17,23 @@ from memory.working import WorkingMemory
 _log = logging.getLogger("lingzhou.loop")
 
 
+def _build_chain_behavior(loop: Any) -> BehaviorTracker:
+    return BehaviorTracker(
+        wait_streak_notify=list(loop._cfg.loop.wait_streak_notify),
+        streak_threshold=loop._cfg.loop.behavior_streak_threshold,
+        wm_priorities={
+            "behavior_loop": loop._cfg.thresholds.wm_pri_user_msg,
+            "edit_caution": loop._cfg.thresholds.wm_pri_self_aware,
+            "belief_stale": loop._cfg.thresholds.wm_pri_critical,
+        },
+        registry=loop._registry,
+        seq_window_warn_at=loop._cfg.thresholds.behavior_seq_window_warn_at,
+        seq_window_gap_ratio=loop._cfg.thresholds.behavior_seq_window_gap_ratio,
+        belief_stale_threshold=loop._cfg.thresholds.behavior_belief_stale_threshold,
+        belief_window=loop._cfg.thresholds.behavior_belief_window,
+    )
+
+
 def new_chain_runtime_state(loop: Any, chain_state_cls: type[Any]) -> dict[str, Any]:
     chain_judgment = JudgmentLayer(loop._provider, loop._registry, loop._cfg)
     chain_judgment.set_identity_prefix(getattr(loop._judgment, "_identity_prefix", ""))
@@ -37,20 +54,7 @@ def new_chain_runtime_state(loop: Any, chain_state_cls: type[Any]) -> dict[str, 
         ),
         "_emotion": copy.copy(loop._emotion),  # 继承当前全局情绪，而非重置为 baseline
         "_perception": PerceptionLayer(loop._cfg),
-        "_behavior": BehaviorTracker(
-            wait_streak_notify=list(loop._cfg.loop.wait_streak_notify),
-            streak_threshold=loop._cfg.loop.behavior_streak_threshold,
-            wm_priorities={
-                "behavior_loop": loop._cfg.thresholds.wm_pri_user_msg,
-                "edit_caution": loop._cfg.thresholds.wm_pri_self_aware,
-                "belief_stale": loop._cfg.thresholds.wm_pri_critical,
-            },
-            registry=loop._registry,
-            seq_window_warn_at=loop._cfg.thresholds.behavior_seq_window_warn_at,
-            seq_window_gap_ratio=loop._cfg.thresholds.behavior_seq_window_gap_ratio,
-            belief_stale_threshold=loop._cfg.thresholds.behavior_belief_stale_threshold,
-            belief_window=loop._cfg.thresholds.behavior_belief_window,
-        ),
+        "_behavior": _build_chain_behavior(loop),
         "_judgment": chain_judgment,
         "_conv_history": deque(maxlen=6),
     }

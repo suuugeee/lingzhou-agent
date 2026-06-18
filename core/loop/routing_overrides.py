@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import json
 from typing import Any
 
-_ROUTING_TIERS = frozenset({"reader", "reasoner", "repair"})
+from core.judgment.tiers import JUDGMENT_TIER_SET
+from core.metabolic.lifecycle_utils import _decision_basis_from_parts as _decision_basis
 
 
-def _valid_model_ref(model_ref: str) -> bool:
+def _valid_model_ref(model_ref: str, *, catalog_path: Path | None = None) -> bool:
     provider, sep, model_id = str(model_ref or "").partition("/")
     if not provider or not sep or not model_id:
         return False
@@ -16,12 +19,12 @@ def _valid_model_ref(model_ref: str) -> bool:
     try:
         from provider.catalog import lookup_model_ref
 
-        return lookup_model_ref(model_ref) is not None
+        return lookup_model_ref(model_ref, catalog_path=catalog_path) is not None
     except Exception:
         return True
 
 
-def normalize_routing_overrides(payload: Any) -> dict[str, str] | None:
+def normalize_routing_overrides(payload: Any, *, catalog_path: Path | None = None) -> dict[str, str] | None:
     """Return validated tier -> model overrides, accepting the legacy flat JSON shape."""
     if not isinstance(payload, dict):
         return None
@@ -29,16 +32,28 @@ def normalize_routing_overrides(payload: Any) -> dict[str, str] | None:
     overrides = {
         str(tier): str(model_ref).strip()
         for tier, model_ref in raw_overrides.items()
-        if tier in _ROUTING_TIERS
+        if tier in JUDGMENT_TIER_SET
         and isinstance(model_ref, str)
-        and _valid_model_ref(model_ref)
+        and _valid_model_ref(model_ref, catalog_path=catalog_path)
     }
     return overrides or None
 
 
+def normalize_routing_overrides_payload(
+    payload: Any,
+    *,
+    catalog_path: Path | None = None,
+) -> dict[str, str] | None:
+    """兼容字符串/对象形式的路由覆盖持久化内容。"""
+    if payload is None:
+        return None
+    parsed = json.loads(payload) if isinstance(payload, str) else payload
+    return normalize_routing_overrides(parsed, catalog_path=catalog_path)
+
+
 def routing_overrides_meta(*, source: str, decision_basis: str = "") -> dict[str, str]:
     meta = {"source": str(source or "unknown")}
-    basis = " ".join(str(decision_basis or "").split())
+    basis = _decision_basis(decision_basis)
     if basis:
-        meta["decision_basis"] = basis[:240]
+        meta["decision_basis"] = basis
     return meta

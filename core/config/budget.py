@@ -2,6 +2,12 @@
 from __future__ import annotations
 
 
+_SMALL_CONTEXT_WINDOW = 32_768
+_MID_CONTEXT_WINDOW = 262_144
+_MID_CONTEXT_MAX_BUDGET = 65_536
+_LARGE_CONTEXT_MAX_BUDGET = 131_072
+
+
 def context_window_input_hard_budget(context_window: int) -> int:
     """模型窗口扣除输出预留后的输入硬上限。"""
     window = max(1, int(context_window))
@@ -16,8 +22,8 @@ def adaptive_judgment_input_budget(context_window: int) -> int:
     """
     window = max(1, int(context_window))
     hard_budget = context_window_input_hard_budget(window)
-    if window <= 32_768:
+    if window <= _SMALL_CONTEXT_WINDOW:
         return hard_budget
-    if window <= 262_144:
-        return min(hard_budget, 32_768)
-    return min(hard_budget, 65_536)
+    if window <= _MID_CONTEXT_WINDOW:
+        return min(hard_budget, _MID_CONTEXT_MAX_BUDGET)
+    return min(hard_budget, _LARGE_CONTEXT_MAX_BUDGET)

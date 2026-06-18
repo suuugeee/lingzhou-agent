@@ -4,6 +4,191 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+def test_resolve_tick_dispatch_context_prefers_task_chain_over_chat_id():
+    asyncio.run(_resolve_tick_dispatch_context_prefers_task_chain_over_chat_id())
+
+
+async def _resolve_tick_dispatch_context_prefers_task_chain_over_chat_id():
+    from core.loop.cycle.focus import resolve_tick_dispatch_context
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "dispatch-context-task.db")
+        await store.open()
+        task_id = await store.add_task(
+            "任务链任务",
+            goal="确保 chat 在同任务链上续跑",
+            status="in_progress",
+            chain_id="chain-chat",
+        )
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        async def _next_dispatch_cycle() -> int:
+            return 77
+
+        loop = SimpleNamespace(
+            _task_store=store,
+            _next_dispatch_cycle=_next_dispatch_cycle,
+            _resolve_tick_chain_key=lambda **kwargs: (
+                f"task-chain:{kwargs['active_task'].chain_id}"
+                if kwargs.get("active_task") is not None
+                else f"chat:{kwargs.get('chat_id')}"
+            ),
+        )
+        await store.set_fact("focus:current_task_id", str(task_id), scope="system")
+        context = await resolve_tick_dispatch_context(loop, 5, source="chat", chat_id="chat:test")
+
+        assert context.dispatch_cycle == 77
+        assert context.active_task is not None
+        assert context.active_task.id == task_id
+        assert context.chain_key == "task-chain:chain-chat"
+        await store.close()
+
+
+def test_resolve_tick_dispatch_context_falls_back_to_chat_chain_for_unbound_task():
+    asyncio.run(_resolve_tick_dispatch_context_falls_back_to_chat_chain_for_unbound_task())
+
+
+async def _resolve_tick_dispatch_context_falls_back_to_chat_chain_for_unbound_task():
+    from core.loop.cycle.focus import resolve_tick_dispatch_context
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "dispatch-context-chat.db")
+        await store.open()
+
+        async def _next_dispatch_cycle() -> int:
+            return 88
+
+        loop = SimpleNamespace(
+            _task_store=store,
+            _next_dispatch_cycle=_next_dispatch_cycle,
+            _resolve_tick_chain_key=lambda **kwargs: (
+                f"task:{kwargs['active_task'].id}"
+                if kwargs.get("active_task") is not None
+                else f"chat:{kwargs.get('chat_id')}"
+            ),
+        )
+        context = await resolve_tick_dispatch_context(
+            loop,
+            5,
+            source="chat",
+            chat_id="chat:test",
+            include_waiting=True,
+        )
+
+        assert context.dispatch_cycle == 88
+        assert context.active_task is None
+        assert context.chain_key == "chat:chat:test"
+        await store.close()
+
+
+def test_try_dispatch_tick_job_enqueues_when_dispatcher_ready():
+    asyncio.run(_try_dispatch_tick_job_enqueues_when_dispatcher_ready())
+
+
+async def _try_dispatch_tick_job_enqueues_when_dispatcher_ready():
+    from core.loop.cycle.focus import try_dispatch_tick_job
+
+    seen_jobs: list[object] = []
+
+    class _Dispatcher:
+        enabled = True
+
+        async def enqueue(self, job):
+            seen_jobs.append(job)
+            return True
+
+    async def _next_dispatch_cycle() -> int:
+        return 88
+
+    loop = SimpleNamespace(
+        _task_store=SimpleNamespace(),
+        _next_dispatch_cycle=_next_dispatch_cycle,
+        _resolve_tick_chain_key=lambda **kwargs: f"chat:{kwargs.get('chat_id')}",
+        _tick_dispatcher=_Dispatcher(),
+    )
+
+    result = await try_dispatch_tick_job(
+        loop,
+        7,
+        source="chat",
+        chat_id="chat:test",
+        user_message="hello",
+    )
+
+    assert result.accepted is True
+    assert result.can_retry is False
+    assert result.context.dispatch_cycle == 88
+    assert result.context.chain_key == "chat:chat:test"
+    assert len(seen_jobs) == 1
+
+
+def test_try_dispatch_tick_job_graceful_skip_when_queue_full():
+    asyncio.run(_try_dispatch_tick_job_graceful_skip_when_queue_full())
+
+
+async def _try_dispatch_tick_job_graceful_skip_when_queue_full():
+    from core.loop.cycle.focus import try_dispatch_tick_job
+
+    class _Dispatcher:
+        enabled = True
+
+        async def enqueue(self, job):
+            return False
+
+    async def _next_dispatch_cycle() -> int:
+        return 12
+
+    loop = SimpleNamespace(
+        _task_store=SimpleNamespace(),
+        _next_dispatch_cycle=_next_dispatch_cycle,
+        _resolve_tick_chain_key=lambda **kwargs: f"chat:{kwargs.get('chat_id')}",
+        _tick_dispatcher=_Dispatcher(),
+    )
+
+    result = await try_dispatch_tick_job(
+        loop,
+        5,
+        source="chat",
+        chat_id="chat:test",
+    )
+
+    assert result.accepted is False
+    assert result.can_retry is True
+    assert result.context.dispatch_cycle == 12
+    assert result.context.chain_key == "chat:chat:test"
+
+
+def test_try_dispatch_tick_job_skips_when_dispatcher_disabled():
+    asyncio.run(_try_dispatch_tick_job_skips_when_dispatcher_disabled())
+
+
+async def _try_dispatch_tick_job_skips_when_dispatcher_disabled():
+    from core.loop.cycle.focus import try_dispatch_tick_job
+
+    async def _next_dispatch_cycle() -> int:
+        return 33
+
+    loop = SimpleNamespace(
+        _task_store=SimpleNamespace(),
+        _next_dispatch_cycle=_next_dispatch_cycle,
+        _resolve_tick_chain_key=lambda **kwargs: f"chat:{kwargs.get('chat_id')}",
+        _tick_dispatcher=SimpleNamespace(enabled=False),
+    )
+
+    result = await try_dispatch_tick_job(
+        loop,
+        1,
+        source="auto",
+    )
+
+    assert result.accepted is False
+    assert result.can_retry is False
+    assert result.context.dispatch_cycle == 33
+
+
 def test_resolve_focus_task_prefers_chat_bound_task_over_unrelated_current_focus():
     asyncio.run(_resolve_focus_task_prefers_chat_bound_task_over_unrelated_current_focus())
 

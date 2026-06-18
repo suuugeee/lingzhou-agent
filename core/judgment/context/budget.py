@@ -8,11 +8,24 @@ from pathlib import Path
 from typing import Any
 
 from core.config.budget import adaptive_judgment_input_budget, context_window_input_hard_budget
-from provider.catalog import resolve_context_window
 
 from .utils import _cache_put, _clip_for_context, _context_fmt_cache, _estimate_tokens
 
-_CONTEXT_PROMPT_RESERVE_RATIO = 0.82
+_CONTEXT_PROMPT_RESERVE_RATIO = 0.93
+_MESSAGE_TRIM_TARGET_RATIO = 0.9
+_MESSAGE_TRIM_MIN_TOKENS = 1024
+
+_CRITICAL_CONTEXT_SECTIONS = frozenset({
+    "task_section",
+    "chat_continuity_section",
+    "memories_section",
+    "episodic_section",
+    "cross_task_episodic_section",
+    "current_interlocutor_continuity_section",
+    "current_interlocutor_profile_section",
+    "chat_memory_section",
+})
+_CRITICAL_SECTION_MIN_TOKENS = 180
 
 
 def _effective_context_budget(token_budget: int) -> int:
@@ -20,6 +33,12 @@ def _effective_context_budget(token_budget: int) -> int:
     if token_budget <= 0:
         return token_budget
     return max(1, int(token_budget * _CONTEXT_PROMPT_RESERVE_RATIO))
+
+
+def target_prompt_budget(prompt_limit: int, *, min_tokens: int = _MESSAGE_TRIM_MIN_TOKENS) -> int:
+    if prompt_limit <= 0:
+        return 0
+    return max(min_tokens, int(prompt_limit * _MESSAGE_TRIM_TARGET_RATIO))
 
 
 def _unique_ordered(values: list[str], *, limit: int) -> list[str]:
@@ -156,6 +175,27 @@ def _compact_static_sections(budgeted: dict[str, str]) -> dict[str, str]:
     return compacted
 
 
+def _clip_to_token_budget(text: str, token_budget: int) -> str:
+    raw = str(text or "")
+    if token_budget <= 0 or not raw:
+        return ""
+    if _estimate_tokens(raw) <= token_budget:
+        return raw
+
+    low = 0
+    high = len(raw)
+    best = ""
+    while low <= high:
+        mid = (low + high) // 2
+        candidate = _clip_for_context(raw, mid)
+        if _estimate_tokens(candidate) <= token_budget:
+            best = candidate
+            low = mid + 1
+        else:
+            high = mid - 1
+    return best
+
+
 def apply_context_budget(
     ctx: dict[str, str],
     token_budget: int | None = None,
@@ -223,14 +263,45 @@ def apply_context_budget(
     drop_order = list(drop_priority)
     drop_order.extend(key for key in budgeted if key not in drop_priority and key != "user_message")
 
-    for key in drop_order:
-        if current_total <= target_budget:
-            break
-        original = budgeted.get(key, "")
-        if not original:
-            continue
-        budgeted[key] = ""
-        current_total -= _estimate_tokens(original)
+    def _drop_keys(keys: list[str], allow_critical: bool) -> None:
+        nonlocal current_total
+        for key in keys:
+            if current_total <= target_budget:
+                break
+            if not allow_critical and key in _CRITICAL_CONTEXT_SECTIONS:
+                continue
+            original = budgeted.get(key, "")
+            if not original:
+                continue
+            budgeted[key] = ""
+            current_total -= _estimate_tokens(original)
+
+    _drop_keys([key for key in drop_order if key not in _CRITICAL_CONTEXT_SECTIONS], allow_critical=False)
+
+    def _trim_critical_keys(keys: list[str]) -> None:
+        nonlocal current_total
+        for key in keys:
+            if current_total <= target_budget:
+                break
+            if key not in _CRITICAL_CONTEXT_SECTIONS:
+                continue
+            original = budgeted.get(key, "")
+            original_tokens = _estimate_tokens(original)
+            if original_tokens <= _CRITICAL_SECTION_MIN_TOKENS:
+                continue
+            desired_tokens = max(
+                _CRITICAL_SECTION_MIN_TOKENS,
+                original_tokens - (current_total - target_budget),
+            )
+            replacement = _clip_to_token_budget(original, desired_tokens)
+            if not replacement or replacement == original:
+                continue
+            budgeted[key] = replacement
+            current_total += _estimate_tokens(replacement) - original_tokens
+
+    _trim_critical_keys(drop_order)
+    if current_total > target_budget:
+        _drop_keys(drop_order, allow_critical=True)
 
     _cache_put(cache_key, budgeted)
     return budgeted
@@ -245,9 +316,12 @@ def resolve_judgment_prompt_budget(cfg: Any, model_ref: str, *, catalog_path: Pa
     3. 默认安全兜底（避免高 context window 模型一次性喂入超长上下文）
     """
     model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
+    from provider.catalog import resolve_context_window
+
+    active_model = getattr(cfg, "model", None)
     context_window = resolve_context_window(
         model_id,
-        cfg.context_window_tokens if model_ref == cfg.model else None,
+        cfg.context_window_tokens if model_ref == active_model else None,
         catalog_path=Path(catalog_path) if catalog_path is not None else None,
     )
     fallback_budget = 16_000

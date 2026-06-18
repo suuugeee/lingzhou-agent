@@ -729,6 +729,33 @@ def test_continue_round_limit_prefers_runtime_recovery_next_step():
     assert next_verification == "按 shell.run 的 manifest 重新调用工具；补齐必填参数 command。"
 
 
+def test_continue_round_limit_ignores_control_text_when_deriving_next_verification():
+    from core.cortex import intent as cortex_intent
+    from core.loop.shared.continue_phase import _specific_round_limit_next_verification
+
+    next_verification = _specific_round_limit_next_verification([
+        {
+            "tool": "task.workbench",
+            "status": "succeeded",
+            "state_delta": {
+                "next_verification": cortex_intent.control_next_verification(
+                    "下一轮先综合本 tick 工具结果，确认是否已经足够回答/完成；"
+                    "若不足，再选择一个最高信息增量的验证动作。"
+                ),
+            },
+        },
+        {
+            "tool": "shell.run",
+            "status": "succeeded",
+            "state_delta": {
+                "recovery_next_step": "按 shell.run 的 manifest 重新调用工具；补齐必填参数 command。",
+            },
+        },
+    ])
+
+    assert next_verification == "按 shell.run 的 manifest 重新调用工具；补齐必填参数 command。"
+
+
 async def _continue_phase_gates_repeated_same_action_before_dispatch():
     from core.loop.shared.continue_phase import _run_continue_phase
 

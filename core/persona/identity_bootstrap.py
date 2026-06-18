@@ -58,6 +58,43 @@ _BOOTSTRAP_FILES = ("BOOTSTRAP.md", "IDENTITY.md", "SOUL.md", "USER.md", "TOOLS.
 _DREAMS_FILE = "DREAMS.md"
 
 
+def _bootstrap_file_should_be_written(workspace: Any) -> bool:
+    state = read_workspace_state(workspace)
+    if state.setup_completed_at:
+        return False
+    if not state.bootstrap_seeded_at:
+        state.bootstrap_seeded_at = _now_iso()
+        write_workspace_state(workspace, state)
+        _log.debug("[workspace_state] bootstrapSeededAt 已写入")
+    return True
+
+
+def _render_workspace_file(content: str, soul_name: str) -> str:
+    return content.replace("{name}", soul_name)
+
+
+def _read_existing_text(path: Any, *, strip: bool = False) -> str | None:
+    if not path.exists():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8")
+    except Exception:
+        return None
+    return content.strip() if strip else content
+
+
+def _bootstrap_identity_content(fname: str, content: str) -> str:
+    return f"[{fname}]\n{content}"
+
+
+def _should_add_identity_prefix(fname: str, mode: BootstrapMode) -> bool:
+    return fname == "IDENTITY.md" or (mode == "full" and fname == "BOOTSTRAP.md")
+
+
+def _is_legacy_heartbeat_signal(signal: dict[str, Any]) -> bool:
+    return signal.get("payload", {}).get("source") == "heartbeat"
+
+
 class IdentityBootstrapManager:
     """管理身份文件，并在冷启动时将身份材料注入 WM。
 
@@ -101,15 +138,9 @@ class IdentityBootstrapManager:
                 # BOOTSTRAP.md 在 bootstrap 完成后不应被重建：
                 # init_files 重建会使 reconcile_bootstrap_completion 永远感知不到"已删除"，
                 # 导致每次启动都重新进入 full bootstrap 模式。
-                if fname == "BOOTSTRAP.md":
-                    state = read_workspace_state(workspace)
-                    if state.setup_completed_at:
-                        continue  # bootstrap 已完成，跳过重建
-                    if not state.bootstrap_seeded_at:
-                        state.bootstrap_seeded_at = _now_iso()
-                        write_workspace_state(workspace, state)
-                        _log.debug("[workspace_state] bootstrapSeededAt 已写入")
-                fpath.write_text(content.replace("{name}", soul_name), encoding="utf-8")
+                if fname == "BOOTSTRAP.md" and not _bootstrap_file_should_be_written(workspace):
+                    continue  # bootstrap 已完成，跳过重建
+                fpath.write_text(_render_workspace_file(content, soul_name), encoding="utf-8")
                 _log.info("%s 初始化: 已写入 %s", fname, fpath)
 
     async def sync_md(self) -> None:
@@ -155,21 +186,20 @@ class IdentityBootstrapManager:
             if mode == "none" and fname == "BOOTSTRAP.md":
                 continue
             fpath = workspace / fname
-            if fpath.exists():
-                try:
-                    content = fpath.read_text(encoding="utf-8")
-                    self._wm.add(WMItem(
-                        kind="bootstrap_identity",
-                        content=f"[{fname}]\n{content}",
-                        priority=self._cfg.thresholds.wm_pri_identity,
-                    ))
-                    injected.append(fname)
-                    # 核心身份文件 → system prompt 前缀（永久，不随 WM 驱逐）
-                    # "none" 模式只保留 IDENTITY.md；"full" 模式保留两者
-                    if fname == "IDENTITY.md" or (mode == "full" and fname == "BOOTSTRAP.md"):
-                        identity_parts.append(f"[{fname}]\n{content}")
-                except Exception:
-                    pass
+            content = _read_existing_text(fpath)
+            if content is None:
+                continue
+            wrapped_content = _bootstrap_identity_content(fname, content)
+            self._wm.add(WMItem(
+                kind="bootstrap_identity",
+                content=wrapped_content,
+                priority=self._cfg.thresholds.wm_pri_identity,
+            ))
+            injected.append(fname)
+            # 核心身份文件 → system prompt 前缀（永久，不随 WM 驱逐）
+            # "none" 模式只保留 IDENTITY.md；"full" 模式保留两者
+            if _should_add_identity_prefix(fname, mode):
+                identity_parts.append(wrapped_content)
         if injected:
             _log.info("[boot] 身份注入: %s", " ".join(injected))
         if judgment is not None and identity_parts:
@@ -177,23 +207,19 @@ class IdentityBootstrapManager:
 
         # DREAMS.md：长期志向，进 WM 供 LLM 感知自己的成长轨迹（priority 略低于身份文件）
         dreams_path = workspace / _DREAMS_FILE
-        if dreams_path.exists():
-            try:
-                dreams_content = dreams_path.read_text(encoding="utf-8").strip()
-                if dreams_content:
-                    self._wm.add(WMItem(
-                        kind="bootstrap_identity",
-                        content=f"[{_DREAMS_FILE}]\n{dreams_content}",
-                        priority=self._cfg.thresholds.wm_pri_identity * 0.9,
-                    ))
-            except Exception:
-                pass
+        dreams_content = _read_existing_text(dreams_path, strip=True)
+        if dreams_content:
+            self._wm.add(WMItem(
+                kind="bootstrap_identity",
+                content=_bootstrap_identity_content(_DREAMS_FILE, dreams_content),
+                priority=self._cfg.thresholds.wm_pri_identity * 0.9,
+            ))
 
         # 清理旧版 heartbeat cron 信号（旧实现将 heartbeat 存入 signals 表；
         # 新版改为 monotonic 时间戳机制，DB 中遗留的 source=heartbeat 条目应移除）
         old_hb = [
             s for s in await self._task_store.list_signals(limit=200)
-            if s.get("payload", {}).get("source") == "heartbeat"
+            if _is_legacy_heartbeat_signal(s)
         ]
         for s in old_hb:
             await self._task_store.cancel_signal(s["id"])
@@ -213,12 +239,9 @@ class IdentityBootstrapManager:
         identity_parts: list[str] = []
         for fname in ("BOOTSTRAP.md", "IDENTITY.md"):
             fpath = workspace / fname
-            if fpath.exists():
-                try:
-                    content = fpath.read_text(encoding="utf-8")
-                    identity_parts.append(f"[{fname}]\n{content}")
-                except Exception:
-                    pass
+            content = _read_existing_text(fpath)
+            if content is not None:
+                identity_parts.append(_bootstrap_identity_content(fname, content))
         if identity_parts:
             judgment.set_identity_prefix("\n\n".join(identity_parts))
             _log.debug("[soul] 身份前缀已刷新（evolution 后更新）")

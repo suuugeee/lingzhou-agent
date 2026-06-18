@@ -191,19 +191,20 @@ class TestSalienceGate:
         return WorkingMemory(capacity=30)
 
     def test_preserve_kinds_always_kept(self):
+        from memory.working import TASK_SWITCH_PRESERVE_KINDS
+
         wm = self._wm()
-        wm.add(_wm_item("bootstrap_identity", "身份核心", priority=0.1))  # 极低优先级
-        wm.add(_wm_item("task_anchor", "任务锚点", priority=0.1))
+        for kind in TASK_SWITCH_PRESERVE_KINDS:
+            wm.add(_wm_item(kind, f"{kind} 上下文", priority=0.1))
         wm.add(_wm_item("noise", "无关内容 abc", priority=0.1))
 
         dropped = wm.salience_gate(
             "用户消息",
-            preserve_kinds={"bootstrap_identity", "task_anchor"},
+            preserve_kinds=set(TASK_SWITCH_PRESERVE_KINDS),
             priority_floor=0.7,
         )
         kinds = {item["kind"] for item in wm.get_top()}
-        assert "bootstrap_identity" in kinds
-        assert "task_anchor" in kinds
+        assert TASK_SWITCH_PRESERVE_KINDS.issubset(kinds)
         assert dropped >= 1  # noise 应被丢弃
 
     def test_high_priority_items_kept(self):

@@ -68,6 +68,28 @@ class EthosState:
         ))
 
 
+def _ethos_values_from_baseline(ethos_cfg: EthosConfig, baseline: EthosValues | None) -> EthosValues:
+    seed = ethos_cfg.baseline
+    source = baseline or seed
+    return EthosValues(
+        truth=source.truth,
+        caution=source.caution,
+        continuity=source.continuity,
+        curiosity=source.curiosity,
+        care=source.care,
+    )
+
+
+def _blend_ethos_values(adjusted: EthosValues, baseline: EthosValues, alpha: float) -> EthosValues:
+    return EthosValues(
+        truth=clamp01(alpha * baseline.truth + (1 - alpha) * adjusted.truth),
+        caution=clamp01(alpha * baseline.caution + (1 - alpha) * adjusted.caution),
+        continuity=clamp01(alpha * baseline.continuity + (1 - alpha) * adjusted.continuity),
+        curiosity=clamp01(alpha * baseline.curiosity + (1 - alpha) * adjusted.curiosity),
+        care=clamp01(alpha * baseline.care + (1 - alpha) * adjusted.care),
+    )
+
+
 def derive_ethos_state(
     failure_count: int,
     high_error_streak: int,
@@ -84,15 +106,8 @@ def derive_ethos_state(
     缺值使用 config seed 默认值（公理 A2 Mode 6）。
     """
     ec = ethos_cfg
-    seed = ec.baseline  # EthosBaseline（pydantic，强类型）
     b = baseline  # 简短别名
-    v = EthosValues(
-        truth=b.truth if b else seed.truth,
-        caution=b.caution if b else seed.caution,
-        continuity=b.continuity if b else seed.continuity,
-        curiosity=b.curiosity if b else seed.curiosity,
-        care=b.care if b else seed.care,
-    )
+    v = _ethos_values_from_baseline(ec, b)
     if failure_count >= ec.failure_adjust_count:
         v.truth     = clamp01(v.truth     + ec.failure_truth_delta)
         v.caution   = clamp01(v.caution   + ec.failure_caution_delta)
@@ -110,12 +125,7 @@ def derive_ethos_state(
         v.curiosity = clamp01(v.curiosity + ec.recovering_curiosity_delta)
         v.care      = clamp01(v.care      + ec.recovering_care_delta)
     if b:
-        a = ec.ema_alpha
-        v.truth      = clamp01(a * b.truth      + (1 - a) * v.truth)
-        v.caution    = clamp01(a * b.caution    + (1 - a) * v.caution)
-        v.continuity = clamp01(a * b.continuity + (1 - a) * v.continuity)
-        v.curiosity  = clamp01(a * b.curiosity  + (1 - a) * v.curiosity)
-        v.care       = clamp01(a * b.care       + (1 - a) * v.care)
+        v = _blend_ethos_values(v, b, ec.ema_alpha)
     v.truth   = max(v.truth,   ec.floor_truth)
     v.caution = max(v.caution, ec.floor_caution)
 

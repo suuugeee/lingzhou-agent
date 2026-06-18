@@ -2679,6 +2679,12 @@ def test_infer_run_profile_uses_explicit_registry_capabilities():
     assert _infer_run_profile("demo.exec", {"monitor_fact_key": "run:1"}, registry=cast("Any", _Registry())) == ("llm", "llm-worker")
 
 
+def test_execution_exports_infer_run_profile_alias_and_constants():
+    from core.execution import _infer_run_profile, infer_run_profile
+
+    assert _infer_run_profile == infer_run_profile
+
+
 def test_judgment_output_action_label_summarizes_parallel_and_delegate():
     from core.judgment import JudgmentOutput
 

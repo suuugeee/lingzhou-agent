@@ -17,6 +17,13 @@ from core.judgment.boundary import (
 )
 from core.judgment.frame import CognitionFrame
 from core.judgment.output import JudgmentOutput, ModelSelection
+from core.judgment.tiers import (
+    CONTINUE_PHASE,
+    INITIAL_PHASE,
+    REASONER_TIER,
+    REPLY_ONLY_FALLBACK_TIER,
+    REPLY_PHASE,
+)
 from core.log_fields import judgment_outcome_fields
 from tools.registry import registry_has_tool
 
@@ -68,6 +75,14 @@ def _assemble_context_failure_backoff_ms(repeat_count: int) -> int:
     return min(60_000, 2_000 * (repeat_count - 1))
 
 
+def _can_build_workbench_recovery(active_task: Any | None, registry: Any | None) -> bool:
+    return active_task is not None and registry is not None and registry_has_tool(registry, "task.workbench")
+
+
+def _task_id_text(active_task: Any | None) -> str:
+    return str(getattr(active_task, "id", "") or "-")
+
+
 def _assemble_context_failure_output(
     *,
     exc: BaseException,
@@ -79,13 +94,13 @@ def _assemble_context_failure_output(
 ) -> JudgmentOutput:
     reason = f"上下文组装异常: {exc}"
     backoff_ms = _assemble_context_failure_backoff_ms(repeat_count)
-    if active_task is not None and registry is not None and registry_has_tool(registry, "task.workbench"):
-        task_id = getattr(active_task, "id", "")
+    if _can_build_workbench_recovery(active_task, registry):
+        task_id = _task_id_text(active_task)
         workbench = {
             "domain": "runtime-context",
             "intent": "恢复上下文组装异常并继续任务闭环",
             "evidence": [
-                f"任务 {task_id or '-'} 的判断上下文组装失败: {type(exc).__name__}: {exc}",
+                f"任务 {task_id} 的判断上下文组装失败: {type(exc).__name__}: {exc}",
                 f"同一异常连续出现 {repeat_count} 次。",
             ],
             "hypothesis": "当前不行动不是模型放弃，而是运行时上下文材料构建失败，需要先定位异常来源。",
@@ -131,13 +146,13 @@ def _llm_unavailable_output(
     if reply_only:
         return JudgmentOutput.wait(reason=f"[inner-loop] LLM 不可用: {err}")
 
-    if active_task is not None and registry is not None and registry_has_tool(registry, "task.workbench"):
-        task_id = getattr(active_task, "id", "")
+    if _can_build_workbench_recovery(active_task, registry):
+        task_id = _task_id_text(active_task)
         workbench = {
             "domain": "runtime-provider",
             "intent": "恢复 LLM/provider 不可用导致的任务中断",
             "evidence": [
-                f"任务 {task_id or '-'} 判断阶段未拿到 LLM 输出。",
+                f"任务 {task_id} 判断阶段未拿到 LLM 输出。",
                 f"provider/模型调用错误: {err}",
             ],
             "hypothesis": "当前任务不是自然完成或主动放弃，而是被模型/provider 可用性阻断。",
@@ -242,7 +257,7 @@ async def decide_initial(
     thinking_override: str | None = None,
     prefer_tier: str | None = None,
     routing_overrides: dict[str, str] | None = None,
-    phase: str = "initial",
+    phase: str = INITIAL_PHASE,
     registry_override: Any | None = None,
     runtime_life_snapshot: dict[str, Any] | None = None,
 ) -> JudgmentOutput:
@@ -396,8 +411,8 @@ async def decide_continue(
     messages = deps.assembler._build_messages(continuation_context)
 
     current_action = "" if reply_only else str(tool_history[-1].get("tool", "")) if tool_history else ""
-    phase = "reply" if reply_only else "continue"
-    forced_prefer_tier = "reasoner" if reply_only else prefer_tier
+    phase = REPLY_PHASE if reply_only else CONTINUE_PHASE
+    forced_prefer_tier = REPLY_ONLY_FALLBACK_TIER if reply_only else prefer_tier
     selected_provider, selection = deps.executor._select_provider(
         phase=phase,
         user_message=user_message,
@@ -408,7 +423,7 @@ async def decide_continue(
         routing_overrides=routing_overrides,
     )
     resolved_thinking = thinking_override
-    if selection.tier == "reasoner":
+    if selection.tier == REASONER_TIER:
         if active_task is not None:
             resolved_thinking = _thinking_floor(resolved_thinking, "medium")
         elif user_message:
@@ -423,7 +438,7 @@ async def decide_continue(
         tool_history=tool_history,
         thinking_override=resolved_thinking,
         routing_overrides=routing_overrides,
-        fallback_prefer_tier="reasoner" if reply_only else None,
+        fallback_prefer_tier=REPLY_ONLY_FALLBACK_TIER if reply_only else None,
         log_prefix="[judgment.continue]",
         skills=deps.executor._last_call_meta.get("skills") or "none",
     )

@@ -12,6 +12,7 @@ from rich.console import Console
 from core.cortex import build_action_first_cortex_patch, extract_action_first_signal
 from core.immune import extract_constitution_boundaries, load_constitution
 from core.log_fields import tick_scope_fields
+from core.judgment.tiers import INITIAL_PHASE, REPLY_ONLY_FALLBACK_TIER
 from core.loop.runs.refresh import refresh_running_runs
 from core.loop.runtime.memory_hooks import build_task_anchor_item
 from core.loop.task.runtime import (
@@ -26,7 +27,7 @@ from core.perception import (
     compute_judgment_signals,
     derive_ethos_state,
 )
-from memory.working import WMItem
+from memory.working import TASK_SWITCH_PRESERVE_KINDS, WMItem
 
 from ..cycle.chat import _bind_chat_id
 from ..cycle.focus import (
@@ -148,7 +149,7 @@ async def _maybe_create_action_first_task_from_user_message(
         "source": "external",
         "status": "pending",
         "next_step": next_step,
-        "model_tier": "reasoner",
+        "model_tier": REPLY_ONLY_FALLBACK_TIER,
         "result_json": result_patch,
         "extras": {"created_from_user_message": True},
     }
@@ -195,13 +196,14 @@ async def _prepare_active_task_for_tick(loop: Any, user_message: str, chat_id: s
             str(chat_id or "").strip() or "-",
         )
         active_task = None
-    await _ingest_actionable_meta_reflections(loop._task_store, loop._wm, metabolic=_loop_metabolic(loop))
-    active_task = await _consume_task_runtime_hints(loop._task_store, active_task, loop._wm, metabolic=_loop_metabolic(loop))
+    metabolic = _loop_metabolic(loop)
+    await _ingest_actionable_meta_reflections(loop._task_store, loop._wm, metabolic=metabolic)
+    active_task = await _consume_task_runtime_hints(loop._task_store, active_task, loop._wm, metabolic=metabolic)
     active_task = await _maybe_steer_active_task_from_user_message(
         loop._task_store,
         active_task,
         user_message,
-        _loop_metabolic(loop),
+        metabolic,
     )
     active_task = await _consume_active_task_inbox(loop._task_store, active_task)
     active_task = await _maybe_create_action_first_task_from_user_message(
@@ -540,7 +542,7 @@ async def _decide_initial_action(
         perception_replay=prep.perception_replay,
         cognitive_signals=prep.cognitive_signals,
         thinking_override=thinking_override,
-        phase="initial",
+        phase=INITIAL_PHASE,
         prefer_tier=_prefer_tier_for_task(
             loop._pending_tier,
             active_task,
@@ -602,7 +604,7 @@ async def _review_delegate_tasks(
         }],
         user_message=user_message,
         active_task=active_task,
-        prefer_tier="reasoner",
+        prefer_tier=REPLY_ONLY_FALLBACK_TIER,
     )
     # 防止 decide_continue 仍返回 delegate_tasks（无限委托）
     if result_action.delegate_tasks and not result_action.chosen_action_id:
@@ -622,7 +624,7 @@ def _log_tick_decision(loop: Any, cycle: int, action: Any) -> None:
     actual_model = call_meta.get("model_ref") or cfg.model
     actual_thinking = call_meta.get("thinking") or cfg.thinking
     actual_tier = call_meta.get("tier") or "default"
-    actual_phase = call_meta.get("phase") or "initial"
+    actual_phase = call_meta.get("phase") or INITIAL_PHASE
     actual_skills = call_meta.get("skills") or "none"
     usage_source = call_meta.get("usage_source")
     action_label = action.action_label() or action.decision or "-"
@@ -665,7 +667,7 @@ class _TickPerceptionPhase:
         if user_message:
             _dropped = loop._wm.salience_gate(
                 user_message,
-                preserve_kinds={"bootstrap_identity", "self_awareness", "task_anchor"},
+                preserve_kinds=set(TASK_SWITCH_PRESERVE_KINDS),
                 priority_floor=loop._cfg.thresholds.wm_pri_signal,
             )
             if _dropped:

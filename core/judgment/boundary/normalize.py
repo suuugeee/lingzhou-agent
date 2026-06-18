@@ -21,6 +21,25 @@ if TYPE_CHECKING:
 _REPLY_PSEUDO_TOOLS = {"chat_reply"}
 
 
+def _copy_model_strategy(output: JudgmentOutput) -> dict[str, Any]:
+    return dict(output.model_strategy or {})
+
+
+def _coerce_non_act_output(output: JudgmentOutput, *, decision: str | None = None) -> JudgmentOutput:
+    return JudgmentOutput(
+        decision=decision or output.decision,
+        chosen_action_id="",
+        params={},
+        rationale=output.rationale,
+        reflection=output.reflection,
+        speech_intent=output.speech_intent,
+        reply_to_user=output.reply_to_user,
+        next_step=output.next_step,
+        model_strategy=_copy_model_strategy(output),
+        applied_skills=list(output.applied_skills or []),
+    )
+
+
 def simulate_safe_output(
     failure_count: int,
     signals: JudgmentSignals | None,
@@ -35,29 +54,13 @@ def simulate_safe_output(
 
 def coerce_reply_only_output(output: JudgmentOutput) -> JudgmentOutput:
     """将 continue 续判结果强制修正为 reply_only 模式（禁止 act，必须有 reply_to_user）。"""
+    decision = output.decision if output.decision in {"pause", "wait"} else "wait"
     if not output.reply_to_user.strip():
         fallback = str(output.speech_intent or "").strip()
         if not fallback:
             fallback = "我还没有形成足够可靠的答复，需要先整理现有证据。"
-        return JudgmentOutput(
-            decision=output.decision if output.decision in {"pause", "wait"} else "wait",
-            chosen_action_id="",
-            params={},
-            rationale=output.rationale,
-            reply_to_user=fallback,
-            next_step=output.next_step,
-            model_strategy=dict(output.model_strategy or {}),
-        )
-    return JudgmentOutput(
-        decision=output.decision if output.decision in {"pause", "wait"} else "wait",
-        chosen_action_id="",
-        params={},
-        rationale=output.rationale,
-        reflection=output.reflection,
-        reply_to_user=output.reply_to_user,
-        next_step=output.next_step,
-        model_strategy=dict(output.model_strategy or {}),
-    )
+        output.reply_to_user = fallback
+    return _coerce_non_act_output(output, decision=decision)
 
 
 def normalize_reply_pseudo_tool(output: JudgmentOutput) -> JudgmentOutput:
@@ -108,23 +111,12 @@ def normalize_action_shape(
             reflection=output.reflection,
             reply_to_user=output.reply_to_user,
             next_step=output.next_step,
-            model_strategy=dict(output.model_strategy or {}),
+            model_strategy=_copy_model_strategy(output),
             params={},
         )
 
     if output.decision != "act":
-        return JudgmentOutput(
-            decision=output.decision,
-            chosen_action_id="",
-            params={},
-            rationale=output.rationale,
-            reflection=output.reflection,
-            speech_intent=output.speech_intent,
-            reply_to_user=output.reply_to_user,
-            next_step=output.next_step,
-            model_strategy=dict(output.model_strategy or {}),
-            applied_skills=list(output.applied_skills or []),
-        )
+        return _coerce_non_act_output(output)
 
     if output.parallel_actions:
         normalized_parallel: list[dict[str, Any]] = []
@@ -158,7 +150,7 @@ def normalize_action_shape(
             speech_intent=output.speech_intent,
             reply_to_user=output.reply_to_user,
             next_step=output.next_step,
-            model_strategy=dict(output.model_strategy or {}),
+            model_strategy=_copy_model_strategy(output),
             params={},
         )
 
@@ -169,7 +161,7 @@ def normalize_action_shape(
             speech_intent=output.speech_intent,
             reply_to_user=output.reply_to_user,
             next_step=output.next_step,
-            model_strategy=dict(output.model_strategy or {}),
+            model_strategy=_copy_model_strategy(output),
             params={},
         )
 

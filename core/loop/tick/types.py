@@ -33,6 +33,18 @@ class _TickJudgmentPrep:
     hard_boundaries: list[str]
 
 
+def _action_succeeded_from_status(status: str, result: ToolResult) -> bool | None:
+    if status == "ok":
+        return True
+    if status == "error":
+        return False
+    if status in ("skipped", "compacted"):
+        return None
+    if result.skipped:
+        return None
+    return False if result.error else True
+
+
 def _build_action_result_summary(
     action: Any,
     result: ToolResult,
@@ -51,23 +63,10 @@ def _build_action_result_summary(
     last_entry = tool_history[-1] if tool_history else {}
     tool_name = str(last_entry.get("tool", "") or action.chosen_action_id or "")
     entry_status = str(last_entry.get("status", "") or "")
-    if entry_status == "ok":
-        succeeded: bool | None = True
-    elif entry_status == "error":
-        succeeded = False
-    elif entry_status in ("skipped", "compacted"):
-        succeeded = None
-    else:
-        if result.skipped:
-            succeeded = None
-        elif result.error:
-            succeeded = False
-        else:
-            succeeded = True
 
     return _ActionResultSummary(
         action_ran=True,
-        action_succeeded=succeeded,
+        action_succeeded=_action_succeeded_from_status(entry_status, result),
         tool_name=tool_name,
         summary=result.summary or "",
         error=(result.error or ""),

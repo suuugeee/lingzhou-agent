@@ -12,6 +12,10 @@ if TYPE_CHECKING:
     from core.perception.emotion import EmotionState
 
 
+def _clean_signal_text(text: str) -> str:
+    return " ".join((text or "").split())
+
+
 # ── 判断信号 ──────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -111,9 +115,6 @@ class CognitiveSignals:
 
     def to_text(self) -> str:
         """格式化为 LLM 可读文本，注入 judgment bundle。"""
-        def _clean(text: str) -> str:
-            return " ".join((text or "").split())
-
         lines: list[str] = []
         lines.append(
             "loop_probe="
@@ -133,13 +134,13 @@ class CognitiveSignals:
                 f"key='{self.last_action_key}', "
                 f"status='{self.last_action_status}', "
                 f"progressful={self.last_action_progressful}, "
-                f"error='{_clean(self.last_action_error)}', "
-                f"state_delta='{_clean(self.last_action_state_delta)}', "
-                f"summary='{_clean(self.last_action_summary)}'}}"
+                f"error='{_clean_signal_text(self.last_action_error)}', "
+                f"state_delta='{_clean_signal_text(self.last_action_state_delta)}', "
+                f"summary='{_clean_signal_text(self.last_action_summary)}'}}"
             )
         if self.recent_action_history:
             lines.append("recent_actions:")
-            lines.extend(f"- {_clean(item)}" for item in self.recent_action_history)
+            lines.extend(f"- {_clean_signal_text(item)}" for item in self.recent_action_history)
         if self.repeat_action_count >= 3 and self.repeat_action_tool:
             lines.append(
                 f"⚠️ 最近动作已连续重复 {self.repeat_action_count} 次："

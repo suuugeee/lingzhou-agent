@@ -4,6 +4,7 @@ from typing import Any
 
 from core.judgment.context.budget import apply_context_budget, resolve_judgment_prompt_budget
 from core.judgment.context.utils import _clip_for_context, _estimate_tokens, _fill_template
+from core.judgment.tiers import JUDGMENT_TIERS
 
 from ..output import _structured_tool_history_window
 
@@ -69,7 +70,7 @@ def _continuation_prompt_budget(assembler: Any) -> int:
         return 16_000
     catalog_path = assembler._cfg.workspace_dir / "models.json"
     budgets: list[int] = []
-    for tier in ("reader", "reasoner", "repair"):
+    for tier in JUDGMENT_TIERS:
         _, model_ref = assembler._executor._resolve_tier_model(tier)
         budgets.append(resolve_judgment_prompt_budget(assembler._cfg, model_ref, catalog_path=catalog_path))
     return min(budgets) if budgets else assembler._cfg.judgment_input_token_budget()
@@ -120,6 +121,45 @@ def _build_continue_base_context(assembler: Any, *, reserve_text: str, reply_onl
     return _fill_template(assembler._judgment_template, sections)
 
 
+def _format_continue_action_result(action_result: Any | None) -> str:
+    if action_result is None:
+        return ""
+    action_ran = action_result.action_ran
+    action_succeeded = action_result.action_succeeded
+    if not action_ran:
+        status = "未执行（本轮无工具调用）"
+    elif action_succeeded is True:
+        status = "成功"
+    elif action_succeeded is False:
+        status = f"失败（{action_result.error or '未知错误'}）"
+    else:
+        status = "已跳过/不确定"
+    tool_line = f"\n- 工具: {action_result.tool_name}" if action_result.tool_name else ""
+    summary_line = f"\n- 摘要: {_clip_continue_summary(action_result.summary)}" if action_result.summary else ""
+    return (
+        "## 本轮执行状态（请据此决定措辞，不要凭推测）\n"
+        f"- 是否执行工具: {'是' if action_ran else '否'}\n"
+        f"- 执行结果: {status}"
+        f"{tool_line}"
+        f"{summary_line}\n\n"
+    )
+
+
+def _format_continue_emotion_state(emotion_state: dict[str, Any] | None) -> str:
+    if not emotion_state:
+        return ""
+    dominant = emotion_state.get("dominant", "")
+    valence = emotion_state.get("valence", 0.0)
+    arousal = emotion_state.get("arousal", 0.0)
+    regulation = emotion_state.get("regulation_strategy", "")
+    return (
+        "## 当前情绪状态（请据此自然调整语气，无需显式说出情绪名）\n"
+        f"- 主导情绪: {dominant}\n"
+        f"- valence={valence:.2f}（正=积极 负=消极）  arousal={arousal:.2f}（高=紧张 低=平静）\n"
+        f"- 调节策略: {regulation}\n\n"
+    )
+
+
 def _build_continue_context(
     assembler: Any,
     tool_history: list[dict[str, Any]],
@@ -133,45 +173,8 @@ def _build_continue_context(
 ) -> str:
     history_json_block, history_block = _structured_tool_history_window(tool_history)
     wm_delta_block = _format_continue_wm_delta(wm_delta)
-    action_result_block = ""
-    if reply_only and action_result is not None:
-        _ran = action_result.action_ran
-        _succ = action_result.action_succeeded
-        if not _ran:
-            _status_str = "未执行（本轮无工具调用）"
-        elif _succ is True:
-            _status_str = "成功"
-        elif _succ is False:
-            _status_str = f"失败（{action_result.error or '未知错误'}）"
-        else:
-            _status_str = "已跳过/不确定"
-        _tool_str = f"\n- 工具: {action_result.tool_name}" if action_result.tool_name else ""
-        _summary_str = (
-            f"\n- 摘要: {_clip_continue_summary(action_result.summary)}"
-            if action_result.summary
-            else ""
-        )
-        action_result_block = (
-            "## 本轮执行状态（请据此决定措辞，不要凭推测）\n"
-            f"- 是否执行工具: {'是' if _ran else '否'}\n"
-            f"- 执行结果: {_status_str}"
-            f"{_tool_str}"
-            f"{_summary_str}\n\n"
-        )
-
-    emotion_block = ""
-    if reply_only and emotion_state:
-        _dom = emotion_state.get("dominant", "")
-        _val = emotion_state.get("valence", 0.0)
-        _aro = emotion_state.get("arousal", 0.0)
-        _reg = emotion_state.get("regulation_strategy", "")
-        emotion_block = (
-            "## 当前情绪状态（请据此自然调整语气，无需显式说出情绪名）\n"
-            f"- 主导情绪: {_dom}\n"
-            f"- valence={_val:.2f}（正=积极 负=消极）  arousal={_aro:.2f}（高=紧张 低=平静）\n"
-            f"- 调节策略: {_reg}\n\n"
-        )
-
+    action_result_block = _format_continue_action_result(action_result) if reply_only else ""
+    emotion_block = _format_continue_emotion_state(emotion_state) if reply_only else ""
     convergence_block = "" if reply_only else _continue_convergence_contract(tool_history, user_message=user_message)
     common_tail = (
         f"{wm_delta_block}"

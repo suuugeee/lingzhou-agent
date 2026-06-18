@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -15,8 +16,6 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.config import Config
-
-
 
 
 @dataclass
@@ -147,8 +146,7 @@ class SelfModel:
     # ── 持久化 ────────────────────────────────────────────────────────
 
     def to_json(self) -> str:
-        import json as _json
-        return _json.dumps({
+        return json.dumps({
             "tick_count": self.tick_count,
             "api_call_count": self.api_call_count,
             "tool_call_count": self.tool_call_count,
@@ -161,9 +159,8 @@ class SelfModel:
 
     @classmethod
     def from_json(cls, raw: str, *, name: str = "lingzhou") -> SelfModel:
-        import json as _json
         try:
-            data = _json.loads(raw)
+            data = json.loads(raw)
         except Exception:
             return cls(name=name)
         sm = cls(name=name)
@@ -178,30 +175,53 @@ class SelfModel:
         return sm
 
 
+def _lifetime_hint(sm: SelfModel) -> str:
+    return f"累计存在: {sm.lifetime_display}" if sm.born_at > 0 else "首次启动"
+
+
+def _billing_display(sm: SelfModel) -> str:
+    if sm.billing_mode == "subscription":
+        return "订阅制（token 不计费）"
+    if sm.estimated_cost_usd > 0:
+        return "按量 $" + f"{sm.estimated_cost_usd:.4f}"
+    return "按量（未配置 model_prices）"
+
+
+def _birth_line(sm: SelfModel) -> str:
+    return f"诞生时间: {sm.born_at_display}（来自持久事实 soul:born_at；回答生日/诞生日时优先使用这个锚点）"
+
+
+def _health_line(sm: SelfModel) -> str:
+    if sm.recent_error_count > 0:
+        return f"最近错误: {sm.recent_error_count} 次  (最近: {sm.last_error})"
+    return "健康状态: 正常"
+
+
+def _cost_tracking_line(sm: SelfModel) -> str:
+    if sm.billing_mode == "token" and sm.estimated_cost_usd > 0.01:
+        return f"⚠️ 本会话已消耗 ${sm.estimated_cost_usd:.4f}（按量计费，请关注空转）"
+    if sm.billing_mode == "token" and getattr(sm, "_price_input", 0.0) == 0:
+        return "ℹ️ 按量模型未配置 model_prices，成本追踪不可用"
+    return ""
+
+
 def fmt_self_model(sm: SelfModel) -> str:
     """将自我模型格式化为 LLM 感知上下文字段。"""
-    lifetime_hint = (
-        f"累计存在: {sm.lifetime_display}" if sm.born_at > 0 else "首次启动"
-    )
     lines = [
         f"名称: {sm.name}",
-        f"已运行: {sm.uptime_display}  (tick #{sm.tick_count})  [{lifetime_hint}]",
+        f"已运行: {sm.uptime_display}  (tick #{sm.tick_count})  [{_lifetime_hint(sm)}]",
         f"API 调用: {sm.api_call_count}  工具调用: {sm.tool_call_count}",
         f"Token 消耗: {sm.total_tokens:,}  (输入 {sm.total_prompt_tokens:,} + 输出 {sm.total_completion_tokens:,})",
-        f"计费模式: {'订阅制（token 不计费）' if sm.billing_mode == 'subscription' else ('按量 $' + f'{sm.estimated_cost_usd:.4f}' if sm.estimated_cost_usd > 0 else '按量（未配置 model_prices）')}",
+        f"计费模式: {_billing_display(sm)}",
         f"上下文预算: {sm.context_budget or '未设置'}  |  压力: {sm.context_pressure:.0%}",
         f"主模型: {sm.primary_model}",
         f"操作层: {sm.reader_model}",
         f"思考层: {sm.reasoner_model}",
     ]
     if sm.born_at > 0:
-        lines.insert(2, f"诞生时间: {sm.born_at_display}（来自持久事实 soul:born_at；回答生日/诞生日时优先使用这个锚点）")
-    if sm.recent_error_count > 0:
-        lines.append(f"最近错误: {sm.recent_error_count} 次  (最近: {sm.last_error})")
-    else:
-        lines.append("健康状态: 正常")
-    if sm.billing_mode == "token" and sm.estimated_cost_usd > 0.01:
-        lines.append(f"⚠️ 本会话已消耗 ${sm.estimated_cost_usd:.4f}（按量计费，请关注空转）")
-    elif sm.billing_mode == "token" and getattr(sm, "_price_input", 0.0) == 0:
-        lines.append("ℹ️ 按量模型未配置 model_prices，成本追踪不可用")
+        lines.insert(2, _birth_line(sm))
+    lines.append(_health_line(sm))
+    cost_tracking_line = _cost_tracking_line(sm)
+    if cost_tracking_line:
+        lines.append(cost_tracking_line)
     return "\n".join(lines)

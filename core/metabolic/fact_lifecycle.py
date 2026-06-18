@@ -4,7 +4,19 @@ from __future__ import annotations
 from typing import Any
 
 from core.metabolic.engine import MetabolicEngine
-from core.metabolic.proposal import StateProposal
+from core.metabolic.lifecycle_utils import build_proposal
+
+
+def _owner_task_store(owner: Any, task_store: Any = None) -> Any:
+    return task_store or getattr(owner, "task_store", None) or getattr(owner, "_task_store", None)
+
+
+def _owner_semantic_memory(owner: Any, semantic_memory: Any = None) -> Any:
+    return semantic_memory or getattr(owner, "semantic", None) or getattr(owner, "_semantic", None)
+
+
+def _owner_is_store(owner: Any) -> bool:
+    return callable(getattr(owner, "ledger_append", None)) or callable(getattr(owner, "set_fact", None))
 
 
 def resolve_metabolic(
@@ -18,11 +30,7 @@ def resolve_metabolic(
         if owner_semantic is not None or semantic_memory is None:
             return owner
 
-        owner_store = (
-            task_store
-            or getattr(owner, "task_store", None)
-            or getattr(owner, "_task_store", None)
-        )
+        owner_store = _owner_task_store(owner, task_store)
         if owner_store is not None:
             return MetabolicEngine(owner_store, semantic_memory=semantic_memory)
         return owner
@@ -30,15 +38,12 @@ def resolve_metabolic(
     if metabolic is not None:
         return metabolic
 
-    store = task_store or getattr(owner, "task_store", None) or getattr(owner, "_task_store", None)
-    if store is None and (
-        callable(getattr(owner, "ledger_append", None))
-        or callable(getattr(owner, "set_fact", None))
-    ):
+    store = _owner_task_store(owner, task_store)
+    if store is None and _owner_is_store(owner):
         store = owner
     if store is None:
         return None
-    semantic = semantic_memory or getattr(owner, "semantic", None) or getattr(owner, "_semantic", None)
+    semantic = _owner_semantic_memory(owner, semantic_memory)
     return MetabolicEngine(store, semantic_memory=semantic)
 
 
@@ -58,14 +63,14 @@ async def submit_fact(
     if metabolic is None:
         return False
     await metabolic.submit(
-        StateProposal(
+        build_proposal(
             op="set_fact",
             key=key,
             value=value,
             scope=scope,
             source=source,
             run_id=run_id,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
+            decision_basis=decision_basis,
         )
     )
     return True
@@ -86,14 +91,14 @@ async def delete_fact(
     if metabolic is None:
         return False
     await metabolic.submit(
-        StateProposal(
+        build_proposal(
             op="delete_fact",
             key=key,
             value="",
             scope=scope,
             source=source,
             run_id=run_id,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
+            decision_basis=decision_basis,
         )
     )
     return True

@@ -53,6 +53,7 @@ from ..context.tasks import (
 )
 from ..context.utils import _estimate_tokens, _fill_template, _validate_context_schema
 from ..output import _build_team_view_from_cfg
+from core.judgment.tiers import JUDGMENT_TIERS
 
 if TYPE_CHECKING:
     from core.perception import (
@@ -63,9 +64,7 @@ if TYPE_CHECKING:
         Percept,
         PerceptionReplaySummary,
     )
-    from core.skill import Skill
     from memory.working import WorkingMemory
-    from store.semantic import SemanticMemory
 
 
 _log = logging.getLogger("lingzhou.judgment")
@@ -177,7 +176,6 @@ def _build_context_state_sections(
     *,
     percept: Percept,
     wm: WorkingMemory,
-    semantic: SemanticMemory,
     emotion: EmotionState,
     ethos_state: EthosState | None,
     judgment_signals: JudgmentSignals | None,
@@ -190,29 +188,8 @@ def _build_context_state_sections(
     user_message: str,
     tool_history: list[dict[str, Any]] | None,
     routing_overrides: dict[str, str] | None,
-    task: Any | None,
-    recent_turns: list[Any],
-    current_interlocutor_profile_section: str,
-    current_interlocutor_continuity_section: str,
-    entity_section: str,
-    similar_tasks: list[Any],
-    recent_runs: list[Any],
-    waiting_tasks: list[Any],
-    runnable_tasks: list[Any],
-    context_facts: list[Any],
     durable_failure_snapshot: Any,
     failures: list[Any],
-    chat_memories: list[Any],
-    memories: list[Any],
-    episodic_text: str,
-    cross_task_episodic_text: str,
-    chat_continuity_text: str,
-    search_query: str,
-    resolved_chat_id: str,
-    daily_continuity_text: str,
-    soul_section: str,
-    skills: list[Skill],
-    all_skills: list[Skill],
     config_with_breaker: str,
     effective_registry: Any,
     effective_thinking: str | None,
@@ -271,7 +248,7 @@ def _finalize_context_text(assembler: Any, ctx: dict[str, Any], wm: WorkingMemor
     _validate_context_schema(ctx)
     catalog_path = assembler._cfg.workspace_dir / "models.json"
     budgets = []
-    for tier in ("reader", "reasoner", "repair"):
+    for tier in JUDGMENT_TIERS:
         _, model_ref = assembler._executor._resolve_tier_model(tier)
         budgets.append(resolve_judgment_prompt_budget(assembler._cfg, model_ref, catalog_path=catalog_path))
     budget = min(budgets) if budgets else assembler._cfg.judgment_input_token_budget()

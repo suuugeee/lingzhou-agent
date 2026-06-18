@@ -39,15 +39,19 @@ def _run_summary(run: Any) -> str:
     return ""
 
 
+def _normalize_context_text(text: str) -> str:
+    return " ".join((text or "").split())
+
+
 def _clip_text(text: str, limit: int = 0) -> str:
     """仅归一化空白；不按 limit 截断正文（ADR 0015）。limit 保留供调用方签名兼容。"""
     _ = limit
-    return " ".join((text or "").split())
+    return _normalize_context_text(text)
 
 
 def _clip_for_context(text: str, limit: int = 160) -> str:
     """为模型上下文增加文本上限，保留开头/结尾与省略提示。"""
-    value = " ".join((text or "").split())
+    value = _normalize_context_text(text)
     if limit <= 0 or len(value) <= limit:
         return value
     half = max(16, (limit - 9) // 2)
