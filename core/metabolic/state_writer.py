@@ -10,10 +10,10 @@ if TYPE_CHECKING:
     from core.metabolic.proposal import StateProposal
     from tools.view_protocols import TaskStoreViewProtocol
 
-from core.execution.run_profile import RUN_TYPE_TOOL_CHAIN, WORKER_TOOL_CHAIN
-
 _log = logging.getLogger("lingzhou.metabolic")
 
+_DEFAULT_RUN_TYPE = "tool_chain"
+_DEFAULT_WORKER_TYPE = "tool-chain-worker"
 _FACT_WRITE_OPS = {"set_fact", "delete_fact"}
 _TASK_WRITE_OPS = {
     "create_task",
@@ -268,8 +268,8 @@ async def _apply_add_run(
 ) -> StateWriteResult:
     run_id = await task_store.add_run(
         task_id=_int_field(data, "task_id"),
-        run_type=_str_field(data, "run_type", default=RUN_TYPE_TOOL_CHAIN),
-        worker_type=_str_field(data, "worker_type", default=WORKER_TOOL_CHAIN),
+        run_type=_str_field(data, "run_type", default=_DEFAULT_RUN_TYPE),
+        worker_type=_str_field(data, "worker_type", default=_DEFAULT_WORKER_TYPE),
         status=_str_field(data, "status", default="running"),
         input_json=_dict_field(data, "input_json", default={}),
         output_json=_dict_field(data, "output_json", default={}),

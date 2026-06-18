@@ -4,7 +4,9 @@ from __future__ import annotations
 from typing import Any
 
 from core.metabolic.lifecycle_utils import build_proposal, submit_proposal
-from core.execution.run_profile import RUN_TYPE_TOOL_CHAIN, WORKER_TOOL_CHAIN
+
+_DEFAULT_RUN_TYPE = "tool_chain"
+_DEFAULT_WORKER_TYPE = "tool-chain-worker"
 
 
 def _int_or_zero(value: Any) -> int:
@@ -18,8 +20,8 @@ async def add_run(
     owner: Any,
     *,
     task_id: int = 0,
-    run_type: str = RUN_TYPE_TOOL_CHAIN,
-    worker_type: str = WORKER_TOOL_CHAIN,
+    run_type: str = _DEFAULT_RUN_TYPE,
+    worker_type: str = _DEFAULT_WORKER_TYPE,
     status: str = "running",
     input_json: dict[str, Any] | None = None,
     output_json: dict[str, Any] | None = None,
