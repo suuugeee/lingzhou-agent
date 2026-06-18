@@ -14,6 +14,8 @@ from provider.capabilities import resolve_model_ref_for_input
 from tools.file import resolve_read_path
 from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
+_REMOTE_IMAGE_PREFIXES = ("http://", "https://", "data:image/")
+
 
 def _collect_image_sources(params: dict[str, Any]) -> list[str]:
     sources: list[str] = []
@@ -58,7 +60,7 @@ def _collect_image_sources(params: dict[str, Any]) -> list[str]:
 
 def _image_part_from_source(source: str, detail: str) -> dict[str, Any]:
     raw = source.strip()
-    if raw.startswith(("http://", "https://", "data:image/")):
+    if raw.startswith(_REMOTE_IMAGE_PREFIXES):
         return {
             "type": "image_url",
             "image_url": {"url": raw, "detail": detail},
@@ -79,19 +81,6 @@ def _image_part_from_source(source: str, detail: str) -> dict[str, Any]:
         "type": "image_url",
         "image_url": {"url": f"data:{mime};base64,{data}", "detail": detail},
     }
-
-
-def _resolve_multimodal_model_ref(
-    ctx: ToolContext,
-    *,
-    capability: str,
-    input_modality: str,
-) -> str:
-    return resolve_model_ref_for_input(
-        ctx.config,
-        capability=capability,
-        input_modality=input_modality,
-    )
 
 
 @tool(ToolManifest(
@@ -124,7 +113,7 @@ async def image_analyze(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(summary=f"图片读取失败: {exc}", error=type(exc).__name__, skipped=True)
 
     try:
-        model_ref = _resolve_multimodal_model_ref(ctx, capability="vision", input_modality="image")
+        model_ref = resolve_model_ref_for_input(ctx.config, capability="vision", input_modality="image")
     except Exception as exc:
         return ToolResult(summary=f"图片分析失败: {exc}", error=type(exc).__name__, skipped=True)
 
@@ -151,7 +140,7 @@ async def image_analyze(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         summary=summary,
         resource_key=sources[0],
         fingerprint=f"image:{digest}",
-        artifact_paths=[s for s in sources if not s.startswith(("http://", "https://", "data:image/"))],
+        artifact_paths=[s for s in sources if not s.startswith(_REMOTE_IMAGE_PREFIXES)],
         metadata=tool_metadata(
             "image.analyze",
             f"image.analyze count={len(sources)} model={model_ref}",

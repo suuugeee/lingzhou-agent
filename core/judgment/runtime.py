@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from core.judgment.boundary import normalize_judgment_output as _normalize_judgment_output_fn
+from core.judgment.tiers import INITIAL_PHASE
 
 from .assembler import JudgmentContextAssembler
 from .decision.rounds import (
@@ -100,7 +101,7 @@ class JudgmentLayer:
         thinking_override: str | None = None,
         prefer_tier: str | None = None,
         routing_overrides: dict[str, str] | None = None,
-        phase: str = "initial",
+        phase: str = INITIAL_PHASE,
         registry_override: Any | None = None,
         runtime_life_snapshot: dict[str, Any] | None = None,
     ) -> JudgmentOutput:

@@ -3,16 +3,23 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.metabolic.fact_lifecycle import resolve_metabolic
-from core.metabolic.proposal import StateProposal
+from core.metabolic.lifecycle_utils import build_proposal, submit_proposal
+from core.execution.run_profile import RUN_TYPE_TOOL_CHAIN, WORKER_TOOL_CHAIN
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except Exception:
+        return 0
 
 
 async def add_run(
     owner: Any,
     *,
     task_id: int = 0,
-    run_type: str = "tool_chain",
-    worker_type: str = "tool-chain-worker",
+    run_type: str = RUN_TYPE_TOOL_CHAIN,
+    worker_type: str = WORKER_TOOL_CHAIN,
     status: str = "running",
     input_json: dict[str, Any] | None = None,
     output_json: dict[str, Any] | None = None,
@@ -28,11 +35,10 @@ async def add_run(
     decision_basis: str = "",
 ) -> int:
     """经代谢器官创建 Run，并返回 run id；失败直接抛异常。"""
-    metabolic = resolve_metabolic(owner)
-    if metabolic is None:
-        raise RuntimeError("metabolic run creation requires a task store")
-    run_id_value = await metabolic.submit(
-        StateProposal(
+    run_id_value = await submit_proposal(
+        owner=owner,
+        action="creation",
+        proposal=build_proposal(
             op="add_run",
             key="run:new",
             value={
@@ -53,13 +59,10 @@ async def add_run(
             scope="run",
             source=source,
             run_id=run_id,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
-        )
+            decision_basis=decision_basis,
+        ),
     )
-    try:
-        return int(run_id_value or 0)
-    except Exception:
-        return 0
+    return _int_or_zero(run_id_value)
 
 
 async def update_run(
@@ -80,11 +83,10 @@ async def update_run(
     decision_basis: str = "",
 ) -> None:
     """经代谢器官更新 Run；调用方不直接执行任务存储更新。"""
-    metabolic = resolve_metabolic(owner)
-    if metabolic is None:
-        raise RuntimeError("metabolic run update requires a task store")
-    await metabolic.submit(
-        StateProposal(
+    await submit_proposal(
+        owner=owner,
+        action="update",
+        proposal=build_proposal(
             op="update_run",
             key=str(run_id),
             value={
@@ -101,6 +103,6 @@ async def update_run(
             scope="run",
             source=source,
             run_id=proposal_run_id,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
-        )
+            decision_basis=decision_basis,
+        ),
     )

@@ -48,6 +48,7 @@ Providers are defined in the `providers` section. Environment variables or auth 
 | Key | Meaning |
 |-----|---------|
 | `memory.working_capacity` | working memory item capacity |
+| `memory.wm_token_budget_ratio` | fraction of judgment input budget used by working memory |
 | `memory.max_events` | episodic event cap |
 | `memory.semantic_decay_lambda` | semantic memory decay coefficient |
 | `memory.embedding_provider` | independent embedding provider; `local` uses local embeddings, `none` disables vector embedding, other values select a named provider |

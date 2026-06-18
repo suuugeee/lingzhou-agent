@@ -4,6 +4,12 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from core.judgment.tiers import (
+    fallback_tiers,
+    select_tier_for_phase,
+    should_exclude_reader_for_phase,
+)
+
 if TYPE_CHECKING:
     from core.config import Config
     from provider.base import Provider
@@ -17,8 +23,6 @@ class ExecutorRoutingMixin:
     _routing_providers: dict[str, Provider]
     _override_providers: dict[str, Provider]
     _model_health: dict[str, Any]
-
-    _REASONER_ONLY_PHASES = frozenset({"initial", "continue", "reply", "final"})
 
     def _resolve_tier_model(self, tier: str) -> tuple[str, str]:
         model_ref = self._cfg.routing.get(tier)
@@ -37,19 +41,30 @@ class ExecutorRoutingMixin:
         self,
         tier: str,
         routing_overrides: dict[str, str] | None = None,
+        *,
+        excluded_model_refs: set[str] | None = None,
+        excluded_provider_names: set[str] | None = None,
     ) -> list[str]:
+        excluded_model_refs = set(excluded_model_refs or set())
+        excluded_provider_names = set(excluded_provider_names or set())
         candidates: list[str] = []
         override_model = (routing_overrides or {}).get(tier)
-        if override_model:
-            candidates.append(override_model)
-        _, primary = self._resolve_tier_model(tier)
-        if primary and primary not in candidates:
-            candidates.append(primary)
-        for m in self._tier_fallback_models(tier):
-            if m not in candidates:
-                candidates.append(m)
-        if self._cfg.model not in candidates:
-            candidates.append(self._cfg.model)
+        candidate_sources = (
+            override_model,
+            self._resolve_tier_model(tier)[1],
+            *self._tier_fallback_models(tier),
+            self._cfg.model,
+        )
+        for model_ref in candidate_sources:
+            if not model_ref:
+                continue
+            if model_ref in candidates:
+                continue
+            if model_ref in excluded_model_refs:
+                continue
+            if model_ref.partition("/")[0] in excluded_provider_names:
+                continue
+            candidates.append(model_ref)
         return candidates
 
     def _find_or_create_provider(self, model_ref: str) -> Provider:
@@ -70,13 +85,7 @@ class ExecutorRoutingMixin:
         return self._override_providers[model_ref]
 
     def _fallback_tiers(self, tier: str, *, exclude_reader: bool = False) -> tuple[str, ...]:
-        if tier == "reasoner":
-            return ("repair",) if exclude_reader else ("reader", "repair")
-        if tier == "reader":
-            return ("reasoner", "repair")
-        if tier == "repair":
-            return ("reasoner",) if exclude_reader else ("reader", "reasoner")
-        return ("reasoner", "repair") if exclude_reader else ("reader", "reasoner", "repair")
+        return fallback_tiers(tier, exclude_reader=exclude_reader)
 
     def _least_bad_model(
         self,
@@ -84,12 +93,21 @@ class ExecutorRoutingMixin:
         routing_overrides: dict[str, str] | None,
         *,
         exclude_reader: bool = False,
+        excluded_model_refs: set[str] | None = None,
+        excluded_provider_names: set[str] | None = None,
     ) -> str | None:
         best_model: str | None = None
         best_until = float("inf")
         tiers = (tier, *self._fallback_tiers(tier, exclude_reader=exclude_reader))
+        excluded_model_refs = set(excluded_model_refs or set())
+        excluded_provider_names = set(excluded_provider_names or set())
         for cand_tier in tiers:
-            for model_ref in self._tier_model_candidates(cand_tier, routing_overrides=routing_overrides):
+            for model_ref in self._tier_model_candidates(
+                cand_tier,
+                routing_overrides=routing_overrides,
+                excluded_model_refs=excluded_model_refs,
+                excluded_provider_names=excluded_provider_names,
+            ):
                 until = self._get_health(model_ref).cooldown_until
                 if until < best_until:
                     best_until = until
@@ -105,15 +123,11 @@ class ExecutorRoutingMixin:
         tool_history: list[dict[str, Any]] | None = None,
         prefer_tier: str | None = None,
     ) -> str:
-        if phase == "repair":
-            return "repair"
-        if prefer_tier in {"reader", "reasoner", "repair"}:
-            return prefer_tier
-        if phase == "continue":
-            return "reasoner"
-        if phase in {"reply", "final"}:
-            return "reasoner"
-        return "reasoner"
+        del user_message, current_action, tool_history
+        return select_tier_for_phase(phase, prefer_tier=prefer_tier)
+
+    def _should_exclude_reader(self, phase: str, *, prefer_tier: str | None = None) -> bool:
+        return should_exclude_reader_for_phase(phase, prefer_tier=prefer_tier)
 
     def _cost_level_for_model(self, model_ref: str, reasoning: bool) -> str:
         name = model_ref.lower()

@@ -41,8 +41,28 @@ def _state_path(workspace_dir: Path) -> Path:
     return workspace_dir / _STATE_FILENAME
 
 
+def _bootstrap_path(workspace_dir: Path) -> Path:
+    return workspace_dir / "BOOTSTRAP.md"
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _state_from_json(raw: dict[str, object]) -> WorkspaceState:
+    return WorkspaceState(
+        bootstrap_seeded_at=raw.get("bootstrapSeededAt") or None,
+        setup_completed_at=raw.get("setupCompletedAt") or None,
+    )
+
+
+def _state_to_json(state: WorkspaceState) -> dict[str, str]:
+    data: dict[str, str] = {}
+    if state.bootstrap_seeded_at:
+        data["bootstrapSeededAt"] = state.bootstrap_seeded_at
+    if state.setup_completed_at:
+        data["setupCompletedAt"] = state.setup_completed_at
+    return data
 
 
 def read_workspace_state(workspace_dir: Path) -> WorkspaceState:
@@ -50,10 +70,7 @@ def read_workspace_state(workspace_dir: Path) -> WorkspaceState:
     path = _state_path(workspace_dir)
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-        return WorkspaceState(
-            bootstrap_seeded_at=raw.get("bootstrapSeededAt") or None,
-            setup_completed_at=raw.get("setupCompletedAt") or None,
-        )
+        return _state_from_json(raw)
     except Exception:
         return WorkspaceState()
 
@@ -62,12 +79,7 @@ def write_workspace_state(workspace_dir: Path, state: WorkspaceState) -> None:
     """将工作区状态写入 .lingzhou-state.json。"""
     path = _state_path(workspace_dir)
     workspace_dir.mkdir(parents=True, exist_ok=True)
-    data: dict[str, str] = {}
-    if state.bootstrap_seeded_at:
-        data["bootstrapSeededAt"] = state.bootstrap_seeded_at
-    if state.setup_completed_at:
-        data["setupCompletedAt"] = state.setup_completed_at
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(_state_to_json(state), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def bootstrap_status(
@@ -82,7 +94,7 @@ def bootstrap_status(
     """
     if state.setup_completed_at:
         return "complete"
-    if not (workspace_dir / "BOOTSTRAP.md").exists():
+    if not _bootstrap_path(workspace_dir).exists():
         return "complete"
     return "pending"
 
@@ -114,7 +126,7 @@ def reconcile_bootstrap_completion(workspace_dir: Path) -> WorkspaceState:
     对齐 OpenClaw reconcileWorkspaceBootstrapCompletion 机制。
     """
     state = read_workspace_state(workspace_dir)
-    bootstrap_path = workspace_dir / "BOOTSTRAP.md"
+    bootstrap_path = _bootstrap_path(workspace_dir)
 
     # 已有完成标志，无需重复处理
     if state.setup_completed_at:

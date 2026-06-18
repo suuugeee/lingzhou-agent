@@ -6,6 +6,17 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from core.execution import (
+    RUN_TYPE_CHAT_REPLY,
+    RUN_TYPE_DEFAULT_TIER,
+    RUN_TYPE_EVOLUTION,
+    RUN_TYPE_JUDGE,
+    RUN_TYPE_PROBE,
+    KNOWN_RUN_TYPES,
+    RUN_TYPE_TOOL_CHAIN,
+    TASK_DEFAULT_TIER,
+)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 辅助
 # ─────────────────────────────────────────────────────────────────────────────
@@ -50,17 +61,7 @@ async def test_run_driver_dispatch_delegates_to_execution():
 # Phase 3b：内置档位映射表完整性
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.parametrize("run_type,expected_tier", [
-    ("judge",      "reader"),
-    ("chat_reply", "reader"),
-    ("evolve",     "reasoner"),
-    ("probe",      "reader"),
-    ("llm",        "reader"),
-    ("tool_chain", "task_default"),
-    ("subagent",   "task_default"),
-    ("exec",       "task_default"),
-    ("multimodal", "task_default"),
-])
+@pytest.mark.parametrize("run_type,expected_tier", tuple(RUN_TYPE_DEFAULT_TIER.items()))
 def test_default_tier_for_known_run_types(run_type, expected_tier):
     from core.loop.runs.driver import RunDriver
     execution = _make_execution_mock()
@@ -68,11 +69,45 @@ def test_default_tier_for_known_run_types(run_type, expected_tier):
     assert driver.default_tier_for(run_type) == expected_tier
 
 
+def test_default_tier_for_unknown_run_type_uses_catalog_and_config_override():
+    """未知 run_type 仍可通过 catalog/config 映射到自定义档位。"""
+    from core.loop.runs.driver import RunDriver
+
+    execution = _make_execution_mock()
+    execution._cfg = MagicMock()
+    execution._cfg.run_type_routing = {"custom_type": "reasoner", RUN_TYPE_JUDGE: "reader"}
+
+    with patch(
+        "core.loop.runs.driver.resolve_run_type_routing",
+        return_value={RUN_TYPE_JUDGE: "reader", "custom_type": "reasoner"},
+    ):
+        driver = RunDriver(execution)
+
+    assert driver.default_tier_for("custom_type") == "reasoner"
+    assert driver.default_tier_for(RUN_TYPE_JUDGE) == "reader"
+    assert driver.default_tier_for("") == RUN_TYPE_DEFAULT_TIER[RUN_TYPE_TOOL_CHAIN]
+
+
+def test_run_driver_prefers_execution_layer_routing_snapshot():
+    """当 ExecutionLayer 已有路由快照时，RunDriver 复用快照，避免重复解析。"""
+    from core.loop.runs.driver import RunDriver
+
+    execution = _make_execution_mock()
+    execution._run_type_routing = {RUN_TYPE_JUDGE: "reasoner", RUN_TYPE_TOOL_CHAIN: "task_default"}
+
+    with patch("core.loop.runs.driver.resolve_run_type_routing") as resolve_mock:
+        driver = RunDriver(execution)
+
+    resolve_mock.assert_not_called()
+    assert driver.default_tier_for(RUN_TYPE_JUDGE) == "reasoner"
+    assert driver.default_tier_for(RUN_TYPE_PROBE) == RUN_TYPE_DEFAULT_TIER[RUN_TYPE_PROBE]
+
+
 def test_default_tier_for_unknown_run_type_returns_task_default():
     from core.loop.runs.driver import RunDriver
     execution = _make_execution_mock()
     driver = RunDriver(execution)
-    assert driver.default_tier_for("nonexistent_type") == "task_default"
+    assert driver.default_tier_for("nonexistent_type") == TASK_DEFAULT_TIER
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -84,42 +119,41 @@ def test_run_driver_merges_catalog_routing_over_defaults():
     from core.loop.runs.driver import RunDriver
 
     # 模拟 catalog 返回自定义映射
-    custom_routing = {"judge": "reasoner", "custom_type": "reader"}
-    with patch("core.loop.runs.driver._load_catalog_routing", return_value=custom_routing):
-        # 重新导入来触发 __init__ 中的加载逻辑
+    custom_routing = {RUN_TYPE_JUDGE: "reasoner", "custom_type": "reader"}
+    with patch(
+        "core.loop.runs.driver.resolve_run_type_routing",
+        return_value=custom_routing,
+    ):
+        # 直接注入路由快照
         execution = _make_execution_mock()
         driver = RunDriver(execution)
 
-    assert driver.default_tier_for("judge") == "reasoner"      # catalog 覆盖
+    assert driver.default_tier_for(RUN_TYPE_JUDGE) == "reasoner"      # catalog 覆盖
     assert driver.default_tier_for("custom_type") == "reader"  # catalog 新增
-    assert driver.default_tier_for("evolve") == "reasoner"     # 内置兜底
+    assert driver.default_tier_for(RUN_TYPE_EVOLUTION) == "reasoner"     # 内置兜底
 
 
 def test_run_driver_falls_back_to_defaults_when_catalog_empty():
     """catalog 为空时完全使用内置默认值。"""
-    from core.loop.runs.driver import _RUN_TYPE_DEFAULT_TIER, RunDriver
+    from core.loop.runs.driver import RunDriver
 
-    with patch("core.loop.runs.driver._load_catalog_routing", return_value={}):
+    with patch("core.loop.runs.driver.resolve_run_type_routing", return_value=dict(RUN_TYPE_DEFAULT_TIER)):
         execution = _make_execution_mock()
         driver = RunDriver(execution)
 
     # 应等于内置默认值
-    for run_type, tier in _RUN_TYPE_DEFAULT_TIER.items():
+    for run_type, tier in RUN_TYPE_DEFAULT_TIER.items():
         assert driver.default_tier_for(run_type) == tier
 
 
 def test_run_driver_tolerates_catalog_load_failure():
-    """catalog 加载失败时不应抛出异常，回退到内置默认值。"""
+    """路由快照为空时，不应抛异常并回退到内置默认。"""
     from core.loop.runs.driver import RunDriver
 
-    with patch("core.loop.runs.driver._load_catalog_routing", side_effect=RuntimeError("load fail")):
-        # _load_catalog_routing 内部已 catch；但万一 RunDriver.__init__ 自身抛，也应处理
-        try:
-            execution = _make_execution_mock()
-            driver = RunDriver(execution)
-            assert driver.default_tier_for("judge") == "reader"
-        except Exception as exc:
-            pytest.fail(f"RunDriver should not raise on catalog failure, got: {exc}")
+    with patch("core.loop.runs.driver.resolve_run_type_routing", return_value={}):
+        execution = _make_execution_mock()
+        driver = RunDriver(execution)
+        assert driver.default_tier_for(RUN_TYPE_JUDGE) == RUN_TYPE_DEFAULT_TIER[RUN_TYPE_JUDGE]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -138,7 +172,7 @@ def test_get_run_type_routing_has_expected_keys():
     from provider.catalog import get_run_type_routing
     routing = get_run_type_routing()
     # models.json 中声明的 run_type 应全部存在
-    for key in ("judge", "tool_chain", "chat_reply", "evolve", "subagent", "probe"):
+    for key in KNOWN_RUN_TYPES:
         assert key in routing, f"expected '{key}' in run_type_routing"
 
 
@@ -166,7 +200,7 @@ async def test_cancel_stale_runs_marks_old_running_as_cancelled():
         await store.open()
 
         # 插入一个 running run（started_at 设为足够早）
-        run_id = await store.add_run(run_type="tool_chain", status="running")
+        run_id = await store.add_run(run_type=RUN_TYPE_TOOL_CHAIN, status="running")
         # 直接修改 DB 里的 started_at 为很早的时间
         import datetime
         old_ts = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=700)).isoformat()
@@ -201,7 +235,7 @@ async def test_cancel_stale_runs_does_not_cancel_recent_runs():
         await store.open()
 
         # 插入一个最近的 running run（started_at = 现在）
-        run_id = await store.add_run(run_type="tool_chain", status="running")
+        run_id = await store.add_run(run_type=RUN_TYPE_TOOL_CHAIN, status="running")
 
         count = await store.cancel_stale_runs(stale_after_seconds=600)
         assert count == 0
@@ -225,7 +259,7 @@ async def test_cancel_stale_runs_ignores_terminal_runs():
         store = TaskStore(Path(tmpdir) / "test.db")
         await store.open()
 
-        run_id = await store.add_run(run_type="tool_chain", status="succeeded")
+        run_id = await store.add_run(run_type=RUN_TYPE_TOOL_CHAIN, status="succeeded")
         old_ts = (datetime.datetime.now(datetime.UTC) - datetime.timedelta(seconds=700)).isoformat()
         async with store._db.execute(
             "UPDATE runs SET started_at=? WHERE id=?",
@@ -248,16 +282,19 @@ def test_run_driver_merges_config_run_type_routing_over_catalog():
     from core.loop.runs.driver import RunDriver
 
     execution = _make_execution_mock()
-    # 模拟 cfg.run_type_routing = {"judge": "reasoner"}
+    # 模拟 cfg.run_type_routing = {RUN_TYPE_JUDGE: "reasoner"}
     cfg_mock = MagicMock()
-    cfg_mock.run_type_routing = {"judge": "reasoner"}
+    cfg_mock.run_type_routing = {RUN_TYPE_JUDGE: "reasoner"}
     execution._cfg = cfg_mock
 
-    with patch("core.loop.runs.driver._load_catalog_routing", return_value={"judge": "reader"}):
+    with patch("core.loop.runs.driver.resolve_run_type_routing") as resolve_mock:
+        resolve_mock.return_value = {RUN_TYPE_JUDGE: "reasoner"}
         driver = RunDriver(execution)
 
+    resolve_mock.assert_called_once_with(cfg_mock)
+
     # Config 覆盖优先于 catalog，judge → reasoner
-    assert driver.default_tier_for("judge") == "reasoner"
+    assert driver.default_tier_for(RUN_TYPE_JUDGE) == "reasoner"
 
 
 def test_run_driver_config_routing_empty_falls_back_to_catalog():
@@ -269,10 +306,12 @@ def test_run_driver_config_routing_empty_falls_back_to_catalog():
     cfg_mock.run_type_routing = {}
     execution._cfg = cfg_mock
 
-    with patch("core.loop.runs.driver._load_catalog_routing", return_value={"probe": "reader"}):
+    with patch("core.loop.runs.driver.resolve_run_type_routing") as resolve_mock:
+        resolve_mock.return_value = {RUN_TYPE_PROBE: RUN_TYPE_CHAT_REPLY}
         driver = RunDriver(execution)
 
-    assert driver.default_tier_for("probe") == "reader"
+    resolve_mock.assert_called_once_with(cfg_mock)
+    assert driver.default_tier_for(RUN_TYPE_PROBE) == RUN_TYPE_CHAT_REPLY
 
 
 def test_config_run_type_routing_field_exists():
@@ -293,9 +332,9 @@ def test_config_run_type_routing_accepts_overrides():
     cfg = Config.model_validate({
         "providers": {"cp": {"type": "openai_compat", "base_url": "https://x", "api_key_env": "A"}},
         "model": "cp/m",
-        "run_type_routing": {"judge": "reasoner", "chat_reply": "reader"},
+        "run_type_routing": {RUN_TYPE_JUDGE: "reasoner", RUN_TYPE_CHAT_REPLY: "reader"},
     })
-    assert cfg.run_type_routing == {"judge": "reasoner", "chat_reply": "reader"}
+    assert cfg.run_type_routing == {RUN_TYPE_JUDGE: "reasoner", RUN_TYPE_CHAT_REPLY: "reader"}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -314,15 +353,15 @@ async def test_get_pending_runs_returns_pending_only():
         store = TaskStore(Path(tmpdir) / "test.db")
         await store.open()
 
-        await store.add_run(run_type="tool_chain", status="running")
-        await store.add_run(run_type="judge", status="pending")
-        await store.add_run(run_type="probe", status="pending")
+        await store.add_run(run_type=RUN_TYPE_TOOL_CHAIN, status="running")
+        await store.add_run(run_type=RUN_TYPE_JUDGE, status="pending")
+        await store.add_run(run_type=RUN_TYPE_PROBE, status="pending")
 
         pending = await store.get_pending_runs(limit=10)
         assert len(pending) == 2
         assert all(r.status == "pending" for r in pending)
         run_types = {r.run_type for r in pending}
-        assert run_types == {"judge", "probe"}
+        assert run_types == {RUN_TYPE_JUDGE, RUN_TYPE_PROBE}
         await store.close()
 
 
@@ -339,9 +378,9 @@ async def test_get_pending_runs_ordered_by_created_at():
         store = TaskStore(Path(tmpdir) / "test.db")
         await store.open()
 
-        id1 = await store.add_run(run_type="judge", status="pending")
+        id1 = await store.add_run(run_type=RUN_TYPE_JUDGE, status="pending")
         await asyncio.sleep(0.01)
-        id2 = await store.add_run(run_type="judge", status="pending")
+        id2 = await store.add_run(run_type=RUN_TYPE_JUDGE, status="pending")
 
         pending = await store.get_pending_runs(limit=10)
         assert len(pending) == 2
@@ -362,7 +401,7 @@ async def test_add_run_pending_has_started_at():
         store = TaskStore(Path(tmpdir) / "test.db")
         await store.open()
 
-        run_id = await store.add_run(run_type="judge", status="pending")
+        run_id = await store.add_run(run_type=RUN_TYPE_JUDGE, status="pending")
         run = await store.get_run_by_id(run_id)
         assert run is not None
         assert run.started_at  # NOT NULL 应有字符串値
@@ -381,7 +420,7 @@ async def test_cancel_stale_runs_does_not_cancel_fresh_pending_run():
         store = TaskStore(Path(tmpdir) / "test.db")
         await store.open()
 
-        run_id = await store.add_run(run_type="judge", status="pending")
+        run_id = await store.add_run(run_type=RUN_TYPE_JUDGE, status="pending")
         # stale_after_seconds=600：刚建的 Run 不会被取消
         count = await store.cancel_stale_runs(stale_after_seconds=600)
         assert count == 0
@@ -406,7 +445,7 @@ async def test_poll_pending_runs_claims_judge_run_and_enqueues_tick():
         store = TaskStore(Path(tmpdir) / "test.db")
         await store.open()
 
-        run_id = await store.add_run(run_type="judge", status="pending")
+        run_id = await store.add_run(run_type=RUN_TYPE_JUDGE, status="pending")
 
         enqueued: list[TickJob] = []
 
@@ -475,7 +514,7 @@ async def test_poll_pending_runs_skips_non_judge_run():
         store = TaskStore(Path(tmpdir) / "test.db")
         await store.open()
 
-        run_id = await store.add_run(run_type="probe", status="pending")
+        run_id = await store.add_run(run_type=RUN_TYPE_PROBE, status="pending")
 
         class _FakeLoop:
             _task_store = store
@@ -505,7 +544,7 @@ async def test_poll_pending_runs_restores_pending_when_queue_full():
         store = TaskStore(Path(tmpdir) / "test.db")
         await store.open()
 
-        run_id = await store.add_run(run_type="judge", status="pending")
+        run_id = await store.add_run(run_type=RUN_TYPE_JUDGE, status="pending")
 
         class _FullDispatcher:
             enabled = True
@@ -544,7 +583,7 @@ async def test_poll_pending_runs_uses_focus_task_chain_over_global_active():
         store = TaskStore(Path(tmpdir) / "test.db")
         await store.open()
 
-        await store.add_run(run_type="judge", status="pending")
+        await store.add_run(run_type=RUN_TYPE_JUDGE, status="pending")
         await store.add_task("全局活跃任务", goal="旧 get_active 会误命中这里", status="in_progress")
         focus_id = await store.add_task(
             "当前焦点任务",
@@ -605,13 +644,13 @@ async def test_startup_bootstrap_creates_pending_run():
         existing = await store.get_pending_runs(limit=1)
         if not existing:
             await store.add_run(
-                run_type="judge",
+                run_type=RUN_TYPE_JUDGE,
                 status="pending",
                 log_text="[startup] bootstrap pending Run",
             )
 
         pending_after = await store.get_pending_runs(limit=10)
         assert len(pending_after) == 1
-        assert pending_after[0].run_type == "judge"
+        assert pending_after[0].run_type == RUN_TYPE_JUDGE
         assert pending_after[0].started_at  # started_at 应已设置（NOT NULL 字段）
         await store.close()

@@ -19,6 +19,10 @@ def _result_fingerprint(summary: str) -> str:
     return hashlib.md5(text.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
+def _action_signature(action: JudgmentOutput) -> str:
+    return f"{action.chosen_action_id or ''}|{action_key_param(action.params)}"
+
+
 def _looks_like_path_probe_output(text: str) -> bool:
     stripped = (text or "").strip()
     if not stripped or "\n" in stripped:
@@ -67,7 +71,7 @@ def _shell_run_made_progress(
     fp = _result_fingerprint(probe_text)
     if not fp:
         return False, "shell.run 无有效输出"
-    cur_sig = f"{action.chosen_action_id or ''}|{action_key_param(action.params)}"
+    cur_sig = _action_signature(action)
     if cur_sig == prev_sig and fp == prev_fp:
         return False, "shell.run 结果与上轮相同"
     return True, "shell.run 获得新输出"
@@ -98,7 +102,7 @@ def _action_made_progress(
         fp = _result_fingerprint(result.summary)
         if not fp:
             return False, f"{tool} 返回空结果"
-        cur_sig = f"{tool}|{action_key_param(action.params)}"
+        cur_sig = _action_signature(action)
         if cur_sig == prev_sig and fp == prev_fp:
             return False, f"{tool} 结果与上轮相同(重复操作)"
         return True, f"{tool} 获得新信息(结果指纹变化)"
@@ -108,7 +112,7 @@ def _action_made_progress(
     fp = _result_fingerprint(result.summary)
     if not fp:
         return False, f"{tool} 无有效输出"
-    cur_sig = f"{tool}|{action_key_param(action.params)}"
+    cur_sig = _action_signature(action)
     if cur_sig == prev_sig and fp == prev_fp:
         return False, f"{tool} 结果与上轮相同"
     return True, f"{tool} 输出与上轮不同"

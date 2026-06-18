@@ -12,12 +12,12 @@ from __future__ import annotations
 import json
 import logging
 import time
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from core.execution.helpers import (
     _classify_durable_failure,
     _failure_fact_key,
-    _infer_run_profile,
     _load_durable_failure_policy,
     _normalize_tool_result_text_fields,
     _planned_run_task_id,
@@ -34,14 +34,61 @@ from core.execution.helpers import (
     record_meta_reflection_memory,
     record_run_outcome_memory,
 )
+from core.execution.run_profile import (
+    ExecutionProfile,
+    RUN_TYPE_TOOL_CHAIN,
+    WORKER_TOOL_CHAIN,
+    resolve_execution_dispatch,
+)
+from core.execution.routing import resolve_run_type_routing
 from core.execution.workers import WorkerLayer
+from core.judgment.decision.helpers import _decision_basis
 from core.log_fields import execution_scope_fields
 from core.metabolic import add_run, submit_fact
-from provider.catalog import get_run_type_routing as _get_run_type_routing
 from tools.registry import ToolContext, ToolResult, tool_metadata
 
 _log = logging.getLogger("lingzhou.execution")
 _TERMINAL_TASK_ACTIONS = frozenset({"task.complete", "task.fail"})
+
+
+@dataclass(frozen=True)
+class _ExecutionDispatch:
+    run_id: int | None
+    run_task_id: int
+    run_type: str
+    tool_name: str
+    worker_type: str
+    task_tier: str
+    effective_tier: str
+
+    def scope_fields(self, *, dispatch_ms: int | None = None) -> str:
+        return execution_scope_fields(
+            run_id=self.run_id,
+            task_id=self.run_task_id,
+            tool=self.tool_name,
+            worker=self.worker_type,
+            tier=self.effective_tier or self.task_tier or None,
+            dispatch_ms=dispatch_ms,
+        )
+
+    def with_run_id(self, run_id: int | None) -> "_ExecutionDispatch":
+        return replace(self, run_id=run_id)
+
+    def with_profile(self, profile: ExecutionProfile) -> "_ExecutionDispatch":
+        return replace(
+            self,
+            run_type=profile.run_type,
+            worker_type=profile.worker_type,
+            effective_tier=profile.model_tier,
+        )
+
+    def stamp_metadata(self, tool_result: ToolResult) -> ToolResult:
+        tool_result.metadata.setdefault("tool_name", self.tool_name)
+        tool_result.metadata.setdefault("worker_type", self.worker_type)
+        if self.run_id is not None:
+            tool_result.metadata.setdefault("run_id", self.run_id)
+        return tool_result
+
 
 if TYPE_CHECKING:
     from core.config import Config
@@ -51,7 +98,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ExecutionLayer",
-    "_infer_run_profile",
     "_load_durable_failure_policy",
     "_run_status_from_result",
     "_tool_result_log_fields",
@@ -62,17 +108,12 @@ __all__ = [
 ]
 
 
-def _decision_basis(action: JudgmentOutput, fallback: str = "") -> str:
-    """提炼可公开审计的执行依据，不把完整内部独白写进持久状态。"""
-    basis = " ".join(str(action.rationale or fallback or "").split())
-    return basis[:240]
-
-
 class ExecutionLayer:
     def __init__(self, registry: ToolRegistry, cfg: Config) -> None:
         self._registry = registry
         self._cfg = cfg
         self._workers = WorkerLayer(cfg)
+        self._run_type_routing: dict[str, str] = resolve_run_type_routing(cfg)
 
     async def dispatch(self, action: JudgmentOutput, ctx: ToolContext) -> ToolResult:
         """根据 decision 类型分发执行。"""
@@ -197,106 +238,86 @@ class ExecutionLayer:
             ),
         )
 
-    async def _dispatch_act(self, action: JudgmentOutput, ctx: ToolContext) -> ToolResult:
-        run_id: int | None = None
-        run_type = "tool_chain"
-        worker_type = "tool-chain-worker"
-        active_task = await _resolve_execution_active_task(ctx)
-        active_task_id = active_task.id if active_task else 0
-        run_task_id = _planned_run_task_id(action, active_task_id)
-        task_tier = (active_task.model_tier or "").strip() if active_task is not None else ""
-        durable_policy = await _load_durable_failure_policy(ctx.task_store)
-        durable_threshold = int(durable_policy.get("threshold") or self._cfg.thresholds.durable_failure_threshold)
-        durable_ttl_sec = int(durable_policy.get("ttl_sec") or self._cfg.thresholds.durable_failure_ttl_sec)
-        if ctx.task_store is not None:
-            effective_registry = ctx.registry or self._registry
-            run_type, worker_type = _infer_run_profile(
-                action.chosen_action_id or "",
-                action.params,
-                registry=effective_registry,
-            )
-            effective_tier = task_tier
-            if not effective_tier or effective_tier == "task_default":
-                try:
-                    _routing = _get_run_type_routing()
-                    _config_rt = getattr(self._cfg, "run_type_routing", {}) or {}
-                    _routing = {**_routing, **{k: v for k, v in _config_rt.items() if isinstance(v, str)}}
-                    _mapped = _routing.get(run_type, "")
-                    if _mapped and _mapped != "task_default":
-                        effective_tier = _mapped
-                except Exception:
-                    pass
-            run_id = await add_run(
-                ctx,
-                task_id=run_task_id,
-                run_type=run_type,
-                worker_type=worker_type,
-                status="running",
-                input_json={
-                    "decision": action.decision,
-                    "tool": action.chosen_action_id or "",
-                    "params": action.params or {},
-                },
-                tool_name=action.chosen_action_id or "",
-                model_tier=effective_tier,
-                source="execution/layer/_dispatch_act",
-                decision_basis=_decision_basis(action),
-            )
-            if run_id is not None:
-                _record_run_started(
-                    ctx,
-                    run_id=run_id,
-                    task_id=run_task_id,
-                    tool_name=action.chosen_action_id or "",
-                    run_type=run_type,
-                    worker_type=worker_type,
-                    model_tier=effective_tier,
-                )
-                _log.info(
-                    "[run-start] %s limit=%s",
-                    execution_scope_fields(
-                        run_id=run_id,
-                        task_id=run_task_id,
-                        tool=action.chosen_action_id or "",
-                        worker=worker_type,
-                        tier=task_tier or effective_tier,
-                    ),
-                    _worker_limit_for_type(self._cfg, worker_type),
-                )
+    def _make_dispatch_ctx(self, action: JudgmentOutput, active_task: Any) -> _ExecutionDispatch:
+        active_task_id = active_task.id if active_task is not None else 0
+        return _ExecutionDispatch(
+            run_id=None,
+            run_task_id=_planned_run_task_id(action, active_task_id),
+            run_type=RUN_TYPE_TOOL_CHAIN,
+            tool_name=action.chosen_action_id or "",
+            worker_type=WORKER_TOOL_CHAIN,
+            task_tier=(active_task.model_tier or "").strip() if active_task is not None else "",
+            effective_tier="",
+        )
 
-        def _stamp_result_metadata(tool_result: ToolResult) -> ToolResult:
-            tool_result.metadata.setdefault("tool_name", action.chosen_action_id or "")
-            tool_result.metadata.setdefault("worker_type", worker_type)
-            if run_id is not None:
-                tool_result.metadata.setdefault("run_id", run_id)
-            return tool_result
-
+    def _resolve_execution_profile(
+        self,
+        dispatch_ctx: _ExecutionDispatch,
+        action: JudgmentOutput,
+        ctx: ToolContext,
+    ) -> ExecutionProfile:
         effective_registry = ctx.registry or self._registry
-        entry = effective_registry.get(action.chosen_action_id)
-        if not entry:
-            _log.warning(
-                "[exec-miss] %s not_registered=true",
-                execution_scope_fields(
-                    run_id=run_id,
-                    task_id=run_task_id,
-                    tool=action.chosen_action_id or "",
-                ),
+        return resolve_execution_dispatch(
+            task_tier=dispatch_ctx.task_tier,
+            tool_name=dispatch_ctx.tool_name,
+            run_type_routing=self._run_type_routing,
+            params=action.params,
+            registry=effective_registry,
+        )
+
+    async def _start_run_record(
+        self,
+        dispatch_ctx: _ExecutionDispatch,
+        action: JudgmentOutput,
+        ctx: ToolContext,
+        *,
+        decision_basis: str,
+    ) -> _ExecutionDispatch:
+        if ctx.task_store is None:
+            return dispatch_ctx
+
+        run_id = await add_run(
+            ctx,
+            task_id=dispatch_ctx.run_task_id,
+            run_type=dispatch_ctx.run_type,
+            worker_type=dispatch_ctx.worker_type,
+            status="running",
+            input_json={
+                "decision": action.decision,
+                "tool": dispatch_ctx.tool_name,
+                "params": action.params or {},
+            },
+            tool_name=dispatch_ctx.tool_name,
+            model_tier=dispatch_ctx.effective_tier,
+            source="execution/layer/_dispatch_act",
+            decision_basis=decision_basis,
+        )
+        dispatch_ctx = dispatch_ctx.with_run_id(run_id)
+        if run_id is not None:
+            _record_run_started(
+                ctx,
+                run_id=dispatch_ctx.run_id,
+                task_id=dispatch_ctx.run_task_id,
+                tool_name=dispatch_ctx.tool_name,
+                run_type=dispatch_ctx.run_type,
+                worker_type=dispatch_ctx.worker_type,
+                model_tier=dispatch_ctx.effective_tier,
             )
-            result = _stamp_result_metadata(ToolResult(
-                summary=f"工具不存在: {action.chosen_action_id!r}",
-                error="ToolNotFound",
-                skipped=True,
-                kind="error",
-            ))
-            await finalize_run(cfg=self._cfg, run_id=run_id, result=result, ctx=ctx)
-            return result
+            _log.info(
+                "[run-start] %s limit=%s",
+                dispatch_ctx.scope_fields(),
+                _worker_limit_for_type(self._cfg, dispatch_ctx.worker_type),
+            )
+        return dispatch_ctx
 
-        if self._cfg.loop.debug:
-            _log.debug("[exec] %s params=%s", action.chosen_action_id, action.params)
-        _log.info("[exec] %s", action.chosen_action_id)
-
+    async def _preflight_tool_result(
+        self,
+        action: JudgmentOutput,
+        dispatch_ctx: _ExecutionDispatch,
+        ctx: ToolContext,
+        active_task: Any,
+    ) -> ToolResult | None:
         failure_key = _failure_fact_key(action)
-
         if ctx.task_store is not None:
             raw_mute, mute_found = await ctx.task_store.get_fact(failure_key)
             if mute_found and raw_mute:
@@ -306,31 +327,24 @@ class ExecutionLayer:
                     if muted_until > time.time():
                         _log.info(
                             "[exec-mute] %s reason=%s count=%s muted_until=%s",
-                            execution_scope_fields(
-                                run_id=run_id,
-                                task_id=run_task_id,
-                                tool=action.chosen_action_id or "",
-                            ),
+                            dispatch_ctx.scope_fields(),
                             mute_data.get("reason") or "-",
                             mute_data.get("count") or 0,
                             int(muted_until),
                         )
-                        result = _stamp_result_metadata(ToolResult(
+                        return dispatch_ctx.stamp_metadata(ToolResult(
                             summary=(
-                                f"跳过已知稳定失败动作 {action.chosen_action_id!r}："
+                                f"跳过已知稳定失败动作 {dispatch_ctx.tool_name!r}："
                                 f" {mute_data.get('last_summary', '')}"
                             ),
                             error="KnownStableFailure",
                             skipped=True,
                             kind="error",
                         ))
-                        await finalize_run(cfg=self._cfg, run_id=run_id, result=result, ctx=ctx)
-                        return result
                 except Exception:
                     pass
 
-        action_id = action.chosen_action_id or ""
-        is_mutation = not action_id.startswith("task.") and action_id not in {
+        is_mutation = not dispatch_ctx.tool_name.startswith("task.") and dispatch_ctx.tool_name not in {
             "memory.get_fact", "file.read", "file.list", "file.search",
         }
         if is_mutation and active_task is not None and ctx.task_store is not None:
@@ -342,34 +356,167 @@ class ExecutionLayer:
                     step_name = in_progress_steps[0]
                     _log.info(
                         "[exec-gate] %s blocked_step=%s",
-                        execution_scope_fields(
-                            run_id=run_id,
-                            task_id=run_task_id,
-                            tool=action.chosen_action_id or "",
-                        ),
+                        dispatch_ctx.scope_fields(),
                         step_name,
                     )
-                    result = _stamp_result_metadata(ToolResult(
+                    return dispatch_ctx.stamp_metadata(ToolResult(
                         summary=f"当前步骤未对齐，请先完成「{step_name}」再执行变更操作",
                         error="PlanStepMismatch",
                         skipped=True,
                         kind="error",
                     ))
-                    await finalize_run(cfg=self._cfg, run_id=run_id, result=result, ctx=ctx)
-                    return result
+
+        return None
+
+    async def _finalize_and_return(
+        self,
+        dispatch_ctx: _ExecutionDispatch,
+        ctx: ToolContext,
+        result: ToolResult,
+    ) -> ToolResult:
+        await finalize_run(
+            cfg=self._cfg,
+            run_id=dispatch_ctx.run_id,
+            result=result,
+            ctx=ctx,
+            active_task_id=dispatch_ctx.run_task_id or None,
+        )
+        return result
+
+    async def _sync_durable_failure(
+        self,
+        action: JudgmentOutput,
+        dispatch_ctx: _ExecutionDispatch,
+        ctx: ToolContext,
+        result: ToolResult,
+        *,
+        durable_threshold: int,
+        durable_ttl_sec: int,
+    ) -> None:
+        if ctx.task_store is None:
+            return
+
+        failure_key = _failure_fact_key(action)
+        if result.error:
+            raw, found = await ctx.task_store.get_fact(failure_key)
+            reason = _classify_durable_failure(result)
+            if not reason:
+                return
+            prev: dict[str, Any] = {}
+            if found:
+                try:
+                    prev = json.loads(raw)
+                except Exception:
+                    prev = {}
+            count = int(prev.get("count") or 0) + 1 if prev.get("reason") == reason else 1
+            payload = {
+                "tool": dispatch_ctx.tool_name,
+                "key": action_key_param(action.params),
+                "reason": reason,
+                "count": count,
+                "last_summary": result.summary,
+                "last_seen": time.time(),
+                "muted_until": time.time() + durable_ttl_sec if count >= durable_threshold else 0,
+                "policy_threshold": durable_threshold,
+                "policy_ttl_sec": durable_ttl_sec,
+            }
+            await submit_fact(
+                ctx,
+                key=failure_key,
+                value=json.dumps(payload, ensure_ascii=False),
+                scope="system",
+                source="execution/failure_track",
+                decision_basis=_decision_basis(
+                    action,
+                    f"durable failure tracked for {dispatch_ctx.tool_name}",
+                ),
+            )
+            return
+
+        await submit_fact(
+            ctx,
+            key=failure_key,
+            value=json.dumps({
+                "tool": dispatch_ctx.tool_name,
+                "key": action_key_param(action.params),
+                "reason": "",
+                "count": 0,
+                "last_summary": result.summary,
+                "last_seen": time.time(),
+                "muted_until": 0,
+            }, ensure_ascii=False),
+            scope="system",
+            source="execution/failure_clear",
+            decision_basis=_decision_basis(
+                action,
+                f"durable failure cleared for {dispatch_ctx.tool_name}",
+            ),
+        )
+
+    async def _dispatch_act(self, action: JudgmentOutput, ctx: ToolContext) -> ToolResult:
+        active_task = await _resolve_execution_active_task(ctx)
+        dispatch_ctx = self._make_dispatch_ctx(action, active_task)
+        dispatch_ctx = dispatch_ctx.with_profile(
+            self._resolve_execution_profile(
+                dispatch_ctx=dispatch_ctx,
+                action=action,
+                ctx=ctx,
+            )
+        )
+
+        durable_policy = await _load_durable_failure_policy(ctx.task_store)
+        durable_threshold = int(durable_policy.get("threshold") or self._cfg.thresholds.durable_failure_threshold)
+        durable_ttl_sec = int(durable_policy.get("ttl_sec") or self._cfg.thresholds.durable_failure_ttl_sec)
+
+        decision_basis = _decision_basis(action)
+        dispatch_ctx = await self._start_run_record(
+            dispatch_ctx,
+            action,
+            ctx,
+            decision_basis=decision_basis,
+        )
+
+        entry = (ctx.registry or self._registry).get(dispatch_ctx.tool_name)
+        if not entry:
+            _log.warning(
+                "[exec-miss] %s not_registered=true",
+                dispatch_ctx.scope_fields(),
+            )
+            return await self._finalize_and_return(
+                dispatch_ctx,
+                ctx,
+                dispatch_ctx.stamp_metadata(ToolResult(
+                    summary=f"工具不存在: {dispatch_ctx.tool_name!r}",
+                    error="ToolNotFound",
+                    skipped=True,
+                    kind="error",
+                )),
+            )
+
+        if self._cfg.loop.debug:
+            _log.debug("[exec] %s params=%s", dispatch_ctx.tool_name, action.params)
+        _log.info("[exec] %s", dispatch_ctx.tool_name)
+
+        preflight_result = await self._preflight_tool_result(
+            action,
+            dispatch_ctx,
+            ctx,
+            active_task,
+        )
+        if preflight_result is not None:
+            return await self._finalize_and_return(
+                dispatch_ctx,
+                ctx,
+                preflight_result,
+            )
 
         dispatch_started = time.monotonic()
         try:
-            result = await self._workers.dispatch(worker_type, entry, action, ctx)
+            result = await self._workers.dispatch(dispatch_ctx.worker_type, entry, action, ctx)
         except Exception as exc:
             _log.exception(
                 "[exec-error] %s dispatch=raised",
-                execution_scope_fields(
-                    run_id=run_id,
-                    task_id=run_task_id,
-                    tool=action.chosen_action_id or "",
-                    worker=worker_type,
-                ),
+                dispatch_ctx.scope_fields(),
             )
             result = ToolResult(
                 summary=f"工具执行异常: {exc}",
@@ -377,7 +524,7 @@ class ExecutionLayer:
                 error=str(exc),
                 kind="execute_result",
             )
-        result = _stamp_result_metadata(result)
+        result = dispatch_ctx.stamp_metadata(result)
         result = _normalize_tool_result_text_fields(result)
         result.metadata.setdefault("dispatch_ms", int((time.monotonic() - dispatch_started) * 1000))
 
@@ -385,14 +532,7 @@ class ExecutionLayer:
         worker_log = _worker_log_fields(result)
         _log.info(
             "[tool-result] %s worker_meta=%s skipped=%s error=%s summary=%s state=%s",
-            execution_scope_fields(
-                run_id=run_id,
-                task_id=run_task_id,
-                tool=action.chosen_action_id or "",
-                worker=worker_type,
-                tier=task_tier or None,
-                dispatch_ms=result.metadata.get("dispatch_ms"),
-            ),
+            dispatch_ctx.scope_fields(dispatch_ms=result.metadata.get("dispatch_ms")),
             worker_log,
             result.skipped,
             error_log or "-",
@@ -401,73 +541,25 @@ class ExecutionLayer:
         )
 
         if result.error and not result.skipped and ctx.task_store is not None:
-            task_id = str(_resolved_run_task_id(result, run_task_id) or "")
+            task_id = str(_resolved_run_task_id(result, dispatch_ctx.run_task_id) or "")
             await ctx.task_store.record_failure(
-                kind=action.chosen_action_id,
+                kind=dispatch_ctx.tool_name,
                 summary=result.summary,
                 context=result.evidence,
                 task_id=task_id,
             )
 
-        if ctx.task_store is not None:
-            reason = _classify_durable_failure(result)
-            if result.error and reason:
-                raw, found = await ctx.task_store.get_fact(failure_key)
-                prev: dict[str, Any] = {}
-                if found:
-                    try:
-                        prev = json.loads(raw)
-                    except Exception:
-                        prev = {}
-                count = int(prev.get("count") or 0) + 1 if prev.get("reason") == reason else 1
-                payload = {
-                    "tool": action.chosen_action_id,
-                    "key": action_key_param(action.params),
-                    "reason": reason,
-                    "count": count,
-                    "last_summary": result.summary,
-                    "last_seen": time.time(),
-                    "muted_until": time.time() + durable_ttl_sec if count >= durable_threshold else 0,
-                    "policy_threshold": durable_threshold,
-                    "policy_ttl_sec": durable_ttl_sec,
-                }
-                await submit_fact(
-                    ctx,
-                    key=failure_key,
-                    value=json.dumps(payload, ensure_ascii=False),
-                    scope="system",
-                    source="execution/failure_track",
-                    decision_basis=_decision_basis(
-                        action,
-                        f"durable failure tracked for {action.chosen_action_id}",
-                    ),
-                )
-            elif not result.error:
-                await submit_fact(
-                    ctx,
-                    key=failure_key,
-                    value=json.dumps({
-                        "tool": action.chosen_action_id,
-                        "key": action_key_param(action.params),
-                        "reason": "",
-                        "count": 0,
-                        "last_summary": result.summary,
-                        "last_seen": time.time(),
-                        "muted_until": 0,
-                    }, ensure_ascii=False),
-                    scope="system",
-                    source="execution/failure_clear",
-                    decision_basis=_decision_basis(
-                        action,
-                        f"durable failure cleared for {action.chosen_action_id}",
-                    ),
-                )
-
-        await finalize_run(
-            cfg=self._cfg,
-            run_id=run_id,
-            result=result,
-            ctx=ctx,
-            active_task_id=run_task_id or None,
+        await self._sync_durable_failure(
+            action,
+            dispatch_ctx,
+            ctx,
+            result,
+            durable_threshold=durable_threshold,
+            durable_ttl_sec=durable_ttl_sec,
         )
-        return result
+
+        return await self._finalize_and_return(
+            dispatch_ctx,
+            ctx,
+            result,
+        )

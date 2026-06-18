@@ -86,6 +86,31 @@ def _compute_fingerprint(providers_cfg: dict[str, Any], builtin_bytes: bytes) ->
     return h.hexdigest()
 
 
+def _copy_provider_entry(pdata: dict[str, Any]) -> dict[str, Any]:
+    entry: dict[str, Any] = {k: v for k, v in pdata.items() if k != "models"}
+    if "models" in pdata:
+        entry["models"] = [dict(m) for m in pdata["models"]]
+    return entry
+
+
+def _merge_custom_models(entry: dict[str, Any], models: Any) -> None:
+    existing_by_id: dict[str, dict[str, Any]] = {
+        str(m.get("id", "")): m for m in entry.get("models", []) if isinstance(m, dict) and m.get("id")
+    }
+    for custom in models:
+        if not isinstance(custom, dict):
+            continue
+        model_id = str(custom.get("id", "")).strip()
+        if not model_id:
+            continue
+        if model_id in existing_by_id:
+            _deep_merge_dict(existing_by_id[model_id], dict(custom))
+            continue
+        new_entry = dict(custom)
+        entry.setdefault("models", []).append(new_entry)
+        existing_by_id[model_id] = new_entry
+
+
 def _merge(providers_cfg: dict[str, Any], builtin: dict[str, Any]) -> dict[str, Any]:
     """生成运行时 models.json 内容（不含 _fingerprint / _doc，由调用方注入）。
 
@@ -102,10 +127,7 @@ def _merge(providers_cfg: dict[str, Any], builtin: dict[str, Any]) -> dict[str, 
     for pname, pdata in builtin.items():
         if pname.startswith("_"):
             continue
-        entry: dict[str, Any] = {k: v for k, v in pdata.items() if k != "models"}
-        if "models" in pdata:
-            entry["models"] = [dict(m) for m in pdata["models"]]
-        out[pname] = entry
+        out[pname] = _copy_provider_entry(pdata)
 
     # 步骤 2-4：用 lingzhou.json config 覆盖/补充
     for pname, pcfg in providers_cfg.items():
@@ -120,23 +142,7 @@ def _merge(providers_cfg: dict[str, Any], builtin: dict[str, Any]) -> dict[str, 
 
         # 合并用户模型元数据：同 id 覆盖内置字段；新 id 追加。
         if "models" in pcfg:
-            existing_by_id: dict[str, dict[str, Any]] = {
-                str(m.get("id", "")): m
-                for m in entry.get("models", [])
-                if isinstance(m, dict) and m.get("id")
-            }
-            for custom in pcfg["models"]:
-                if not isinstance(custom, dict):
-                    continue
-                model_id = str(custom.get("id", "")).strip()
-                if not model_id:
-                    continue
-                if model_id in existing_by_id:
-                    _deep_merge_dict(existing_by_id[model_id], dict(custom))
-                    continue
-                new_entry = dict(custom)
-                entry.setdefault("models", []).append(new_entry)
-                existing_by_id[model_id] = new_entry
+            _merge_custom_models(entry, pcfg["models"])
 
     return out
 

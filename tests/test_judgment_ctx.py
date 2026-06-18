@@ -147,6 +147,36 @@ def test_semantic_multi_anchor_empty_anchors():
         assert sm.retrieve_multi_anchor(["", "  "]) == []
 
 
+def test_memory_query_ignores_runtime_process_scaffolding_next_step():
+    from core.cortex import intent as cortex_intent
+    from core.judgment.assembler.assemble_context import (
+        _build_context_anchors,
+        _memory_search_query_for_task,
+    )
+
+    task = SimpleNamespace(
+        id=42,
+        title="自驱巡检：分析记忆召回质量",
+        goal="定位长期记忆召回差强人意的原因",
+        next_step=cortex_intent.control_next_verification("下一轮先综合本 tick 工具结果，再决定是否继续取证。"),
+        source="self_drive",
+    )
+
+    query = _memory_search_query_for_task(task, "")
+    anchors = _build_context_anchors(
+        SimpleNamespace(),
+        task,
+        "",
+        "",
+        None,
+        [],
+    )
+
+    assert query == "定位长期记忆召回差强人意的原因"
+    assert anchors[0] == "定位长期记忆召回差强人意的原因"
+    assert "下一轮先综合本 tick 工具结果" not in " ".join(anchors)
+
+
 def test_fill_template_raises_when_variable_missing():
     from core.judgment.context.utils import _fill_template
 
@@ -364,11 +394,12 @@ def test_prefer_tier_for_task_uses_pending_then_task_default():
 
     assert _prefer_tier_for_task(None, task) is None
     assert _prefer_tier_for_task("reader", task) == "reader"
+    assert _prefer_tier_for_task(" Reader ", task) == "reader"
     assert _prefer_tier_for_task("repair", task) == "repair"
     assert _prefer_tier_for_task("reader", task, has_user_message=True) == "reasoner"
     assert _prefer_tier_for_task(None, task, has_user_message=True) == "reasoner"
 
-    task.model_tier = "reasoner"
+    task.model_tier = " Reasoner "
     assert _prefer_tier_for_task(None, task) == "reasoner"
 
     task.model_tier = "invalid"
@@ -379,7 +410,7 @@ def test_prefer_tier_for_task_uses_pending_then_task_default():
         _judgment_output(
             decision="act",
             chosen_action_id="file.read",
-            model_strategy={"next_phase_tier": "reader"},
+            model_strategy={"next_phase_tier": " Reader "},
         )
     ) == "reader"
 
@@ -3048,6 +3079,39 @@ def test_fallback_reply_for_user_does_not_echo_tool_summary_on_success():
     assert "/tmp/a.py" not in reply
 
 
+def test_fallback_reply_for_user_filters_internal_action_first_rationale():
+    from core.loop.shared.logging import _fallback_reply_for_user
+    from tools.registry import ToolResult
+
+    action = _judgment_output(
+        decision="act",
+        chosen_action_id="file.read",
+        rationale="Action-first fallback: 用户给出文件路径且本轮不能空等，先读取路径形成证据。",
+    )
+    result = ToolResult(summary="读取完成")
+
+    reply = _fallback_reply_for_user(action, result, None)
+    assert "Action-first" not in reply
+    assert "本轮不能空等" not in reply
+    assert "正在整理基于证据的答复" in reply
+
+
+def test_fallback_reply_for_user_filters_internal_gate_wait_rationale():
+    from core.loop.shared.logging import _fallback_reply_for_user
+    from tools.registry import ToolResult
+
+    action = _judgment_output(
+        decision="wait",
+        rationale="行为门控制动：file.read /tmp/a 已连续重复 3 次，继续执行没有新增证据。",
+    )
+    result = ToolResult(summary="")
+
+    reply = _fallback_reply_for_user(action, result, None)
+    assert "行为门控" not in reply
+    assert "file.read" not in reply
+    assert "需要更多信息后再继续" in reply
+
+
 @pytest.mark.asyncio
 async def test_finalize_tick_user_reply_falls_back_when_reply_only_empty_for_user_message():
     from core.loop.tick import _finalize_tick_user_reply
@@ -4193,6 +4257,7 @@ async def test_sync_task_progress_state_uses_next_verification_when_no_recovery_
 
 
 async def test_sync_task_progress_state_uses_nested_cortex_next_verification():
+    from core.cortex import intent as cortex_intent
     from core.loop.task.runtime import _sync_task_progress_state
     from store.task import TaskStore
 
@@ -4212,7 +4277,9 @@ async def test_sync_task_progress_state_uses_nested_cortex_next_verification():
             state_delta={
                 "cortex": {
                     "domain": "runtime-loop",
-                    "next_verification": "下一轮先综合本 tick 工具结果，再选择最高信息增量验证动作。",
+                    "next_verification": cortex_intent.control_next_verification(
+                        "下一轮先综合本 tick 工具结果，再选择最高信息增量验证动作。"
+                    ),
                 }
             },
         )

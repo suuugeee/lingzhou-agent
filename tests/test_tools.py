@@ -98,6 +98,52 @@ def test_task_complete_refreshes_active_task_before_growth_guard():
     asyncio.run(_task_complete_refreshes_active_task_before_growth_guard())
 
 
+def test_memory_snapshot_preserves_task_switch_kinds():
+    asyncio.run(_memory_snapshot_preserves_task_switch_kinds())
+
+
+async def _memory_snapshot_preserves_task_switch_kinds():
+    from memory.working import TASK_SWITCH_PRESERVE_KINDS, WMItem, WorkingMemory
+    from tools import memory as memory_tools
+    from tools.registry import ToolContext
+
+    class _FakeTaskStore:
+        async def list_failures(self, limit: int = 5):
+            return [object()] * max(1, min(limit, 2))
+
+    class _FakeEpisodic:
+        def __init__(self) -> None:
+            self.records: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+
+        def record(self, *args: Any, **kwargs: Any) -> None:
+            self.records.append((args, kwargs))
+
+    wm = WorkingMemory(capacity=30)
+    for kind in TASK_SWITCH_PRESERVE_KINDS:
+        wm.add(WMItem(kind=kind, content=f"{kind} 上下文", priority=0.1))
+    wm.add(WMItem(kind="noise", content="不应保留", priority=0.1))
+
+    episodic = _FakeEpisodic()
+    ctx = ToolContext(
+        config=_test_config(),
+        wm=wm,
+        task_store=_FakeTaskStore(),
+        episodic=episodic,
+        semantic=cast("Any", SimpleNamespace()),
+        emotion=cast("Any", SimpleNamespace(valence=0.6, arousal=0.4)),
+        active_task=cast("Any", SimpleNamespace(title="任务上下文切换")),
+    )
+
+    result = await memory_tools.memory_snapshot({}, ctx)
+    kinds = {item["kind"] for item in wm.get_top()}
+
+    assert result.error is None
+    assert TASK_SWITCH_PRESERVE_KINDS.issubset(kinds)
+    assert "noise" not in kinds
+    assert episodic.records
+    assert any("WM 条目" in (str(record[1].get("content", "")) if record[1] else "") for record in episodic.records)
+
+
 async def _worker_rewrites_task_workbench_flat_fields_into_workbench_arg():
     from core.execution import WorkerLayer
     from core.judgment import JudgmentOutput
@@ -281,6 +327,10 @@ def test_task_complete_blocks_real_workbench_state_delta_next_verification():
     asyncio.run(_task_complete_blocks_real_workbench_state_delta_next_verification())
 
 
+def test_task_complete_allows_completion_when_workbench_verification_state_resolved():
+    asyncio.run(_task_complete_allows_completion_when_workbench_verification_state_resolved())
+
+
 def test_task_complete_blocks_external_workbench_next_verification():
     asyncio.run(_task_complete_blocks_external_workbench_next_verification())
 
@@ -289,20 +339,20 @@ def test_task_complete_blocks_english_workbench_next_verification():
     asyncio.run(_task_complete_blocks_english_workbench_next_verification())
 
 
-def test_task_next_verification_completed_word_does_not_hide_actionable_check():
-    from tools.task import _has_actionable_next_verification
-
-    assert _has_actionable_next_verification("确认已完成测试并读取最新 pytest 结果") is True
-    assert _has_actionable_next_verification("已完成，无需继续验证") is False
-    assert _has_actionable_next_verification("already done; no need to rerun") is False
-
-
 def test_task_complete_blocks_semantic_memory_next_verification_until_memory_written():
     asyncio.run(_task_complete_blocks_semantic_memory_next_verification_until_memory_written())
 
 
 def test_task_complete_blocks_self_drive_deferred_implementation_candidate():
     asyncio.run(_task_complete_blocks_self_drive_deferred_implementation_candidate())
+
+
+def test_task_complete_allows_completion_when_next_verification_is_resolved_text():
+    asyncio.run(_task_complete_allows_completion_when_next_verification_is_resolved_text())
+
+
+def test_task_complete_allows_completion_when_control_next_verification_is_task_complete():
+    asyncio.run(_task_complete_allows_completion_when_control_next_verification_is_task_complete())
 
 
 async def _task_complete_blocks_action_first_tasks_until_verifiable_success():
@@ -496,6 +546,158 @@ async def _task_complete_blocks_real_workbench_state_delta_next_verification():
                 tool_name="shell.run",
                 log_text="runs verified",
             )
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_allows_completion_when_workbench_verification_state_resolved():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-verification-state-resolved-complete.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "验证 resolved verification_state 的完成放行",
+                goal="当最新 workbench 的 verification_state resolved 时允许完成",
+                source="external",
+                status="in_progress",
+                result_json={
+                    "cortex": {
+                        "intent": "debug_runtime_issue",
+                        "domain": "runtime-loop",
+                        "next_verification": "遗留的旧文本：下一轮补齐日志证据。",
+                    }
+                },
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={
+                    "summary": "workbench 已更新",
+                    "state_delta": {
+                        "cortex": {
+                            "verification_state": {"status": "resolved", "goal": "已完成核实"},
+                            "run_id": 2026,
+                        }
+                    },
+                    "metadata": {},
+                },
+                log_text="workbench returned resolved state",
+            )
+
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_allows_completion_when_next_verification_is_resolved_text():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-next-verification-resolved-text-complete.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "已足够完成的 next_verification 文案应放行",
+                goal="确认工作台中已完成语义的 next_verification 会放行",
+                source="external",
+                status="in_progress",
+                result_json={
+                    "cortex": {
+                        "intent": "debug_runtime_issue",
+                        "domain": "runtime-loop",
+                        "evidence": ["文本化 next_verification 已表达已足够完成状态。"],
+                    }
+                },
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={
+                    "summary": "workbench 已更新",
+                    "cortex": {
+                        "next_verification": "none：当前证据已足够完成；除非后续 schema 迁移或查询失败，否则不再重复读取同一路径。"
+                    },
+                    "metadata": {},
+                },
+                log_text="workbench recorded resolved next verification text",
+            )
+
+            completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_allows_completion_when_control_next_verification_is_task_complete():
+    from core.cortex import intent as cortex_intent
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-next-verification-control-next-verification-complete.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "control text with task.complete should be non-actionable",
+                goal="确保下一步关闭语义门控文本允许放行",
+                source="external",
+                status="in_progress",
+                result_json={
+                    "cortex": {
+                        "intent": "debug_runtime_issue",
+                        "domain": "runtime-loop",
+                    }
+                },
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={
+                    "summary": "workbench recorded control style next_verification",
+                    "state_delta": {
+                        "cortex": {
+                            "next_verification": cortex_intent.control_next_verification(
+                                "尝试 task.complete 关闭任务；若仍被阻塞，依据阻塞字段补齐缺失的结构化验证状态。"
+                            ),
+                            "run_id": 3001,
+                        }
+                    },
+                    "metadata": {},
+                },
+                log_text="control-style next verification",
+            )
+
             completed = await task_complete({"task_id": task_id}, ctx)
             assert completed.error is None
             assert completed.skipped is False

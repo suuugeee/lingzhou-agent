@@ -105,6 +105,28 @@ def _clip_signal_text(text: str, limit: int = 160) -> str:
     return cleaned[: limit - 3].rstrip() + "..."
 
 
+_INTERNAL_REPLY_BASIS_MARKERS = (
+    "Action-first",
+    "fallback",
+    "行为门控",
+    "行为门控制动",
+    "通用问题解决守卫",
+    "缺少 chosen_action_id",
+    "LLM 输出解析失败",
+    "无效 decision",
+    "未知工具",
+    "list index out of range",
+    "not defined",
+)
+
+
+def _safe_reply_basis(text: str, default: str) -> str:
+    basis = str(text or "").strip()
+    if any(marker in basis for marker in _INTERNAL_REPLY_BASIS_MARKERS):
+        basis = ""
+    return _clip_signal_text(basis or default, 120)
+
+
 def _summarize_state_delta(state_delta: dict[str, Any] | None, limit: int = 120) -> str:
     if not state_delta:
         return ""
@@ -153,10 +175,7 @@ def _fallback_reply_for_user(action: JudgmentOutput, result: ToolResult, active_
         return " ".join(part for part in [f"这轮工具执行失败（状态: error）：{detail}。", next_clause] if part).strip()
 
     if action.decision in {"wait", "pause"}:
-        raw_basis = action.rationale or ""
-        if any(tech in raw_basis for tech in ("缺少 chosen_action_id", "LLM 输出解析失败", "无效 decision", "list index out of range", "not defined")):
-            raw_basis = ""
-        basis = _clip_signal_text(raw_basis or "需要更多信息后再继续。", 120)
+        basis = _safe_reply_basis(action.rationale or "", "需要更多信息后再继续。")
         return " ".join(part for part in [f"我需要先停一下：{basis}", next_clause] if part).strip()
 
     task_status = str((result.state_delta or {}).get("task_status") or "").strip()
@@ -166,5 +185,5 @@ def _fallback_reply_for_user(action: JudgmentOutput, result: ToolResult, active_
         wait_desc = wait_kind + (f"/{wait_key}" if wait_key else "")
         return " ".join(part for part in [f"当前任务已转入等待：{wait_desc}。", next_clause] if part).strip()
 
-    basis = _clip_signal_text(action.rationale or "已完成本轮处理，正在整理基于证据的答复。", 120)
+    basis = _safe_reply_basis(action.rationale or "", "已完成本轮处理，正在整理基于证据的答复。")
     return " ".join(part for part in [f"我已完成本轮处理：{basis}", next_clause] if part).strip()

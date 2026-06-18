@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING, Any
 
 from core.cortex import build_auto_cortex_result_patch
 from core.execution import (
+    WORKER_EXEC,
     build_meta_reflection,
     record_meta_reflection_memory,
     record_run_outcome_memory,
@@ -40,6 +41,30 @@ def _run_monitor_config(run: Run) -> dict[str, Any] | None:
     if run.session_id:
         return {"kind": "process", "session_id": run.session_id}
     return None
+
+
+def _run_update_summary(run: Run, status: str | None = None, **extra: Any) -> dict[str, Any]:
+    summary = {"run_id": run.id, "task_id": run.task_id, "status": status or run.status}
+    summary.update(extra)
+    return summary
+
+
+async def _upsert_task_progress_fact(
+    task_store_or_metabolic: Any,
+    task_id: int | None,
+    value: str,
+    *,
+    source: str,
+) -> None:
+    if not task_id or not value:
+        return
+    await submit_fact(
+        task_store_or_metabolic,
+        key=f"task:{task_id}:progress",
+        value=value,
+        scope="task",
+        source=source,
+    )
 
 
 def _parse_run_monitor_snapshot(raw: str, monitor: dict[str, Any]) -> tuple[str, str, Any]:
@@ -161,7 +186,7 @@ async def _refresh_run_via_fact_monitor(
     raw, found = await task_store.get_fact(key)
     if not found:
         _log.debug("[run-monitor] fact key=%s run=%s snapshot missing", key, run.id)
-        return {"run_id": run.id, "task_id": run.task_id, "status": run.status}
+        return _run_update_summary(run)
 
     status, progress, payload = _parse_run_monitor_snapshot(raw, monitor)
     crystal = progress if progress and progress != run.progress else ""
@@ -182,14 +207,12 @@ async def _refresh_run_via_fact_monitor(
         proposal_run_id=run.id,
         decision_basis="run_monitor_fact_snapshot",
     )
-    if run.task_id and crystal:
-        await submit_fact(
-            metabolic or task_store,
-            key=f"task:{run.task_id}:progress",
-            value=crystal,
-            scope="task",
-            source="run_refresh/monitor",
-        )
+    await _upsert_task_progress_fact(
+        metabolic or task_store,
+        task_id=run.task_id,
+        value=crystal,
+        source="run_refresh/monitor",
+    )
     if status in {"succeeded", "failed", "cancelled"}:
         summary = progress or (str(payload.get("summary") or "") if isinstance(payload, dict) else raw) or f"run {status}"
         error = str(payload.get("error") or "") if isinstance(payload, dict) else (raw if status == "failed" else "")
@@ -256,13 +279,7 @@ async def _refresh_run_via_fact_monitor(
             semantic=semantic,
             metabolic=metabolic,
         )
-    return {
-        "run_id": run.id,
-        "task_id": run.task_id,
-        "status": status,
-        "session_id": run.session_id,
-        "crystal": crystal,
-    }
+    return _run_update_summary(run, status, session_id=run.session_id, crystal=crystal)
 
 
 async def _refresh_run_via_process_monitor(
@@ -278,11 +295,11 @@ async def _refresh_run_via_process_monitor(
 ) -> dict[str, Any]:
     session_id = str(monitor.get("session_id") or run.session_id or "").strip()
     if not session_id or manager is None:
-        return {"run_id": run.id, "task_id": run.task_id, "status": run.status}
+        return _run_update_summary(run)
 
     info = manager.get(session_id)
     if info is None:
-        return {"run_id": run.id, "task_id": run.task_id, "status": run.status}
+        return _run_update_summary(run)
     if not info.finished:
         _log.debug("[run-monitor] process session=%s run=%s still running", session_id, run.id)
         stdout_text = info.stdout or ""
@@ -303,21 +320,13 @@ async def _refresh_run_via_process_monitor(
                 proposal_run_id=run.id,
                 decision_basis="run_monitor_progress_update",
             )
-            if run.task_id and crystal_excerpt:
-                await submit_fact(
-                    metabolic or task_store,
-                    key=f"task:{run.task_id}:progress",
-                    value=crystal_excerpt,
-                    scope="task",
-                    source="run_refresh/progress",
-                )
-        return {
-            "run_id": run.id,
-            "task_id": run.task_id,
-            "status": "running",
-            "session_id": session_id,
-            "crystal": crystal_excerpt,
-        }
+            await _upsert_task_progress_fact(
+                metabolic or task_store,
+                task_id=run.task_id,
+                value=crystal_excerpt,
+                source="run_refresh/progress",
+            )
+        return _run_update_summary(run, "running", session_id=session_id, crystal=crystal_excerpt)
 
     status = "succeeded" if (info.return_code in (0, None) and not info.timed_out and not info.error) else "failed"
     _log.info("[run-monitor] process session=%s run=%s finished status=%s", session_id, run.id, status)
@@ -405,7 +414,7 @@ async def _refresh_run_via_process_monitor(
         semantic=semantic,
         metabolic=metabolic,
     )
-    return {"run_id": run.id, "task_id": run.task_id, "status": status, "session_id": session_id}
+    return _run_update_summary(run, status, session_id=session_id)
 
 
 async def refresh_running_runs(
@@ -438,10 +447,10 @@ async def refresh_running_runs(
             elif str(monitor.get("kind") or "") == "process":
                 updates.append(await _refresh_run_via_process_monitor(task_store, run, monitor, manager=_MANAGER, episodic=episodic, semantic=semantic, memory_cfg=memory_cfg, metabolic=metabolic))
             else:
-                updates.append({"run_id": run.id, "task_id": run.task_id, "status": run.status})
+                updates.append(_run_update_summary(run))
             continue
-        if run.worker_type != "exec-worker" or not run.session_id or _MANAGER is None:
-            updates.append({"run_id": run.id, "task_id": run.task_id, "status": run.status})
+        if run.worker_type != WORKER_EXEC or not run.session_id or _MANAGER is None:
+            updates.append(_run_update_summary(run))
             continue
         updates.append(await _refresh_run_via_process_monitor(task_store, run, {"kind": "process", "session_id": run.session_id}, manager=_MANAGER, episodic=episodic, semantic=semantic, memory_cfg=memory_cfg, metabolic=metabolic))
     if updates:

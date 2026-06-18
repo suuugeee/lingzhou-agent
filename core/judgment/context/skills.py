@@ -16,6 +16,13 @@ def _short_skill_desc(desc: str, limit: int = 200) -> str:
     return text
 
 
+def _skill_origin(skill: Skill) -> str:
+    origin = str(getattr(skill, "origin", "dynamic") or "dynamic")
+    if origin == "workspace" and getattr(skill, "source_path", ""):
+        return skill.source_path
+    return origin
+
+
 def _fmt_skill_catalog(skills: list[Skill], *, pinned_names: set[str] | None = None) -> str:
     if not skills:
         return "（暂无 skills）"
@@ -40,9 +47,7 @@ def _fmt_skill_catalog(skills: list[Skill], *, pinned_names: set[str] | None = N
 def _fmt_primary_skill(skill: Skill | None) -> str:
     if skill is None:
         return "（本轮无明显 skill 候选；按一般 judgment 规则执行。若遇到专业流程或项目特有规则，再查 catalog 并按需 skill.activate。）"
-    origin = str(getattr(skill, "origin", "dynamic") or "dynamic")
-    if origin == "workspace" and getattr(skill, "source_path", ""):
-        origin = skill.source_path
+    origin = _skill_origin(skill)
     return (
         f"**{skill.name}** — {skill.description}\n"
         f"> 候选 skill，不代表已激活。source: {origin}\n"
@@ -57,9 +62,7 @@ def _fmt_skills(skills: list[Skill]) -> str:
         "以下是当前上下文下较相关的候选 skills。它们目前仍只是 metadata 线索，不是已注入的完整 instructions。",
     ]
     for skill in skills:
-        origin = str(getattr(skill, "origin", "dynamic") or "dynamic")
-        if origin == "workspace" and getattr(skill, "source_path", ""):
-            origin = skill.source_path
+        origin = _skill_origin(skill)
         parts.append(f"**{skill.name}** [{origin}] — {skill.description}")
         parts.append(f"> activation: skill.activate(name=\"{skill.name}\")")
     return "\n".join(parts)

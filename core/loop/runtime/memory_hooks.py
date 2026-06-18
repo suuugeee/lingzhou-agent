@@ -8,13 +8,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from core.metabolic import add_semantic_memory, create_task, submit_fact
+from core.judgment.tiers import REPLY_ONLY_FALLBACK_TIER
 from memory.consolidation import (
     build_consolidation_plan,
     build_daily_summary_node,
     current_week_key,
     merge_promoted_node,
 )
-from memory.working import WMItem
+from memory.working import TASK_SWITCH_PRESERVE_KINDS, WMItem
 
 from ..cycle.focus import claim_focus_task, resolve_focus_task
 
@@ -37,6 +38,29 @@ def _fmt_drive_template_list(items: Any) -> str:
     if not isinstance(items, list) or not items:
         return "- （未提供）"
     return "\n".join(f"- {str(item)}" for item in items)
+
+
+def _self_drive_signal_lines(loop: Any, signal: Any, drive_type: str) -> list[str]:
+    return [
+        "[自驱事件]",
+        f"type: {drive_type}",
+        "scope: observation",
+        f"idle_ticks: {loop._behavior.wait_streak}",
+        f"curiosity_score: {signal.curiosity_score:.2f}",
+        f"signal_rationale: {signal.rationale}",
+    ]
+
+
+def _self_drive_task_status_lines(
+    pending_count: int,
+    created_task_id: int | None,
+    last_done_ago: str,
+) -> list[str]:
+    return [
+        f"pending_self_drive_tasks: {pending_count}",
+        f"created_self_drive_task: {created_task_id or 'none'}",
+        f"last_self_drive_done: {last_done_ago}",
+    ]
 
 
 def build_task_anchor_item(
@@ -104,7 +128,7 @@ async def _create_self_drive_task(loop: Any, task_template: dict[str, Any], sign
         "source": "self_drive",
         "status": "pending",
         "next_step": str(task_template.get("next_step") or ""),
-        "model_tier": "reasoner",
+        "model_tier": REPLY_ONLY_FALLBACK_TIER,
         "result_json": {"cortex": cortex},
         "extras": {
             "drive_type": str(getattr(signal, "drive_type", "") or "explore"),
@@ -185,6 +209,12 @@ async def emit_self_drive_signal(loop: Any) -> None:
     # 为 LLM 提供可裁决上下文：待处理自驱任务数 + 最近一次自驱完成时长。
     runnable = await loop._task_store.list_runnable_tasks(limit=20)
     pending_sd = [task for task in runnable if getattr(task, "source", None) == "self_drive"]
+    if pending_sd:
+        _log.info(
+            "[self_drive] skip signal pending_self_drive_tasks=%d active_focus_preserved",
+            len(pending_sd),
+        )
+        return
     recent_done = await loop._task_store.list_tasks(status="done", limit=10)
     last_done_ago = "无"
     for item in recent_done:
@@ -200,59 +230,44 @@ async def emit_self_drive_signal(loop: Any) -> None:
     task_template = loop._self_drive.generate_exploration_task(
         signal.suggested_domain or "self_evolution"
     )
-    created_task_id: int | None = None
-    if not pending_sd:
-        created_task_id = await _create_self_drive_task(loop, task_template, signal)
+    created_task_id = await _create_self_drive_task(loop, task_template, signal)
+    status_lines = _self_drive_task_status_lines(len(pending_sd), created_task_id, last_done_ago)
     if signal.drive_type == "consolidate":
-        drive_content = (
-            "[自驱事件]\n"
-            "type: consolidation\n"
-            "scope: observation\n"
-            f"idle_ticks: {loop._behavior.wait_streak}\n"
-            f"curiosity_score: {signal.curiosity_score:.2f}\n"
-            f"signal_rationale: {signal.rationale}\n"
-            f"pending_self_drive_tasks: {len(pending_sd)}\n"
-            f"created_self_drive_task: {created_task_id or 'none'}\n"
-            f"last_self_drive_done: {last_done_ago}\n"
-            "observed_need: recent traces may benefit from consolidation before new exploration.\n"
-            "proposal:\n"
-            "- consolidate_memory: 把近期自驱观察结果沉淀为可复用经验。\n"
-            "- inspect_failures: 评估重复失败是否是可提炼的连续性边界。\n"
-            "open_questions:\n"
-            "- 哪些近期任务结论已经稳定，值得写入长期记忆？\n"
-            "- 哪些失败或重复模式需要被提炼成可复用经验？\n"
-            "- SOUL.md / DREAMS.md 是否出现与实际行为不一致的认知偏差？\n"
-            "available_directions: consolidate_memory | inspect_failures | update_identity_reflection | ignore_signal"
-        )
+        drive_content = "\n".join([
+            *_self_drive_signal_lines(loop, signal, "consolidation"),
+            *status_lines,
+            "observed_need: recent traces may benefit from consolidation before new exploration.",
+            "proposal:",
+            "- consolidate_memory: 把近期自驱观察结果沉淀为可复用经验。",
+            "- inspect_failures: 评估重复失败是否是可提炼的连续性边界。",
+            "open_questions:",
+            "- 哪些近期任务结论已经稳定，值得写入长期记忆？",
+            "- 哪些失败或重复模式需要被提炼成可复用经验？",
+            "- SOUL.md / DREAMS.md 是否出现与实际行为不一致的认知偏差？",
+            "available_directions: consolidate_memory | inspect_failures | update_identity_reflection | ignore_signal",
+        ])
     else:
-        drive_content = (
-            "[自驱事件]\n"
-            "type: exploration\n"
-            "scope: observation\n"
-            f"idle_ticks: {loop._behavior.wait_streak}\n"
-            f"curiosity_score: {signal.curiosity_score:.2f}\n"
-            f"signal_rationale: {signal.rationale}\n"
-            f"candidate_domain: {signal.suggested_domain or 'self_evolution'}\n"
-            f"pending_self_drive_tasks: {len(pending_sd)}\n"
-            f"created_self_drive_task: {created_task_id or 'none'}\n"
-            f"last_self_drive_done: {last_done_ago}\n"
-            f"candidate_task_title: {task_template['title']}\n"
-            f"candidate_task_goal: {task_template['goal']}\n"
-            f"candidate_next_step: {task_template.get('next_step', '(未提供)')}\n"
-            f"candidate_question: {task_template.get('question', '(未提供)')}\n"
-            "candidate_evidence_needed:\n"
-            f"{_fmt_drive_template_list(task_template.get('evidence_needed'))}\n"
-            f"candidate_done_condition: {task_template.get('done_condition', '(未提供)')}\n"
-            "proposal:\n"
-            "- create_task: 为候选方向建立一次轻量探索任务。\n"
-            "- observe_more: 先补证据再决策。\n"
-            "- consolidate_first: 先完成 consolidation，再重评。\n"
-            "open_questions:\n"
-            "- 这个候选方向是否真的能改善当前生命连续性或能力边界？\n"
-            "- 是否已有未完成 self_drive 任务覆盖同一问题？\n"
-            "- 当前证据是否足够创建任务，还是应先观察、等待或忽略？\n"
-            "available_directions: create_self_drive_task | gather_evidence | consolidate_first | ignore_signal"
-        )
+        drive_content = "\n".join([
+            *_self_drive_signal_lines(loop, signal, "exploration"),
+            f"candidate_domain: {signal.suggested_domain or 'self_evolution'}",
+            *status_lines,
+            f"candidate_task_title: {task_template['title']}",
+            f"candidate_task_goal: {task_template['goal']}",
+            f"candidate_next_step: {task_template.get('next_step', '(未提供)')}",
+            f"candidate_question: {task_template.get('question', '(未提供)')}",
+            "candidate_evidence_needed:",
+            _fmt_drive_template_list(task_template.get('evidence_needed')),
+            f"candidate_done_condition: {task_template.get('done_condition', '(未提供)')}",
+            "proposal:",
+            "- create_task: 为候选方向建立一次轻量探索任务。",
+            "- observe_more: 先补证据再决策。",
+            "- consolidate_first: 先完成 consolidation，再重评。",
+            "open_questions:",
+            "- 这个候选方向是否真的能改善当前生命连续性或能力边界？",
+            "- 是否已有未完成 self_drive 任务覆盖同一问题？",
+            "- 当前证据是否足够创建任务，还是应先观察、等待或忽略？",
+            "available_directions: create_self_drive_task | gather_evidence | consolidate_first | ignore_signal",
+        ])
     loop._wm.add(WMItem(
         kind="self_drive",
         content=drive_content,
@@ -401,9 +416,8 @@ async def consolidate(loop: Any, active_task: Any) -> None:
             source="loop/daily_summary",
         )
 
-    # 保留身份锚点(bootstrap_identity)和自我感知信号(self_awareness)
-    # self_awareness 包含行为循环检测等信号，清除后 LLM 会失去对空转的感知
-    loop._wm.clear(preserve_kinds={"bootstrap_identity", "self_awareness"})
+    # 保留身份锚点、任务关键语境与自我感知信号，避免整合后失去任务切换所需上下文
+    loop._wm.clear(preserve_kinds=set(TASK_SWITCH_PRESERVE_KINDS))
 
     # 清空后注入任务锚点,避免下一轮因 WM 为空而丢失任务上下文
     if active_task:
@@ -418,9 +432,11 @@ async def consolidate(loop: Any, active_task: Any) -> None:
 
     # 同步感知基准,避免下一轮因 WM 大小骤降产生假预测误差
     loop._perception.reset_wm_baseline(len(loop._wm))
+    preserved_kinds = ",".join(sorted(TASK_SWITCH_PRESERVE_KINDS))
     _log.info(
-        "[consolidate] WM items=%d semantic_promoted=%d facts_promoted=%d, WM cleared (bootstrap+task_anchor preserved)",
+        "[consolidate] WM items=%d semantic_promoted=%d facts_promoted=%d, WM preserved kinds=%s",
         len(items),
         len(plan.semantic_nodes),
         len(plan.facts),
+        preserved_kinds,
     )

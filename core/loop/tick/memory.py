@@ -200,6 +200,20 @@ async def _crystallize_chat_to_semantic(
         )
 
 
+async def _resolve_interlocutor_id(loop: Any, *, resolved_chat_id: str | None, active_task: Any) -> str:
+    for key in (
+        f"chat:{resolved_chat_id}:interlocutor_profile_id" if resolved_chat_id else "",
+        f"task:{active_task.id}:interlocutor_profile_id" if active_task is not None else "",
+    ):
+        if not key:
+            continue
+        value, exists = await loop._task_store.get_fact(key)
+        normalized = str(value or "").strip()
+        if exists and normalized:
+            return normalized
+    return ""
+
+
 async def _post_tick_memory(
     loop: Any,
     action: Any,
@@ -231,18 +245,11 @@ async def _post_tick_memory(
 
     affect = {"valence": loop._emotion.valence, "arousal": loop._emotion.arousal}
     resolved_chat_id = await _resolve_reply_chat_id(loop, active_task, chat_id)
-    resolved_interlocutor_id = ""
-    for key in (
-        f"chat:{resolved_chat_id}:interlocutor_profile_id" if resolved_chat_id else "",
-        f"task:{active_task.id}:interlocutor_profile_id" if active_task is not None else "",
-    ):
-        if not key:
-            continue
-        value, exists = await loop._task_store.get_fact(key)
-        normalized = str(value or "").strip()
-        if exists and normalized:
-            resolved_interlocutor_id = normalized
-            break
+    resolved_interlocutor_id = await _resolve_interlocutor_id(
+        loop,
+        resolved_chat_id=resolved_chat_id,
+        active_task=active_task,
+    )
     if action.rationale:
         loop._episodic.record(
             role="assistant",

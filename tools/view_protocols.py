@@ -13,6 +13,7 @@
 """
 from __future__ import annotations
 
+from core.execution.run_profile import RUN_TYPE_TOOL_CHAIN, WORKER_TOOL_CHAIN
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -102,8 +103,8 @@ class TaskStoreViewProtocol(Protocol):
         self,
         *,
         task_id: int = 0,
-        run_type: str = "tool_chain",
-        worker_type: str = "tool-chain-worker",
+        run_type: str = RUN_TYPE_TOOL_CHAIN,
+        worker_type: str = WORKER_TOOL_CHAIN,
         status: str = "running",
         input_json: dict[str, Any] | None = None,
         output_json: dict[str, Any] | None = None,

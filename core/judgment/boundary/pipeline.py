@@ -101,9 +101,10 @@ def _build_recovery_fallback_action(
         and _has_tool("memory.search")
     ):
         return "memory.search", {"query": next_verification[:420], "top_k": 5}
-    if "task.list" in lowered and _has_tool("task.list"):
-        return "task.list", {"status": "all", "limit": 8}
-    if _has_tool("task.list"):
+    if (
+        any(marker in lowered for marker in ("task.list", "任务列表", "任务状态", "列出任务"))
+        and _has_tool("task.list")
+    ):
         return "task.list", {"status": "all", "limit": 8}
     return None
 
@@ -203,6 +204,31 @@ def _captured_context_values(context_text: str, kind: str) -> list[str]:
     return values
 
 
+def _carry_output_fields(output: JudgmentOutput) -> dict[str, Any]:
+    return {
+        "reflection": output.reflection,
+        "next_step": output.next_step,
+        "model_strategy": dict(output.model_strategy or {}),
+        "applied_skills": list(output.applied_skills or []),
+    }
+
+
+def _fallback_action_output(
+    output: JudgmentOutput,
+    *,
+    chosen_action_id: str,
+    params: dict[str, Any],
+    rationale: str,
+) -> JudgmentOutput:
+    return JudgmentOutput(
+        decision="act",
+        chosen_action_id=chosen_action_id,
+        params=params,
+        rationale=rationale,
+        **_carry_output_fields(output),
+    )
+
+
 def enforce_action_first_progress(
     output: JudgmentOutput,
     *,
@@ -217,53 +243,37 @@ def enforce_action_first_progress(
 
     urls = _captured_context_values(context_text, "url")
     if urls and _registry_has(registry, "web.fetch"):
-        return JudgmentOutput(
-            decision="act",
+        return _fallback_action_output(
+            output,
             chosen_action_id="web.fetch",
             params={"url": urls[0], "max_chars": 20000},
             rationale="Action-first fallback: 用户给出 URL 且本轮不能空等，先抓取 URL 形成证据。",
-            reflection=output.reflection,
-            next_step=output.next_step,
-            model_strategy=dict(output.model_strategy or {}),
-            applied_skills=list(output.applied_skills or []),
         )
 
     paths = _captured_context_values(context_text, "path")
     if paths:
         path = paths[0]
         if path.endswith("/") and _registry_has(registry, "file.list"):
-            return JudgmentOutput(
-                decision="act",
+            return _fallback_action_output(
+                output,
                 chosen_action_id="file.list",
                 params={"path": path},
                 rationale="Action-first fallback: 用户给出目录路径且本轮不能空等，先列目录形成证据。",
-                reflection=output.reflection,
-                next_step=output.next_step,
-                model_strategy=dict(output.model_strategy or {}),
-                applied_skills=list(output.applied_skills or []),
             )
         if _registry_has(registry, "file.read"):
-            return JudgmentOutput(
-                decision="act",
+            return _fallback_action_output(
+                output,
                 chosen_action_id="file.read",
                 params={"path": path, "max_chars": 12000},
                 rationale="Action-first fallback: 用户给出文件路径且本轮不能空等，先读取路径形成证据。",
-                reflection=output.reflection,
-                next_step=output.next_step,
-                model_strategy=dict(output.model_strategy or {}),
-                applied_skills=list(output.applied_skills or []),
             )
 
     if _registry_has(registry, "task.list"):
-        return JudgmentOutput(
-            decision="act",
+        return _fallback_action_output(
+            output,
             chosen_action_id="task.list",
             params={"status": "all", "limit": 8},
             rationale="Action-first fallback: 本轮必须推进但缺少更具体安全输入，先读取任务状态形成证据。",
-            reflection=output.reflection,
-            next_step=output.next_step,
-            model_strategy=dict(output.model_strategy or {}),
-            applied_skills=list(output.applied_skills or []),
         )
 
     return JudgmentOutput(

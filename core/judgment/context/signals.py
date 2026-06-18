@@ -122,6 +122,7 @@ def _fmt_uncertainty_sections(
 
 
 _WM_SECTION_PAT = re.compile(r"^(?P<name>[A-Za-z0-9_\u4e00-\u9fff]+):\s*(?P<tail>.*)$")
+_NO_WM_PROPOSAL_SECTIONS = "（WM 中未发现可执行提案区块）"
 
 
 def _extract_wm_block(content: str, marker: str) -> list[str]:
@@ -164,7 +165,7 @@ def _fmt_wm_proposal_sections(wm_items: list[dict[str, object]]) -> str:
     目的：让 judgment 上下文不仅看到内容，还能在“可落地动作”层面给出可决策候选。
     """
     if not wm_items:
-        return "（WM 中未发现可执行提案区块）"
+        return _NO_WM_PROPOSAL_SECTIONS
 
     lines: list[str] = []
     max_items = 3
@@ -211,5 +212,5 @@ def _fmt_wm_proposal_sections(wm_items: list[dict[str, object]]) -> str:
         count += 1
 
     if not lines:
-        return "（WM 中未发现可执行提案区块）"
+        return _NO_WM_PROPOSAL_SECTIONS
     return "\n".join(lines)

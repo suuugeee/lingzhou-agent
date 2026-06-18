@@ -287,6 +287,10 @@ def test_self_drive_signal_does_not_duplicate_pending_growth_task():
     asyncio.run(_self_drive_signal_does_not_duplicate_pending_growth_task())
 
 
+def test_self_drive_signal_preserves_in_progress_focus_when_exploration_stuck():
+    asyncio.run(_self_drive_signal_preserves_in_progress_focus_when_exploration_stuck())
+
+
 def test_self_drive_feedback_receives_tick_event():
     from core.loop.tick.exec import _update_self_drive_from_tick
     from tools.registry import ToolResult
@@ -531,6 +535,48 @@ async def _self_drive_signal_does_not_duplicate_pending_growth_task():
             await loop.provider.close()
 
 
+async def _self_drive_signal_preserves_in_progress_focus_when_exploration_stuck():
+    os.environ.setdefault("DASHSCOPE_API_KEY", "test-key")
+    os.environ.setdefault("GITHUB_TOKEN", "test-token")
+    from core.config import Config
+    from core.loop import CognitionLoop
+    from core.loop.cycle.focus import claim_focus_task
+
+    cfg = Config.load(_proj_root() / "lingzhou.json.example")
+    with tempfile.TemporaryDirectory() as d:
+        cfg.loop.db_path = f"{d}/state/runtime.db"
+        cfg.loop.memory_dir = f"{d}/memory"
+        cfg.loop.workspace_dir = f"{d}/workspace"
+        cfg.loop.act = False
+        cfg.evolution.enabled = False
+
+        loop = CognitionLoop(cfg)
+        await loop.task_store.open()
+        try:
+            existing_id = await loop.task_store.add_task(
+                "已有进行中自驱任务",
+                goal="保持当前焦点，不再创建新探索",
+                source="self_drive",
+                status="in_progress",
+                next_step="继续读取当前关键链路",
+            )
+            existing = await loop.task_store.get_task_by_id(existing_id)
+            assert existing is not None
+            await claim_focus_task(loop, existing, clear_current=True)
+            loop._behavior._wait_streak = cfg.thresholds.curiosity_idle_min_cycles
+            loop._behavior._read_streak_count = cfg.loop.behavior_streak_threshold + 2
+
+            await loop._emit_self_drive_signal()
+
+            tasks = await loop.task_store.list_tasks(limit=20)
+            self_drive_tasks = [task for task in tasks if task.source == "self_drive"]
+            assert [task.id for task in self_drive_tasks] == [existing_id]
+            assert [item for item in loop._wm.get_top(10) if item["kind"] == "self_drive"] == []
+        finally:
+            await loop.task_store.close()
+            await loop.provider.close()
+
+
 def test_self_drive_signal_bypasses_idle_judge_aggregation():
     asyncio.run(_self_drive_signal_bypasses_idle_judge_aggregation())
 
@@ -660,7 +706,54 @@ async def _continue_phase_records_workbench_when_inner_round_limit_reached():
     workbench = execution.actions[-1].params["workbench"]
     assert workbench["recovery_state"] == "continue_round_limit_reached"
     assert "本 tick continue 阶段已执行 2 轮工具续判" in workbench["evidence"][0]
-    assert "下一轮先综合本 tick 工具结果" in workbench["next_verification"]
+    assert "基于最近 file.read 成功结果收敛判断" in workbench["next_verification"]
+
+
+def test_continue_round_limit_prefers_runtime_recovery_next_step():
+    from core.loop.shared.continue_phase import _specific_round_limit_next_verification
+
+    next_verification = _specific_round_limit_next_verification([
+        {
+            "tool": "shell.run",
+            "status": "skipped",
+            "error": "ToolInputInvalid",
+            "summary": "shell.run missing_params=command",
+            "state_delta": {
+                "tool_input_invalid": True,
+                "missing_params": ["command"],
+                "recovery_next_step": "按 shell.run 的 manifest 重新调用工具；补齐必填参数 command。",
+            },
+        }
+    ])
+
+    assert next_verification == "按 shell.run 的 manifest 重新调用工具；补齐必填参数 command。"
+
+
+def test_continue_round_limit_ignores_control_text_when_deriving_next_verification():
+    from core.cortex import intent as cortex_intent
+    from core.loop.shared.continue_phase import _specific_round_limit_next_verification
+
+    next_verification = _specific_round_limit_next_verification([
+        {
+            "tool": "task.workbench",
+            "status": "succeeded",
+            "state_delta": {
+                "next_verification": cortex_intent.control_next_verification(
+                    "下一轮先综合本 tick 工具结果，确认是否已经足够回答/完成；"
+                    "若不足，再选择一个最高信息增量的验证动作。"
+                ),
+            },
+        },
+        {
+            "tool": "shell.run",
+            "status": "succeeded",
+            "state_delta": {
+                "recovery_next_step": "按 shell.run 的 manifest 重新调用工具；补齐必填参数 command。",
+            },
+        },
+    ])
+
+    assert next_verification == "按 shell.run 的 manifest 重新调用工具；补齐必填参数 command。"
 
 
 async def _continue_phase_gates_repeated_same_action_before_dispatch():

@@ -4,6 +4,8 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from core.execution.run_profile import RUN_TYPE_TOOL_CHAIN, WORKER_TOOL_CHAIN
+
 _LOCAL_FACT_PREFIXES: tuple[str, ...] = (
     "durable_failure:",
 )
@@ -170,8 +172,8 @@ class _SubagentTaskStoreView:  # noqa: D101 - internal view for subagent tick co
         self._local.runs[run_id] = Run(
             id=run_id,
             task_id=int(kwargs.get("task_id", 0) or 0),
-            run_type=str(kwargs.get("run_type", "tool_chain") or "tool_chain"),
-            worker_type=str(kwargs.get("worker_type", "tool-chain-worker") or "tool-chain-worker"),
+            run_type=str(kwargs.get("run_type", RUN_TYPE_TOOL_CHAIN) or RUN_TYPE_TOOL_CHAIN),
+            worker_type=str(kwargs.get("worker_type", WORKER_TOOL_CHAIN) or WORKER_TOOL_CHAIN),
             status=str(kwargs.get("status", "running") or "running"),
             created_at=now,
             started_at=now,

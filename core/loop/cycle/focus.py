@@ -11,9 +11,12 @@ from __future__ import annotations
 
 import contextlib
 import logging
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from core.metabolic import delete_fact, mark_task_waiting, resume_task, submit_fact
+
+from .dispatcher import TickJob
 
 if TYPE_CHECKING:
     from core.judgment import JudgmentOutput
@@ -26,14 +29,102 @@ _FOCUS_CURRENT_TASK_KEY = "focus:current_task_id"
 _FOCUS_CHAT_PREFIX = "focus:chat:"
 _RUNNABLE_STATUSES = frozenset({"pending", "ready", "in_progress", "resumed"})
 _OPEN_STATUSES = frozenset({*tuple(_RUNNABLE_STATUSES), "waiting"})
+_RUNNABLE_STATUS_ORDER = ("pending", "ready", "in_progress", "resumed")
+_OPEN_STATUS_ORDER = ("pending", "ready", "in_progress", "resumed", "waiting")
+
+
+@dataclass(frozen=True)
+class TickDispatcherState:
+    enabled: bool
+    can_accept: bool
+    running_count: int
+    pending_count: int
+
+    @property
+    def has_work(self) -> bool:
+        return self.running_count > 0 or self.pending_count > 0
+
+    @property
+    def is_full(self) -> bool:
+        return not self.can_accept
+
+
+def _tick_dispatcher(loop: Any):
+    return getattr(loop, "_tick_dispatcher", None)
+
+
+def _tick_dispatcher_state(loop: Any) -> TickDispatcherState:
+    dispatcher = _tick_dispatcher(loop)
+    enabled = bool(dispatcher is not None and getattr(dispatcher, "enabled", False))
+    if not enabled:
+        return TickDispatcherState(enabled=False, can_accept=True, running_count=0, pending_count=0)
+
+    can_accept = getattr(dispatcher, "can_accept", None)
+    can_accept_value = True
+    if callable(can_accept):
+        with contextlib.suppress(Exception):
+            can_accept_value = bool(can_accept())
+
+    return TickDispatcherState(
+        enabled=enabled,
+        can_accept=can_accept_value,
+        running_count=_tick_dispatcher_count(dispatcher, field="running_count"),
+        pending_count=_tick_dispatcher_count(dispatcher, field="pending_count"),
+    )
+
+
+def _tick_dispatcher_enabled(loop: Any) -> bool:
+    return _tick_dispatcher_state(loop).enabled
+
+
+def _tick_dispatcher_has_capacity(loop: Any) -> bool:
+    return _tick_dispatcher_state(loop).can_accept
+
+
+def _tick_dispatcher_is_full(loop: Any) -> bool:
+    return not _tick_dispatcher_has_capacity(loop)
+
+
+def _tick_dispatcher_has_work(loop: Any) -> bool:
+    return _tick_dispatcher_state(loop).has_work
+
+
+def _tick_dispatcher_count(dispatcher: Any, *, field: str) -> int:
+    return int(getattr(dispatcher, field, 0) or 0)
+
+
+@dataclass(frozen=True)
+class TickDispatchContext:
+    dispatch_cycle: int
+    chain_key: str
+    active_task: Any | None
+
+
+@dataclass(frozen=True)
+class TickDispatchResult:
+    context: TickDispatchContext
+    accepted: bool
+    can_retry: bool
 
 
 def _normalize_chat_id(chat_id: str | None) -> str:
     return str(chat_id or "").strip()
 
 
+def _task_status(task: Task | None) -> str:
+    return str(getattr(task, "status", "") or "").strip()
+
+
 def _task_is_runnable(task: Task | None) -> bool:
-    return task is not None and str(getattr(task, "status", "") or "") in _RUNNABLE_STATUSES
+    return task is not None and _task_status(task) in _RUNNABLE_STATUSES
+
+
+def _task_is_waiting(task: Task | None) -> bool:
+    return task is not None and _task_status(task) == "waiting"
+
+
+def _task_is_open(task: Task | None) -> bool:
+    return task is not None and _task_status(task) in _OPEN_STATUSES
 
 
 def _clear_terminal_task_attention(loop: Any, task: Task | None) -> None:
@@ -123,9 +214,7 @@ async def _safe_get_active(task_store: Any) -> Task | None:
 async def _safe_list_open_tasks(task_store: Any, *, include_waiting: bool, limit: int = 50) -> list[Task]:
     lister = getattr(task_store, "list_open_tasks", None)
     if lister is not None:
-        statuses = ("in_progress", "resumed", "ready", "pending", "waiting") if include_waiting else (
-            "in_progress", "resumed", "ready", "pending"
-        )
+        statuses = _OPEN_STATUS_ORDER if include_waiting else _RUNNABLE_STATUS_ORDER
         with contextlib.suppress(Exception):
             rows = await lister(limit=limit, statuses=statuses)
             return list(rows or [])
@@ -276,7 +365,7 @@ async def _load_focus_task_from_fact(loop: Any, key: str, *, include_waiting: bo
         return None
     if _task_is_runnable(task):
         return task
-    if include_waiting and str(getattr(task, "status", "") or "") == "waiting":
+    if include_waiting and _task_is_waiting(task):
         return task
     return None
 
@@ -322,6 +411,111 @@ async def resolve_focus_task(
     return None
 
 
+async def resolve_tick_dispatch_context(
+    loop: Any,
+    cycle: int,
+    *,
+    source: str,
+    chat_id: str | None = None,
+    include_waiting: bool = False,
+    fallback_active: bool = False,
+) -> TickDispatchContext:
+    """返回可复用的 tick 分发上下文（分发周期、链路键、当前活跃任务）。"""
+    normalized_chat_id = _normalize_chat_id(chat_id)
+    dispatch_cycle = cycle
+    with contextlib.suppress(Exception):
+        dispatch_cycle = await loop._next_dispatch_cycle()
+    active_task = None
+    with contextlib.suppress(Exception):
+        active_task = await resolve_focus_task(
+            loop,
+            chat_id=normalized_chat_id or None,
+            include_waiting=include_waiting,
+            fallback_active=fallback_active,
+        )
+    chain_chat_id = normalized_chat_id if active_task is None else None
+    chain_key = "default"
+    with contextlib.suppress(Exception):
+        chain_key = loop._resolve_tick_chain_key(
+            active_task=active_task,
+            chat_id=chain_chat_id,
+            source=source,
+        )
+    return TickDispatchContext(
+        dispatch_cycle=dispatch_cycle,
+        chain_key=chain_key,
+        active_task=active_task,
+    )
+
+
+async def try_dispatch_tick_job(
+    loop: Any,
+    cycle: int,
+    *,
+    source: str,
+    user_message: str = "",
+    chat_id: str | None = None,
+    chat_message_ids: tuple[int, ...] = (),
+    include_waiting: bool = False,
+    fallback_active: bool = False,
+) -> TickDispatchResult:
+    """尝试把 tick 任务放入 dispatcher。
+
+    - accepted=False 且 can_retry=False：dispatcher 不可用，交给上层走 direct 路径
+    - accepted=False 且 can_retry=True：队列已满，适合回退重试
+    """
+    dispatch_context = await resolve_tick_dispatch_context(
+        loop,
+        cycle,
+        source=source,
+        chat_id=chat_id,
+        include_waiting=include_waiting,
+        fallback_active=fallback_active,
+    )
+
+    dispatcher = getattr(loop, "_tick_dispatcher", None)
+    if dispatcher is None or not getattr(dispatcher, "enabled", False):
+        return TickDispatchResult(context=dispatch_context, accepted=False, can_retry=False)
+
+    enqueue = getattr(dispatcher, "enqueue", None)
+    if not callable(enqueue):
+        return TickDispatchResult(context=dispatch_context, accepted=False, can_retry=False)
+
+    accepted = await enqueue(
+        build_tick_job(
+            dispatch_context,
+            source=source,
+            user_message=user_message,
+            chat_id=chat_id,
+            chat_message_ids=tuple(chat_message_ids),
+        )
+    )
+    accepted_bool = bool(accepted)
+    return TickDispatchResult(
+        context=dispatch_context,
+        accepted=accepted_bool,
+        can_retry=(not accepted_bool),
+    )
+
+
+def build_tick_job(
+    dispatch_context: TickDispatchContext,
+    *,
+    source: str,
+    user_message: str = "",
+    chat_id: str | None = None,
+    chat_message_ids: tuple[int, ...] = (),
+) -> TickJob:
+    return TickJob(
+        cycle=dispatch_context.dispatch_cycle,
+        chain_key=dispatch_context.chain_key,
+        user_message=user_message,
+        chat_id=chat_id,
+        chat_message_ids=tuple(chat_message_ids),
+        source=source,
+    )
+
+
 async def claim_focus_task(
     loop: Any,
     task: Task | None,
@@ -334,13 +528,13 @@ async def claim_focus_task(
         normalized_chat_id = await resolve_task_chat_id(loop, task)
 
     # waiting 状态的任务仍应保留焦点事实，防止 UI 瞬时显示“无活跃任务”。
-    if task is not None and (_task_is_runnable(task) or str(getattr(task, "status", "") or "") == "waiting"):
+    if _task_is_open(task):
         await _submit_focus_fact(loop, _FOCUS_CURRENT_TASK_KEY, str(task.id), scope="system")
     elif clear_current:
         await _delete_focus_fact(loop, _FOCUS_CURRENT_TASK_KEY)
 
     if normalized_chat_id:
-        if task is not None and str(getattr(task, "status", "") or "") in _OPEN_STATUSES:
+        if _task_is_open(task):
             await _submit_focus_fact(
                 loop,
                 f"{_FOCUS_CHAT_PREFIX}{normalized_chat_id}",
@@ -367,7 +561,7 @@ async def prepare_focus_task(
     if focus_task is None:
         return None
 
-    if str(getattr(focus_task, "status", "") or "") != "waiting":
+    if not _task_is_waiting(focus_task):
         return focus_task
     if not str(user_message or "").strip():
         return focus_task
@@ -472,7 +666,7 @@ async def finalize_focus_task(
             resolved_chat_id or "-",
         )
 
-    if _task_is_runnable(active_task) or str(getattr(active_task, "status", "") or "") == "waiting":
+    if _task_is_open(active_task):
         await claim_focus_task(loop, active_task, chat_id=resolved_chat_id or None, clear_current=True)
     else:
         _clear_terminal_task_attention(loop, active_task)

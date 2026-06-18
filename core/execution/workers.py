@@ -17,6 +17,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from core.execution.run_profile import (
+    WORKER_EVOLVE,
+    WORKER_EXEC,
+    WORKER_LIMITS_CONFIG_KEY,
+    WORKER_LLM,
+    WORKER_MULTIMODAL,
+    WORKER_TOOL_CHAIN,
+)
 from tools.registry import ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -41,6 +49,72 @@ _WORKBENCH_PREFERENCE_FIELDS = {
     "progress",
     "failures",
 }
+
+_TOOL_PARAM_ALIASES = {
+    "shell.run": {
+        "command": ("cmd", "payload.command", "params.command"),
+        "timeout": ("timeout_sec", "timeoutSec", "payload.timeout", "params.timeout"),
+        "workdir": ("work_dir", "dir", "payload.workdir", "params.workdir"),
+        "sandbox": (
+            "sandbox_enabled",
+            "is_sandbox",
+            "payload.sandbox",
+            "params.sandbox",
+        ),
+    },
+}
+
+_DEFAULT_WORKER_TYPE = WORKER_TOOL_CHAIN
+_WORKER_SPECS = (
+    (_DEFAULT_WORKER_TYPE, "_execute_tool_chain", WORKER_LIMITS_CONFIG_KEY[WORKER_TOOL_CHAIN]),
+    (WORKER_EVOLVE, "_execute_tool_chain", WORKER_LIMITS_CONFIG_KEY[WORKER_EVOLVE]),
+    (WORKER_EXEC, "_execute_exec", WORKER_LIMITS_CONFIG_KEY[WORKER_EXEC]),
+    (WORKER_MULTIMODAL, "_execute_multimodal", WORKER_LIMITS_CONFIG_KEY[WORKER_MULTIMODAL]),
+    (WORKER_LLM, "_execute_llm", WORKER_LIMITS_CONFIG_KEY[WORKER_LLM]),
+)
+
+
+def _resolve_nested_alias(params: dict[str, Any], alias: str) -> Any:
+    if "." not in alias:
+        return params.get(alias)
+    if alias.count(".") != 1:
+        return None
+    root_key, nested_key = alias.split(".", 1)
+    nested = params.get(root_key)
+    if isinstance(nested, dict):
+        return nested.get(nested_key)
+    return None
+
+
+def _is_missing_param_value(param_name: str, value: Any) -> bool:
+    if value is None:
+        return True
+    if param_name == "command" and isinstance(value, str) and not value.strip():
+        return True
+    return False
+
+
+def _image_input_count(params: dict[str, Any]) -> int:
+    """统计工具参数里的图片输入数量。"""
+    image_count = 0
+    for key in ("path", "paths", "image", "images"):
+        value = params.get(key)
+        if not value:
+            continue
+        if isinstance(value, list):
+            image_count += len(value)
+        else:
+            image_count += 1
+    return image_count
+
+
+def _is_background_result(result: ToolResult) -> bool:
+    return bool(isinstance(result.state_delta, dict) and result.state_delta.get("background"))
+
+
+def _background_monitor_payload(session_id: str | None) -> dict[str, str]:
+    return {"kind": "process", "session_id": session_id or ""}
+
 
 def _repair_task_workbench_params(entry: ToolEntry, params: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(params, dict):
@@ -113,6 +187,29 @@ def _retry_params_template(entry: ToolEntry, params: dict[str, Any], missing: li
     return retry
 
 
+def _repair_tool_param_aliases(entry: ToolEntry, params: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        return params
+    alias_map = _TOOL_PARAM_ALIASES.get(entry.manifest.name)
+    if not alias_map:
+        return params
+
+    repaired = dict(params)
+    for canonical, aliases in alias_map.items():
+        value = repaired.get(canonical)
+        if not _is_missing_param_value(canonical, value):
+            continue
+        for alias in aliases:
+            aliased_value = _resolve_nested_alias(repaired, alias)
+            if aliased_value is None:
+                continue
+            if _is_missing_param_value(canonical, aliased_value):
+                continue
+            repaired[canonical] = aliased_value
+            break
+    return repaired
+
+
 def _validate_required_params(entry: ToolEntry, params: dict[str, Any]) -> ToolResult | None:
     missing: list[str] = []
     for param in entry.manifest.params:
@@ -133,7 +230,7 @@ def _validate_required_params(entry: ToolEntry, params: dict[str, Any]) -> ToolR
     retry_template = _retry_params_template(entry, params, missing)
     recovery_next_step = (
         f"按 {entry.manifest.name} 的 manifest 重新调用工具；"
-        f"补齐必填参数 {', '.join(missing)}，不要把这些字段放在顶层以外的错误位置。"
+        f"补齐必填参数 {', '.join(missing)}（优先使用标准字段 {', '.join(missing)}，不要把参数嵌套在 payload/params 这类外层字段）。"
     )
     state_delta = {
         "tool_input_invalid": True,
@@ -162,7 +259,7 @@ def _validate_required_params(entry: ToolEntry, params: dict[str, Any]) -> ToolR
 
 async def _call_handler(entry: ToolEntry, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     """调用工具 handler，兼容同步函数与 dict 返回值（进化工具可能产生这两种情况）。"""
-    params = _repair_task_workbench_params(entry, params)
+    params = _repair_tool_param_aliases(entry, _repair_task_workbench_params(entry, params))
     validation_error = _validate_required_params(entry, params)
     if validation_error is not None:
         return validation_error
@@ -202,19 +299,12 @@ def _worker_limit(cfg: Any | None, attr_name: str) -> int:
 
 class WorkerLayer:
     def __init__(self, cfg: Any | None = None) -> None:
-        self._handlers: dict[str, WorkerHandler] = {
-            "tool-chain-worker": self._execute_tool_chain,
-            "exec-worker": self._execute_exec,
-            "multimodal-worker": self._execute_multimodal,
-            "llm-worker": self._execute_llm,
+        self._handlers = {
+            worker_type: getattr(self, handler_name)
+            for worker_type, handler_name, _ in _WORKER_SPECS
         }
         self._pools: dict[str, _WorkerPool] = {}
-        for worker_type, attr_name in (
-            ("tool-chain-worker", "max_tool_chain_workers"),
-            ("exec-worker", "max_exec_workers"),
-            ("multimodal-worker", "max_multimodal_workers"),
-            ("llm-worker", "max_llm_workers"),
-        ):
+        for worker_type, _, attr_name in _WORKER_SPECS:
             limit = _worker_limit(cfg, attr_name)
             self._pools[worker_type] = _WorkerPool(
                 name=worker_type,
@@ -230,29 +320,64 @@ class WorkerLayer:
         ctx: ToolContext,
     ) -> ToolResult:
         handler = self._handlers.get(worker_type, self._execute_tool_chain)
-        pool = self._pools.get(worker_type) or self._pools["tool-chain-worker"]
-        wait_started = time.monotonic()
-        queued_before = pool.waiting
-        pool.waiting += 1
-        await pool.semaphore.acquire()
-        wait_ms = int((time.monotonic() - wait_started) * 1000)
-        pool.waiting = max(0, pool.waiting - 1)
-        pool.inflight += 1
-        pool.peak_inflight = max(pool.peak_inflight, pool.inflight)
-        inflight_now = pool.inflight
+        pool = self._pools.get(worker_type) or self._pools[_DEFAULT_WORKER_TYPE]
+        wait_ms, waiting_before = await self._acquire_slot(pool)
+        inflight_now = self._enter_flight(pool)
         try:
             result = await handler(entry, action, ctx)
         finally:
-            pool.inflight = max(0, pool.inflight - 1)
+            self._leave_flight(pool)
             pool.semaphore.release()
+        self._attach_common_metadata(
+            result=result,
+            worker_type=worker_type,
+            tool_name=action.chosen_action_id or "",
+            pool=pool,
+            wait_ms=wait_ms,
+            waiting=max(0, waiting_before),
+            inflight=inflight_now,
+        )
+        return result
+
+    async def _acquire_slot(self, pool: _WorkerPool) -> tuple[int, int]:
+        started = time.monotonic()
+        waiting_before = pool.waiting
+        pool.waiting += 1
+        try:
+            await pool.semaphore.acquire()
+        finally:
+            wait_ms = int((time.monotonic() - started) * 1000)
+            pool.waiting = max(0, pool.waiting - 1)
+        return wait_ms, waiting_before
+
+    def _enter_flight(self, pool: _WorkerPool) -> int:
+        pool.inflight += 1
+        pool.peak_inflight = max(pool.peak_inflight, pool.inflight)
+        return pool.inflight
+
+    @staticmethod
+    def _leave_flight(pool: _WorkerPool) -> None:
+        pool.inflight = max(0, pool.inflight - 1)
+
+    def _attach_common_metadata(
+        self,
+        *,
+        result: ToolResult,
+        worker_type: str,
+        tool_name: str,
+        pool: _WorkerPool,
+        wait_ms: int,
+        waiting: int,
+        inflight: int,
+    ) -> None:
+        """补齐 worker 统一执行元信息（保持默认优先级）。"""
         result.metadata.setdefault("worker_type", worker_type)
-        result.metadata.setdefault("tool_name", action.chosen_action_id or "")
+        result.metadata.setdefault("tool_name", tool_name)
         result.metadata.setdefault("worker_limit", pool.limit)
         result.metadata.setdefault("worker_wait_ms", wait_ms)
-        result.metadata.setdefault("worker_inflight", inflight_now)
-        result.metadata.setdefault("worker_waiting", max(0, queued_before))
+        result.metadata.setdefault("worker_inflight", inflight)
+        result.metadata.setdefault("worker_waiting", waiting)
         result.metadata.setdefault("worker_peak_inflight", pool.peak_inflight)
-        return result
 
     async def _execute_tool_chain(
         self,
@@ -260,9 +385,12 @@ class WorkerLayer:
         action: JudgmentOutput,
         ctx: ToolContext,
     ) -> ToolResult:
-        result = await _call_handler(entry, action.params, ctx)
-        result.metadata.setdefault("worker_path", "tool-chain")
-        return result
+        return await self._call_tool_and_tag_path(
+            entry=entry,
+            action=action,
+            ctx=ctx,
+            worker_path="tool-chain",
+        )
 
     async def _execute_exec(
         self,
@@ -270,16 +398,20 @@ class WorkerLayer:
         action: JudgmentOutput,
         ctx: ToolContext,
     ) -> ToolResult:
-        result = await _call_handler(entry, action.params, ctx)
-        result.metadata.setdefault("worker_path", "exec")
-        background = bool(isinstance(result.state_delta, dict) and result.state_delta.get("background"))
+        result = await self._call_tool_and_tag_path(
+            entry=entry,
+            action=action,
+            ctx=ctx,
+            worker_path="exec",
+        )
+        background = _is_background_result(result)
         result.metadata.setdefault("execution_mode", "background" if background else "foreground")
         if background and not result.metadata.get("session_id") and result.resource_key:
             result.metadata["session_id"] = result.resource_key
         if background and result.metadata.get("session_id"):
             result.metadata.setdefault(
                 "run_monitor",
-                {"kind": "process", "session_id": str(result.metadata.get("session_id") or "")},
+                _background_monitor_payload(str(result.metadata.get("session_id") or "")),
             )
         return result
 
@@ -289,17 +421,13 @@ class WorkerLayer:
         action: JudgmentOutput,
         ctx: ToolContext,
     ) -> ToolResult:
-        result = await _call_handler(entry, action.params, ctx)
-        result.metadata.setdefault("worker_path", "multimodal")
-        image_count = 0
-        for key in ("path", "paths", "image", "images"):
-            value = action.params.get(key)
-            if not value:
-                continue
-            if isinstance(value, list):
-                image_count += len(value)
-            else:
-                image_count += 1
+        result = await self._call_tool_and_tag_path(
+            entry=entry,
+            action=action,
+            ctx=ctx,
+            worker_path="multimodal",
+        )
+        image_count = _image_input_count(action.params)
         result.metadata.setdefault("modality", "image")
         result.metadata.setdefault("input_count", max(1, image_count) if image_count else 1)
         return result
@@ -310,8 +438,12 @@ class WorkerLayer:
         action: JudgmentOutput,
         ctx: ToolContext,
     ) -> ToolResult:
-        result = await _call_handler(entry, action.params, ctx)
-        result.metadata.setdefault("worker_path", "llm")
+        result = await self._call_tool_and_tag_path(
+            entry=entry,
+            action=action,
+            ctx=ctx,
+            worker_path="llm",
+        )
         result.metadata.setdefault("reasoning_mode", "tool-mediated-llm")
         monitor_key = str(
             action.params.get("monitor_fact_key")
@@ -328,4 +460,15 @@ class WorkerLayer:
                     "progress_field": str(action.params.get("monitor_progress_field") or "progress"),
                 },
             )
+        return result
+
+    async def _call_tool_and_tag_path(
+        self,
+        entry: ToolEntry,
+        action: JudgmentOutput,
+        ctx: ToolContext,
+        worker_path: str,
+    ) -> ToolResult:
+        result = await _call_handler(entry, action.params, ctx)
+        result.metadata.setdefault("worker_path", worker_path)
         return result

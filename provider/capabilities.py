@@ -8,6 +8,31 @@ from provider.catalog import find_model_ref_for_capability, model_supports
 if TYPE_CHECKING:
     from core.config import Config
 
+_VISION_CAPABILITY = "vision"
+_IMAGE_MODALITY = "image"
+
+
+def _configured_vision_ref(cfg: Config) -> str:
+    return str(getattr(cfg, "vision_model", "") or "").strip()
+
+
+def _should_use_configured_vision(
+    cfg: Config,
+    configured_ref: str,
+    *,
+    capability: str,
+    input_modality: str,
+    current_model_ref: str | None,
+) -> bool:
+    configured_provider = configured_ref.partition("/")[0]
+    return (
+        current_model_ref is None
+        and configured_ref
+        and configured_provider in getattr(cfg, "providers", {})
+        and capability == _VISION_CAPABILITY
+        and input_modality == _IMAGE_MODALITY
+    )
+
 
 def resolve_model_ref_for_input(
     cfg: Config,
@@ -17,14 +42,13 @@ def resolve_model_ref_for_input(
     current_model_ref: str | None = None,
 ) -> str:
     """返回满足 capability + input_modality 的 model_ref；无候选时抛 RuntimeError。"""
-    configured_vision_ref = str(getattr(cfg, "vision_model", "") or "").strip()
-    configured_provider = configured_vision_ref.partition("/")[0]
-    use_configured_vision = (
-        current_model_ref is None
-        and configured_vision_ref
-        and configured_provider in getattr(cfg, "providers", {})
-        and capability == "vision"
-        and input_modality == "image"
+    configured_vision_ref = _configured_vision_ref(cfg)
+    use_configured_vision = _should_use_configured_vision(
+        cfg,
+        configured_vision_ref,
+        capability=capability,
+        input_modality=input_modality,
+        current_model_ref=current_model_ref,
     )
     if use_configured_vision:
         model_ref = configured_vision_ref

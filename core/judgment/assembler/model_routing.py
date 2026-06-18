@@ -11,16 +11,22 @@ from core.judgment.policy.routing_context import (
     continue_phase_policy_payload,
 )
 from provider.catalog import lookup_model
+from core.judgment.tiers import (
+    JUDGMENT_TIERS,
+    tier_display_label,
+    tier_routing_description,
+)
 
 from ..output import registry_manifest_signature, tool_tier_mapping
 
 _TIER_DESCRIPTIONS: dict[str, str] = {
-    "reader": "轻量感知层：适合常规状态查询、读文件、检查计划、无复杂推理的心跳 tick",
-    "reasoner": "深度推理层：适合用户交互、要求判断、处理复杂状态、制定或调整计划",
-    "repair": "修复层：专用于解析失败、格式错误、小修小补",
+    tier: tier_routing_description(tier) or "" for tier in JUDGMENT_TIERS
 }
 
-_ROUTING_TIERS = ("reader", "reasoner", "repair")
+_ROUTING_TIERS = JUDGMENT_TIERS
+_NEXT_PHASE_TIER_GUIDE = "• next_phase_tier：" + "，".join(
+    f"{tier}={tier_display_label(tier)}（{tier_routing_description(tier) or tier}）" for tier in JUDGMENT_TIERS
+)
 
 
 def _fmt_duration_ms(value: float) -> str:
@@ -57,6 +63,22 @@ def _capability_mapping_snapshot(
     return {cap: tuple(sorted(names)) for cap, names in mapping.items()}
 
 
+def _model_id_from_ref(model_ref: str) -> str:
+    return model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
+
+
+def _lookup_workspace_model_spec(cfg: Any, model_ref: str) -> dict[str, Any]:
+    spec = lookup_model(_model_id_from_ref(model_ref), catalog_path=cfg.workspace_dir / "models.json")
+    return spec or {}
+
+
+def _current_action_capabilities(registry: Any, current_action: str) -> list[str]:
+    for manifest in registry.list_manifests():
+        if manifest.name == current_action:
+            return sorted(manifest.capabilities)
+    return []
+
+
 def _build_available_models(
     assembler: Any,
     *,
@@ -73,8 +95,7 @@ def _build_available_models(
         if key in seen:
             continue
         seen.add(key)
-        model_id = model_ref.split("/", 1)[1] if "/" in model_ref else model_ref
-        spec = lookup_model(model_id) or {}
+        spec = _lookup_workspace_model_spec(cfg, model_ref)
         reasoning = bool(spec.get("reasoning"))
         health = assembler._executor._get_health(model_ref)
         override_model = (routing_overrides or {}).get(tier)
@@ -106,7 +127,7 @@ def _delegation_guide_text(cfg: Any) -> str:
     )
     return (
         "你是当前层的决策者，可以通过 model_strategy 中的字段调控下一轮行为。"
-        "• next_phase_tier：reader=轻量感知，reasoner=深度推理，repair=修复。"
+        f"{_NEXT_PHASE_TIER_GUIDE}"
         "• tool_tier_mapping：runtime 当前对工具族的默认分层真相。"
         "• tool_capability_mapping：runtime 注入的工具能力真相，优先按能力标签推理。"
         "• continue_phase_policy：若 tool_history_will_compact_next=true，下一轮早期工具记录会折叠。"
@@ -148,11 +169,7 @@ def _build_model_routing_section(
 
     manifest_signature = registry_manifest_signature(effective_registry)
     capability_mapping = _capability_mapping_snapshot(manifest_signature)
-    current_action_caps: list[str] = []
-    for manifest in effective_registry.list_manifests():
-        if manifest.name == current_action:
-            current_action_caps = sorted(manifest.capabilities)
-            break
+    current_action_caps = _current_action_capabilities(effective_registry, current_action)
 
     tool_history_count = len(tool_history or [])
 

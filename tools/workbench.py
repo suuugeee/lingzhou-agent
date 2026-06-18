@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from core.cortex import intent as cortex_intent
 from tools.registry import (
     CAPS_EXEMPT,
     ToolContext,
@@ -31,7 +32,8 @@ _LIST_FIELDS = {
     "progress",
     "failures",
 }
-_ALLOWED_FIELDS = _TEXT_FIELDS | _LIST_FIELDS
+_DICT_FIELDS = {"verification_state"}
+_ALLOWED_FIELDS = _TEXT_FIELDS | _LIST_FIELDS | _DICT_FIELDS
 
 
 async def _resolve_task(task_id: Any, ctx: ToolContext) -> Any | None:
@@ -91,8 +93,14 @@ def _clean_workbench_patch(raw: Any) -> tuple[dict[str, Any], list[str]]:
             continue
         if key in _TEXT_FIELDS:
             text = _clean_text(value)
+            if key == "next_verification":
+                text = cortex_intent.clean_next_verification_text(text)
             if text:
                 patch[key] = text
+        elif key in _DICT_FIELDS and isinstance(value, dict):
+            patch[key] = {
+                str(field).strip(): str(raw).strip() for field, raw in value.items() if str(raw).strip()
+            }
         else:
             items = _clean_list(value)
             if items:
@@ -146,15 +154,21 @@ async def task_workbench(params: dict[str, Any], ctx: ToolContext) -> ToolResult
         cortex = {}
     merged_cortex = dict(cortex)
     merged_cortex.update(patch)
+    verification_state = cortex_intent.build_verification_state(patch, source="workbench")
+    if verification_state is not None:
+        merged_cortex["verification_state"] = verification_state
     await ctx.task_store.update_task_result(int(task.id), {"cortex": merged_cortex})
 
     field_names = ", ".join(sorted(patch))
+    state_delta_cortex = dict(patch)
+    if verification_state is not None:
+        state_delta_cortex["verification_state"] = verification_state
     warning_text = f"；{'; '.join(warnings)}" if warnings else ""
     return ToolResult(
         summary=f"任务 #{task.id} 工作台已更新: {field_names}{warning_text}",
         evidence=f"task_id={task.id} fields={field_names}",
         resource_key=str(task.id),
-        state_delta={"cortex": patch},
+        state_delta={"cortex": state_delta_cortex},
         metadata=tool_metadata(
             "task.workbench",
             f"task.workbench id={task.id} fields={field_names}",

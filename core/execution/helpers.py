@@ -13,15 +13,15 @@ from core.contracts.execution import action_key_param
 from core.cortex import build_auto_cortex_result_patch
 from core.log_fields import execution_scope_fields
 from core.metabolic import add_semantic_memory, update_run, update_task_result
+from core.execution.run_profile import worker_limit_config_key
 from store.task import build_task_run_result_patch
-from tools.registry import ToolContext, ToolResult, tool_has_capability
+from tools.registry import ToolContext, ToolResult
 
 _log = logging.getLogger("lingzhou.execution")
 
 if TYPE_CHECKING:
     from core.config import Config
     from core.judgment import JudgmentOutput
-    from tools.registry import ToolRegistry
     from tools.view_protocols import TaskStoreViewProtocol
 
 
@@ -178,12 +178,7 @@ def _worker_log_fields(result: ToolResult) -> str:
 
 def _worker_limit_for_type(cfg: Config, worker_type: str) -> int:
     loop_cfg = getattr(cfg, "loop", None)
-    attr_name = {
-        "tool-chain-worker": "max_tool_chain_workers",
-        "exec-worker": "max_exec_workers",
-        "multimodal-worker": "max_multimodal_workers",
-        "llm-worker": "max_llm_workers",
-    }.get(worker_type, "max_tool_chain_workers")
+    attr_name = worker_limit_config_key(worker_type)
     try:
         return max(1, int(getattr(loop_cfg, attr_name, 1) or 1))
     except (TypeError, ValueError):
@@ -223,27 +218,6 @@ def _resolved_run_task_id(result: ToolResult, active_task_id: int) -> int:
     if tool_name in _TARGET_TASK_TOOLS and isinstance(result.metadata, dict):
         return _coerce_task_id(result.metadata.get("task_id")) or active_task_id
     return active_task_id
-
-
-def _infer_run_profile(
-    tool_name: str,
-    params: dict[str, Any] | None = None,
-    *,
-    registry: ToolRegistry | None = None,
-) -> tuple[str, str]:
-    p = params or {}
-    if tool_name in {"evolution.evolve", "evolution.synthesize"}:
-        return "evolve", "evolve-worker"
-    if tool_name == "subagent.run":
-        return "subagent", "subagent-worker"
-    if p.get("monitor_fact_key") or p.get("status_fact_key"):
-        _log.debug("[run-profile] tool=%s classified as llm-worker via fact monitor", tool_name)
-        return "llm", "llm-worker"
-    if tool_has_capability(registry, tool_name, "run_spawn"):
-        return "exec", "exec-worker"
-    if tool_has_capability(registry, tool_name, "multimodal"):
-        return "multimodal", "multimodal-worker"
-    return "tool_chain", "tool-chain-worker"
 
 
 def _run_status_from_result(result: ToolResult) -> str:

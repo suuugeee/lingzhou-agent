@@ -64,7 +64,7 @@ class WebhookChannel:
                     self.wfile.write(b'{"error":"empty message"}')
                     return
 
-                short = msg.replace("\n", " ")[:28] + ("..." if len(msg) > 28 else "")
+                short = _short_message(msg)
                 try:
                     task_id = _enqueue_webhook_task(ingress, msg, priority)
                     resp = _json.dumps({"ok": True, "task_id": task_id}).encode()
@@ -144,8 +144,12 @@ def _format_webhook_media(value: Any) -> str:
     return str(value)
 
 
+def _short_message(message: str) -> str:
+    return message.replace("\n", " ")[:28] + ("..." if len(message) > 28 else "")
+
+
 def _enqueue_webhook_task(ingress: IngressStore, message: str, priority: str) -> int:
-    short = message.replace("\n", " ")[:28] + ("..." if len(message) > 28 else "")
+    short = _short_message(message)
     return ingress.add_task(
         f"webhook: {short}",
         goal=message,

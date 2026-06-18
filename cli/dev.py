@@ -12,6 +12,7 @@ import typer
 
 from cli import dev_helpers as _dev_helpers
 from cli.common import DEFAULT_CONFIG_PATH, PROJECT_ROOT, console, load_cfg
+from core.judgment.tiers import JUDGMENT_TIERS, tier_display_label
 from cli.dev_helpers import (
     _apply_model_target_selection,
     _effective_target_model,
@@ -183,11 +184,10 @@ def model(
         target_options = [
             ("primary", f"主模型 (model)  [dim]当前: {current}[/dim]"),
             ("vision", f"识图模型 (vision_model)  [dim]当前: {_effective_target_model(cfg_data, 'vision')}[/dim]"),
-            ("reasoner", f"思考层 (reasoner)  [dim]当前: {_effective_target_model(cfg_data, 'reasoner')}[/dim]"),
-            ("reader", f"Reader 层 (reader)  [dim]当前: {_effective_target_model(cfg_data, 'reader')}[/dim]"),
-            ("repair", f"Repair 层 (repair)  [dim]当前: {_effective_target_model(cfg_data, 'repair')}[/dim]"),
-            ("other", "其他 routing 键（手动输入）"),
-        ]
+        ] + [
+            (tier, f"{tier_display_label(tier)} ({tier})  [dim]当前: {_effective_target_model(cfg_data, tier)}[/dim>")
+            for tier in JUDGMENT_TIERS
+        ] + [("other", "其他 routing 键（手动输入）")]
         for i, (_, label) in enumerate(target_options, 1):
             console.print(f"  {i}. {label}")
 
@@ -202,7 +202,7 @@ def model(
 
         selected_target = target_options[target_idx][0]
         if selected_target == "other":
-            entered_key = typer.prompt("  输入 routing 键", default="reasoner")
+            entered_key = typer.prompt("  输入 routing 键", default=JUDGMENT_TIERS[1])
             model_target = _normalize_model_target(entered_key)
         else:
             model_target = selected_target

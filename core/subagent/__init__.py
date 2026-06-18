@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import contextlib
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -48,6 +49,30 @@ _NON_ABSORBABLE_MEMORY_KINDS: frozenset[str] = frozenset({
     "meta_reflection",
     "rule_revision",
 })
+
+
+def _resolve_subagent_wm_limits(cfg: Any) -> tuple[int, int, int]:
+    """子灵 WM 初始化参数回退层。
+
+    优先走完整配置对象；在测试中的轻量 mock（SimpleNamespace）场景下，
+    自动回退到与内置默认兼容的基线配置，避免初始化因缺字段失败。
+    """
+    memory_cfg = getattr(cfg, "memory", None)
+
+    working_capacity = int(getattr(memory_cfg, "working_capacity", 40))
+    token_budget = 0
+    if hasattr(cfg, "effective_wm_token_budget"):
+        with contextlib.suppress(Exception):
+            token_budget = int(cfg.effective_wm_token_budget())
+    if token_budget <= 0:
+        ratio = float(getattr(memory_cfg, "wm_token_budget_ratio", 0.2))
+        if hasattr(cfg, "judgment_input_token_budget"):
+            with contextlib.suppress(Exception):
+                token_budget = max(256, int(cfg.judgment_input_token_budget() * ratio))
+        else:
+            token_budget = 8000
+    item_max_tokens = int(getattr(memory_cfg, "wm_item_max_tokens", 0))
+    return working_capacity, token_budget, item_max_tokens
 
 
 def _utc_now_iso() -> str:
@@ -295,6 +320,23 @@ class _FilteredRegistry:
         return False
 
 
+def _build_filtered_registry(
+    registry: ToolRegistry,
+    cfg: SubagentConfig,
+) -> _FilteredRegistry:
+    blocked = set(_DEFAULT_BLOCKED_TOOLS)
+    if cfg.blocked_tools:
+        blocked.update(cfg.blocked_tools)
+    allowed: set[str] | None = set(cfg.allowed_tools) if cfg.allowed_tools else None
+    local_mutation_allow = {"memory.add_semantic"} if cfg.isolated_memory else set()
+    return _FilteredRegistry(
+        registry,
+        allowed,
+        blocked,
+        local_mutation_allow=local_mutation_allow,
+    )
+
+
 # ── 辅助：读取父灵 Ethos 基线 ────────────────────────────────────────────────────
 
 async def _load_parent_ethos(task_store: TaskStoreViewProtocol | None) -> dict[str, float]:
@@ -402,23 +444,15 @@ class SubagentRunner:
                 _log.debug("[subagent][%s] 父灵 Ethos 基线缺失，回退 cfg.soul.ethos.baseline", sub_id)
 
         # ── 独立 WM（不影响父灵）──────────────────────────────────────────────
+        wm_capacity, wm_token_budget, wm_item_max_tokens = _resolve_subagent_wm_limits(parent_cfg)
         sub_wm = WorkingMemory(
-            capacity=getattr(parent_cfg.memory, "working_capacity", 20),
+            capacity=wm_capacity,
+            token_budget=wm_token_budget,
+            item_max_tokens=wm_item_max_tokens,
         )
         sub_wm.add(WMItem(kind="goal", content=f"子灵任务: {cfg.goal}", priority=1.0))
 
-        # 受限工具集
-        blocked = set(_DEFAULT_BLOCKED_TOOLS)
-        if cfg.blocked_tools:
-            blocked.update(cfg.blocked_tools)
-        allowed: set[str] | None = set(cfg.allowed_tools) if cfg.allowed_tools else None
-        local_mutation_allow = {"memory.add_semantic"} if cfg.isolated_memory else set()
-        filtered_reg = _FilteredRegistry(
-            self._registry,
-            allowed,
-            blocked,
-            local_mutation_allow=local_mutation_allow,
-        )
+        filtered_reg = _build_filtered_registry(self._registry, cfg)
         task_store_view: TaskStoreViewProtocol = sub_task_store
         episodic_view: EpisodicViewProtocol = sub_episodic
         semantic_view: SemanticViewProtocol = sub_semantic

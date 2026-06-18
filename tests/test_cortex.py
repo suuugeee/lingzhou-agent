@@ -12,6 +12,76 @@ from core.cortex import (
 from store.task import Failure, Run, Task
 
 
+def test_verification_state_from_cortex_respects_control_marker():
+    from core.cortex import intent as cortex_intent
+
+    text = cortex_intent.control_next_verification(
+        "运行 pytest 后再 verify blocker details."
+    )
+
+    assert cortex_intent.has_actionable_next_verification(text) is False
+    assert cortex_intent.verification_state_from_cortex({"next_verification": text}) == (
+        "resolved",
+        "运行 pytest 后再 verify blocker details.",
+    )
+
+
+def test_build_verification_state_classifies_next_verification_once():
+    from core.cortex import intent as cortex_intent
+
+    pending = cortex_intent.build_verification_state(
+        {"next_verification": "运行 pytest 验证 workbench 下一步。"}
+    )
+    resolved = cortex_intent.build_verification_state(
+        {"next_verification": "none：当前证据已足够完成。"}
+    )
+
+    assert pending == {
+        "status": "pending",
+        "goal": "运行 pytest 验证 workbench 下一步。",
+        "source": "workbench",
+    }
+    assert resolved == {
+        "status": "resolved",
+        "goal": "none：当前证据已足够完成。",
+        "source": "workbench",
+    }
+
+
+def test_next_verification_completion_text_classification():
+    from core.cortex import intent as cortex_intent
+
+    assert cortex_intent.has_actionable_next_verification("确认已完成测试并读取最新 pytest 结果") is True
+    assert cortex_intent.has_actionable_next_verification("已完成，无需继续验证") is False
+    assert cortex_intent.has_actionable_next_verification("already done; no need to rerun") is False
+    assert cortex_intent.has_actionable_next_verification("none：当前证据已足够完成；除非后续 schema 迁移或查询失败，否则不再重复读取同一路径。") is False
+    assert cortex_intent.has_actionable_next_verification("[[control-next-verification]] Try task.complete to close and then verify blocker details.") is False
+    assert cortex_intent.has_actionable_next_verification("[[control-next-verification]] 运行 pytest 后再 verify blocker details.") is False
+
+
+def test_successful_verification_run_tool_classification():
+    from types import SimpleNamespace
+
+    from core.cortex import intent as cortex_intent
+
+    assert cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="succeeded", tool_name="shell.run")
+    )
+    assert not cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="succeeded", tool_name="task.workbench")
+    )
+    assert not cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="failed", tool_name="shell.run")
+    )
+    assert not cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="succeeded", tool_name="memory.add_semantic")
+    )
+    assert cortex_intent.is_successful_verification_run(
+        SimpleNamespace(status="succeeded", tool_name="memory.add_semantic"),
+        next_verification="沉淀一条语义记忆：记录本次恢复规则。",
+    )
+
+
 def test_cortex_workspace_derives_task_context_from_existing_artifacts():
     task = Task(
         id=42,
@@ -163,6 +233,41 @@ def test_action_first_signal_keeps_analysis_questions_as_analysis():
     assert "analysis_marker" in signal.markers
 
 
+def test_action_first_signal_keeps_identity_birthday_question_as_recall():
+    signal = extract_action_first_signal("你的生日是什么时候")
+
+    assert signal.intent == "converse"
+    assert signal.must_act is False
+    assert "question_like" in signal.markers
+    assert signal.captured_inputs == []
+
+
+def test_action_first_signal_does_not_force_conversational_memory_hint_without_path():
+    signal = extract_action_first_signal("你或许可以去旧记忆上面找一下。")
+
+    assert signal.must_act is False
+    assert "soft_inspection_marker" in signal.markers
+    assert signal.captured_inputs == []
+
+
+def test_action_first_signal_forces_soft_inspection_with_current_strong_input():
+    signal = extract_action_first_signal("看一下 /Users/suge/Downloads/daemon-stdout.log")
+
+    assert signal.intent == "execute"
+    assert signal.must_act is True
+    assert "soft_inspection_marker" in signal.markers
+    assert {"kind": "path", "value": "/Users/suge/Downloads/daemon-stdout.log"} in signal.captured_inputs
+
+
+def test_action_first_signal_does_not_force_example_feedback():
+    signal = extract_action_first_signal("这个是宽泛的例子，我只是把案例问题告诉你。")
+
+    assert signal.intent == "converse"
+    assert signal.must_act is False
+    assert "feedback_like" in signal.markers
+    assert signal.captured_inputs == []
+
+
 def test_action_first_cortex_patch_persists_inputs_without_dropping_existing_state():
     patch = build_action_first_cortex_patch(
         existing_cortex={
@@ -178,6 +283,27 @@ def test_action_first_cortex_patch_persists_inputs_without_dropping_existing_sta
     assert cortex["action_first"]["must_act"] is True
     assert {"kind": "url", "value": "https://example.com/a.yaml"} in cortex["captured_inputs"]
     assert {"kind": "path", "value": "/tmp/old.yaml"} in cortex["captured_inputs"]
+
+
+def test_action_first_cortex_patch_clears_stale_inputs_for_conversational_feedback():
+    patch = build_action_first_cortex_patch(
+        existing_cortex={
+            "domain": "logs",
+            "captured_inputs": [{"kind": "path", "value": "/Users/suge/Downloads/daemon-stdout.log"}],
+            "action_first": {
+                "intent": "execute",
+                "must_act": True,
+                "minimum_next_action": "先对用户给定的强输入做最小可验证动作",
+            },
+        },
+        user_message="这个是宽泛的例子，我只是把案例问题告诉你。",
+    )
+
+    cortex = patch["cortex"]
+    assert "captured_inputs" not in cortex
+    assert cortex["action_first"]["intent"] == "converse"
+    assert cortex["action_first"]["must_act"] is False
+    assert "minimum_next_action" not in cortex["action_first"]
 
 
 def test_cortex_workspace_formats_action_first_state():

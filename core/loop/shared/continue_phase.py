@@ -11,6 +11,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from core.cortex.actions import build_workbench_action
+from core.cortex import intent as cortex_intent
 from core.judgment.context.utils import _clip_for_context
 from memory.working import WMItem
 from tools.registry import registry_has_tool
@@ -55,6 +56,31 @@ _TASK_SCOPED_CONTINUE_TOOLS = frozenset({
     "task.fail",
     "task.wait",
 })
+
+
+def _switch_hints(tool_name: str, key_param: str) -> str:
+    target = f"{key_param}" if key_param else "当前对象"
+    if tool_name == "file.read":
+        if key_param:
+            return (
+                f"不要再重复读取 {target}；基于已读结果先形成结论，"
+                "或改用 shell.run/grep 对该路径做定位验证。"
+            )
+        return "不要继续重复同类文件读取；改用 shell.run 或 task.workbench 切换验证层。"
+    if tool_name == "file.list":
+        if key_param:
+            return (
+                f"不要再重复列目录 {target}；从现有目录结果选择具体文件，"
+                "改做 file.read 或 grep。"
+            )
+        return "不要继续重复目录枚举；改为定位具体文件后读取或直接执行 task.workbench 验证。"
+    if tool_name == "memory.search":
+        return "不要重复同一 query 的 memory.search；改为读取命中语义 ID 或切换到 shell.run/file.read。"
+    if tool_name == "probe.run":
+        return "不要重复执行同一探针；改为切换到一个可验证的任务动作。"
+    if tool_name == "shell.run":
+        return "避免重复 shell.run 同构命令；改为 task.workbench 复核 next_verification，或执行一条更聚焦验证命令。"
+    return f"避免继续重复 {target}；切换到一个更高信息增量动作。"
 
 
 def _compact_history_line(entry: dict[str, Any]) -> str:
@@ -197,7 +223,7 @@ def _trailing_same_action_count(history: list[dict[str, Any]], tool_name: str, k
 def _continue_repeat_threshold(loop: Any) -> int:
     cfg = getattr(loop, "_cfg", None)
     loop_cfg = getattr(cfg, "loop", None)
-    return max(2, int(getattr(loop_cfg, "behavior_streak_threshold", 3) or 3))
+    return max(2, int(getattr(loop_cfg, "behavior_streak_threshold", 4) or 4))
 
 
 def _continue_low_increment_budget(loop: Any, max_inner_rounds: int) -> int:
@@ -209,7 +235,7 @@ def _continue_low_increment_budget(loop: Any, max_inner_rounds: int) -> int:
             return max(1, int(explicit))
         except (TypeError, ValueError):
             pass
-    return max(2, min(3, int(max_inner_rounds)))
+    return max(3, min(4, int(max_inner_rounds)))
 
 
 def _low_increment_history_count(history: list[dict[str, Any]]) -> int:
@@ -225,6 +251,14 @@ def _low_increment_history_count(history: list[dict[str, Any]]) -> int:
             if repeat_tool in _LOW_INCREMENT_CONTINUE_TOOLS:
                 count += int(params.get("repeat_count") or 0)
     return count
+
+
+def _recent_tool_names(history: list[dict[str, Any]], *, limit: int = 6) -> list[str]:
+    return [
+        str(entry.get("tool") or "")
+        for entry in history[-max(1, min(limit, len(history))):]
+        if str(entry.get("tool") or "")
+    ]
 
 
 def _build_continue_repeat_workbench_action(
@@ -243,9 +277,9 @@ def _build_continue_repeat_workbench_action(
         ],
         "hypothesis": "当前卡点不是缺少再次读取，而是需要综合已有结果或切换到更高信息增量的验证方式。",
         "recovery_state": "continue_repeat_action_gated",
-        "next_verification": (
-            f"不要再重复执行 {tool_name} {key_param or ''}；"
-            "先总结已有证据，或换用不同工具/参数验证同一假设。"
+        "next_verification": cortex_intent.control_next_verification(
+            f"{_switch_hints(tool_name, key_param)} "
+            "若证据仍不足，先形成可验证结论再提交下一个单点动作。"
         ),
         "completion_checks": [
             "已停止本 tick 内重复工具调用。",
@@ -270,11 +304,7 @@ def _build_continue_low_increment_budget_action(
     budget: int,
     history: list[dict[str, Any]],
 ) -> JudgmentOutput:
-    recent_tools = [
-        str(entry.get("tool") or "")
-        for entry in history[-max(1, min(6, len(history))):]
-        if str(entry.get("tool") or "")
-    ]
+    recent_tools = _recent_tool_names(history)
     workbench = {
         "domain": "runtime-loop",
         "intent": "continue 阶段停止低信息探索串联",
@@ -285,7 +315,10 @@ def _build_continue_low_increment_budget_action(
         ],
         "hypothesis": "继续追加 list/read/search/probe 会扩大上下文压力；当前应先综合已有证据或切换到更高信息增量验证。",
         "recovery_state": "continue_low_increment_budget_reached",
-        "next_verification": "先总结已有工具结果；若仍需验证，使用更具体的 grep/测试/配置查询/任务更新，而不是继续泛化枚举。",
+        "next_verification": cortex_intent.control_next_verification(
+            f"{_switch_hints(tool_name, action_key_param(action.params))} "
+            "先形成收敛结论后，优先提交 task.workbench 或明确下一步单点任务动作。"
+        ),
         "completion_checks": [
             "已停止同 tick 内连续低信息探索。",
             "已把已有结果收敛为结论或更具体的下一步验证。",
@@ -367,6 +400,40 @@ def _compact_tool_history(history: list[dict[str, Any]], *, keep_last: int) -> l
     return history
 
 
+def _specific_round_limit_next_verification(tool_history: list[dict[str, Any]]) -> str:
+    """Choose a concrete recovery action when continue rounds hit the cap."""
+    fallback = "根据最近一次工具结果选择一个具体验证动作；若已有足够证据，直接面向用户收敛答复或完成任务。"
+    for entry in reversed(tool_history):
+        if not isinstance(entry, dict):
+            continue
+        state_delta = entry.get("state_delta") if isinstance(entry.get("state_delta"), dict) else {}
+        for key in ("recovery_next_step", "next_verification"):
+            value = _clip_for_context(str(state_delta.get(key) or ""), 240)
+            if value and not cortex_intent.is_control_next_verification(value):
+                return value
+        tool = str(entry.get("tool") or "").strip()
+        error = str(entry.get("error") or "").strip()
+        params = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+        key_param = action_key_param(params)
+        if error == "ToolInputInvalid":
+            missing = state_delta.get("missing_params") if isinstance(state_delta, dict) else None
+            missing_text = ", ".join(str(item) for item in missing) if isinstance(missing, list) else ""
+            if tool and missing_text:
+                return f"按 {tool} 的 manifest 重新调用工具；补齐必填参数 {missing_text}。"
+            if tool:
+                return f"按 {tool} 的 manifest 修正参数后重试一次。"
+        if error:
+            return f"修复最近一次 {tool or '工具'} 失败（{_clip_for_context(error, 80)}），再用不同证据路径验证任务是否推进。"
+        if str(entry.get("status") or "") == "ok" and tool and not tool.startswith("task."):
+            summary = _clip_for_context(str(entry.get("summary") or entry.get("result") or ""), 140)
+            if summary:
+                return (
+                    f"基于最近 {tool} 成功结果收敛判断。{_switch_hints(tool, key_param)}"
+                    " 若仍缺证据，提交 task.workbench 明确下一步可验证动作。"
+                )
+    return fallback
+
+
 async def _record_continue_round_limit(
     *,
     loop: Any,
@@ -377,11 +444,8 @@ async def _record_continue_round_limit(
 ) -> tuple[JudgmentOutput | None, Any | None]:
     if active_task is None or not registry_has_tool(loop._registry, "task.workbench"):
         return None, None
-    recent_tools = [
-        str(entry.get("tool") or "")
-        for entry in tool_history[-max(1, min(6, len(tool_history))):]
-        if str(entry.get("tool") or "")
-    ]
+    recent_tools = _recent_tool_names(tool_history)
+    next_verification = _specific_round_limit_next_verification(tool_history)
     action = build_workbench_action(
         workbench={
             "domain": "runtime-loop",
@@ -392,7 +456,7 @@ async def _record_continue_round_limit(
             ],
             "hypothesis": "当前任务仍需推进，但继续留在同一 tick 内追加工具会削弱总结与用户可见收敛。",
             "recovery_state": "continue_round_limit_reached",
-            "next_verification": "下一轮先综合本 tick 工具结果，确认是否已经足够回答/完成；若不足，再选择一个最高信息增量的验证动作。",
+            "next_verification": next_verification,
             "completion_checks": [
                 "已停止在同一 tick 内继续追加工具调用。",
                 "已把本轮工具结果收敛为下一轮的验证入口。",
@@ -402,7 +466,7 @@ async def _record_continue_round_limit(
             f"continue 阶段达到 {max_inner_rounds} 轮上限，先写入任务皮层收敛状态，"
             "避免单 tick 内无限续判。"
         ),
-        next_step="下一轮先综合本 tick 工具结果，再决定是否继续取证。",
+        next_step=next_verification,
     )
     result = await loop._execution.dispatch(action, ctx)
     tool_history.append(_tool_history_entry(action, result))

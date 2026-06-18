@@ -7,6 +7,8 @@ import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
+from core.judgment.decision.helpers import _decision_basis
+from core.execution.run_profile import RUN_TYPE_CHAT_REPLY, RUN_TYPE_JUDGE, run_type_profile
 from core.loop.routing_overrides import normalize_routing_overrides, routing_overrides_meta
 from core.metabolic import add_run, set_soul_fact, submit_fact, update_task_data
 from store.episodic import EpisodicMemory
@@ -22,11 +24,9 @@ from ..cycle.focus import (
     resolve_focus_task,
 )
 from ..shared.common import (
-    _JUDGMENT_TIERS,
-    _next_initial_tier_hint,
+    _coerce_task_model_tier,
     _next_thinking_override,
     _should_continue_within_tick,
-    _task_model_tier,
     _tool_history_entry,
 )
 from ..shared.continue_phase import _run_continue_phase
@@ -49,12 +49,6 @@ from .types import _build_tool_context, _log, _loop_metabolic
 
 if TYPE_CHECKING:
     from store.task import Task
-
-
-def _decision_basis(action: Any, fallback: str = "") -> str:
-    """把 action 的 rationale 压成账本可审计摘要，避免传播长篇内部独白。"""
-    basis = str(getattr(action, "rationale", "") or fallback or "")
-    return _clip_signal_text(" ".join(basis.split()), 240)
 
 
 async def _execute_tick_action(
@@ -98,22 +92,23 @@ async def _execute_tick_action(
     else:
         for item in loop._behavior.on_wait(action.decision, active_task is not None):
             loop._wm.add(item)
-        _llm_skipped = (action.rationale or "").startswith("[按请求聚合]")
-        if not _llm_skipped and loop._task_store is not None:
-            _rt = "chat_reply" if action.speech_intent else "judge"
-            try:
-                await add_run(
-                    loop,
-                    task_id=active_task.id if active_task else 0,
-                    run_type=_rt,
-                    worker_type=f"{_rt}-worker",
-                    status="succeeded",
-                    output_json={"decision": action.decision, "rationale": (action.rationale or "")},
-                    source="loop/tick/exec/judge_chat",
-                    decision_basis=f"action={action.rationale or action.decision}",
-                )
-            except Exception as _exc:
-                _log.debug("[tick] judge/chat_reply run 写入失败（不影响主流程）: %s", _exc)
+            _llm_skipped = (action.rationale or "").startswith("[按请求聚合]")
+            if not _llm_skipped and loop._task_store is not None:
+                _rt = RUN_TYPE_CHAT_REPLY if action.speech_intent else RUN_TYPE_JUDGE
+                profile = run_type_profile(_rt)
+                try:
+                    await add_run(
+                        loop,
+                        task_id=active_task.id if active_task else 0,
+                        run_type=profile.run_type,
+                        worker_type=profile.worker_type,
+                        status="succeeded",
+                        output_json={"decision": action.decision, "rationale": (action.rationale or "")},
+                        source="loop/tick/exec/judge_chat",
+                        decision_basis=f"action={action.rationale or action.decision}",
+                    )
+                except Exception as _exc:
+                    _log.debug("[tick] judge/chat_reply run 写入失败（不影响主流程）: %s", _exc)
 
     result = await loop._run_driver.dispatch(action, ctx)
     tool_history: list[dict[str, Any]] = []
@@ -294,15 +289,35 @@ async def _cleanup_terminal_result_attention(
     return active_task
 
 
+async def _persist_routing_overrides(loop: Any, *, value: str, meta_source: str, basis: str) -> None:
+    await submit_fact(
+        loop,
+        key="pref:routing_overrides",
+        value=value,
+        scope="system",
+        source="loop/tick/routing",
+        decision_basis=basis,
+    )
+    await submit_fact(
+        loop,
+        key="pref:routing_overrides_meta",
+        value=json.dumps(
+            routing_overrides_meta(source=meta_source, decision_basis=basis),
+            ensure_ascii=False,
+        ),
+        scope="system",
+        source="loop/tick/routing",
+        decision_basis=basis,
+    )
+
+
 async def _apply_tick_model_strategy(
     loop: Any,
     action: Any,
     active_task: Task | None,
 ) -> Task | None:
     cfg = loop._cfg
-    next_tier = _next_initial_tier_hint(action) or ""
-    task_tier = _task_model_tier(active_task)
-    persist_tier = next_tier if next_tier in _JUDGMENT_TIERS else (task_tier if task_tier in _JUDGMENT_TIERS else "")
+    persist_tier, next_tier, task_tier = _coerce_task_model_tier(action, active_task)
 
     if active_task and persist_tier and persist_tier != task_tier:
         await update_task_data(
@@ -314,7 +329,7 @@ async def _apply_tick_model_strategy(
         )
         active_task.model_tier = persist_tier
 
-    if next_tier in _JUDGMENT_TIERS:
+    if next_tier:
         loop._pending_tier = next_tier
     else:
         loop._pending_tier = None
@@ -344,68 +359,29 @@ async def _apply_tick_model_strategy(
         basis = _decision_basis(action, "model strategy routing overrides")
         if not raw_overrides:
             loop._pending_routing_overrides = None
-            await submit_fact(
+            await _persist_routing_overrides(
                 loop,
-                key="pref:routing_overrides",
                 value="",
-                scope="system",
-                source="loop/tick/routing",
-                decision_basis=basis,
-            )
-            await submit_fact(
-                loop,
-                key="pref:routing_overrides_meta",
-                value=json.dumps(
-                    routing_overrides_meta(source="loop/tick/routing.clear", decision_basis=basis),
-                    ensure_ascii=False,
-                ),
-                scope="system",
-                source="loop/tick/routing",
-                decision_basis=basis,
+                meta_source="loop/tick/routing.clear",
+                basis=basis,
             )
         else:
-            valid = normalize_routing_overrides(raw_overrides)
+            valid = normalize_routing_overrides(raw_overrides, catalog_path=loop._cfg.workspace_dir / "models.json")
             if valid:
                 loop._pending_routing_overrides = valid
-                await submit_fact(
+                await _persist_routing_overrides(
                     loop,
-                    key="pref:routing_overrides",
                     value=json.dumps(valid),
-                    scope="system",
-                    source="loop/tick/routing",
-                    decision_basis=basis,
-                )
-                await submit_fact(
-                    loop,
-                    key="pref:routing_overrides_meta",
-                    value=json.dumps(
-                        routing_overrides_meta(source="loop/tick/routing.set", decision_basis=basis),
-                        ensure_ascii=False,
-                    ),
-                    scope="system",
-                    source="loop/tick/routing",
-                    decision_basis=basis,
+                    meta_source="loop/tick/routing.set",
+                    basis=basis,
                 )
             else:
                 loop._pending_routing_overrides = None
-                await submit_fact(
+                await _persist_routing_overrides(
                     loop,
-                    key="pref:routing_overrides",
                     value="",
-                    scope="system",
-                    source="loop/tick/routing",
-                    decision_basis=basis,
-                )
-                await submit_fact(
-                    loop,
-                    key="pref:routing_overrides_meta",
-                    value=json.dumps(
-                        routing_overrides_meta(source="loop/tick/routing.invalid", decision_basis=basis),
-                        ensure_ascii=False,
-                    ),
-                    scope="system",
-                    source="loop/tick/routing",
-                    decision_basis=basis,
+                    meta_source="loop/tick/routing.invalid",
+                    basis=basis,
                 )
 
     loop._pending_thinking_override = _next_thinking_override(strategy)

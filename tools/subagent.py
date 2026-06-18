@@ -12,6 +12,7 @@ from typing import Any
 
 from core.metabolic import add_semantic_memory
 from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
+from core.judgment.decision.helpers import _decision_basis_from_parts as _decision_basis
 
 _log = logging.getLogger("lingzhou.subagent_ops")
 
@@ -246,7 +247,7 @@ async def subagent_absorb(params: dict[str, Any], ctx: ToolContext) -> ToolResul
                 tags=list(node_kwargs["tags"]),
                 created_at=str(node_kwargs.get("created_at") or ""),
                 source=str(node_kwargs["source"]),
-                decision_basis=f"absorb semantic memory from subagent:{sub_id}"[:240],
+                decision_basis=_decision_basis("absorb semantic memory", "subagent", sub_id),
             )
             absorbed += 1
         except Exception as exc:

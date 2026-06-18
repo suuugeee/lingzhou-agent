@@ -66,6 +66,25 @@ def _request_timeout_override(client: Any, level: str | None) -> float | None:
         return None
 
 
+def _is_codex_revoked_oauth_response(resp: httpx.Response) -> bool:
+    if resp.status_code != 401:
+        return False
+    body = (resp.text or "").lower()
+    if "token_revoked" in body or "token_invalidated" in body or "invalidated oauth token" in body:
+        return True
+
+    try:
+        payload = resp.json()
+        err = payload.get("error") if isinstance(payload, dict) else None
+        if isinstance(err, dict):
+            code = str(err.get("code") or "").strip().lower()
+            message = str(err.get("message") or "").strip().lower()
+            return code in {"token_revoked", "token_invalidated"} or "invalidated" in message
+    except Exception:
+        pass
+    return "your authentication token has been invalidated" in body
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 模式适配器：用数据封装 openai / copilot 的差异，消除 if/elif 堆砌
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -102,7 +121,8 @@ class _ModeAdapter:
     def resolve_url(self, path: str) -> str:
         return path  # openai 模式：base_url 已设在 client 上
 
-    async def request_headers(self) -> dict[str, str]:
+    async def request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+        del force_refresh
         return {}  # openai 模式：Authorization 已在 client headers
 
     def embedding_url(self) -> str:
@@ -141,8 +161,8 @@ class _CopilotMode(_ModeAdapter):
     def resolve_url(self, path: str) -> str:
         return f"{self._copilot_api_base_url}{path}"
 
-    async def request_headers(self) -> dict[str, str]:
-        token = await self._ensure_copilot_token()
+    async def request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+        token = await self._ensure_copilot_token(force_refresh=force_refresh)
         return _build_copilot_ide_headers() | {"Authorization": f"Bearer {token}"}
 
     # ── Copilot 内部方法 ─────────────────────────────────────────────────
@@ -236,12 +256,21 @@ class _CodexMode(_ModeAdapter):
     def resolve_url(self, path: str) -> str:
         return f"{self.base_url}{path}"
 
-    async def request_headers(self) -> dict[str, str]:
-        resolved = resolve_codex_oauth_token(profile_id=self.auth_profile_id) if self.auth_profile_id else resolve_codex_oauth_token()
+    async def request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+        resolved = (
+            resolve_codex_oauth_token(profile_id=self.auth_profile_id, force_refresh=force_refresh)
+            if self.auth_profile_id
+            else resolve_codex_oauth_token(force_refresh=force_refresh)
+        )
         if not resolved or not resolved.token:
             raise OSError(
                 "未找到 OpenAI Codex OAuth token。\n"
                 "请先执行 `lingzhou auth login-codex`，或设置 OPENAI_CODEX_ACCESS_TOKEN。"
+            )
+        if force_refresh and str(resolved.source or "").startswith("env:"):
+            raise OSError(
+                "环境变量 token 无法执行 OAuth refresh。\n"
+                "请先执行 `lingzhou auth login-codex` 重新获取有效令牌。"
             )
         return build_codex_headers(resolved.token)
 
@@ -362,41 +391,38 @@ class OpenAICompatProvider:
         base = self._copilot_api_base_url or self.__dict__.get("_base_url", "")
         return f"{str(base).rstrip('/')}{path}"
 
-    async def _request_headers(self) -> dict[str, str]:
+    async def _request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
         _m = self.__dict__.get("_mode")
         if _m is not None:
-            return await _m.request_headers()
+            return await _m.request_headers(force_refresh=force_refresh)
         # Fallback for test injection
         _ensure_token = self.__dict__.get("_ensure_copilot_token")
         _request_headers = self.__dict__.get("_copilot_request_headers")
         if callable(_ensure_token) and callable(_request_headers):
-            token = str(await cast("Callable[..., Awaitable[str]]", _ensure_token)()).strip()
-            mode = str(getattr(self, "_provider_mode", "unknown"))
-            model_ref = str(getattr(self, "model_ref", getattr(self, "_model", "unknown")))
-            _log.debug(
-                "[copilot.auth] source=fallback mode=%s model_ref=%s token_state=%s",
-                mode,
-                model_ref,
-                _token_state(token),
-            )
+            token = str(await cast("Callable[..., Awaitable[str]]", _ensure_token)(force_refresh=force_refresh)).strip()
+            self._log_token_state("fallback", token)
             if not token:
                 raise RuntimeError("Copilot token 为空，拒绝构造 Authorization header")
             return cast("Callable[[str], dict[str, str]]", _request_headers)(token)
         return {}
+
+    def _log_token_state(self, source: str, token: str) -> None:
+        mode = str(getattr(self, "_provider_mode", "unknown"))
+        model_ref = str(getattr(self, "model_ref", getattr(self, "_model", "unknown")))
+        _log.debug(
+            "[copilot.auth] source=%s mode=%s model_ref=%s token_state=%s",
+            source,
+            mode,
+            model_ref,
+            _token_state(token),
+        )
 
     async def _copilot_refreshed_headers(self) -> dict[str, str]:
         """Force-refresh Copilot token and return new request headers."""
         _m = self.__dict__.get("_mode")
         if _m is not None and hasattr(_m, "_ensure_copilot_token"):
             token = str(await _m._ensure_copilot_token(force_refresh=True)).strip()  # type: ignore[union-attr]
-            mode = str(getattr(self, "_provider_mode", "unknown"))
-            model_ref = str(getattr(self, "model_ref", getattr(self, "_model", "unknown")))
-            _log.debug(
-                "[copilot.auth] source=refresh mode=%s model_ref=%s token_state=%s",
-                mode,
-                model_ref,
-                _token_state(token),
-            )
+            self._log_token_state("refresh", token)
             if not token:
                 raise RuntimeError("Copilot token refresh 返回空 token")
             return _build_copilot_ide_headers() | {"Authorization": f"Bearer {token}"}
@@ -416,6 +442,54 @@ class OpenAICompatProvider:
                 raise RuntimeError("Copilot token refresh 返回空 token")
             return cast("Callable[[str], dict[str, str]]", _request_headers)(token)
         return await self._request_headers()
+
+    @staticmethod
+    def _bearer_from_headers(headers: dict[str, str] | None) -> str:
+        if not headers:
+            return ""
+        auth = str(headers.get("Authorization", "")).strip()
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        return ""
+
+    @staticmethod
+    def _codex_oauth_revoked_message() -> str:
+        return (
+            "OpenAI Codex OAuth token 已被服务端撤销。"
+            "请重新执行 `lingzhou auth login-codex`。"
+        )
+
+    async def _post_with_codex_oauth_retry(
+        self,
+        target: str,
+        payload: dict[str, Any],
+        req_timeout: float | None,
+    ) -> httpx.Response:
+        body = json.dumps(payload)
+        headers = await self._request_headers()
+        resp = await self._client.post(target, content=body, headers=headers or None, timeout=req_timeout)
+        if self._provider_mode != "codex" or not _is_codex_revoked_oauth_response(resp):
+            return resp
+
+        first_token = self._bearer_from_headers(headers)
+        try:
+            refreshed_headers = await self._request_headers(force_refresh=True)
+        except OSError as exc:
+            raise RuntimeError(self._codex_oauth_revoked_message()) from exc
+
+        refreshed_token = self._bearer_from_headers(refreshed_headers)
+        if first_token and refreshed_token and first_token == refreshed_token:
+            raise RuntimeError(self._codex_oauth_revoked_message())
+
+        resp = await self._client.post(
+            target,
+            content=body,
+            headers=refreshed_headers or None,
+            timeout=req_timeout,
+        )
+        if _is_codex_revoked_oauth_response(resp):
+            raise RuntimeError(self._codex_oauth_revoked_message())
+        return resp
 
     # ── 向后兼容：copilot 方法透传（测试用）───────────────────────────
 
@@ -621,14 +695,13 @@ class OpenAICompatProvider:
             req_timeout = _request_timeout_override(self._client, level)
             target = self._resolve_url("/responses")
 
-            headers = await self._request_headers()
-            resp = await self._client.post(target, content=json.dumps(payload),
-                                           headers=headers or None, timeout=req_timeout)
+            resp = await self._post_with_codex_oauth_retry(target, payload, req_timeout)
             # Copilot responses: on 400, refresh token and retry
             if resp.status_code == 400 and self._provider_mode == "copilot":
                 headers = await self._copilot_refreshed_headers()
                 resp = await self._client.post(target, content=json.dumps(payload),
                                                headers=headers or None, timeout=req_timeout)
+
             _raise_for_status_with_body(resp)
             if self._provider_mode == "codex" and payload.get("stream") is True:
                 data = _extract_responses_stream_data(resp.text)
@@ -653,8 +726,7 @@ class OpenAICompatProvider:
         target = self._resolve_url("/chat/completions")
 
         headers = await self._request_headers()
-        resp = await self._client.post(target, content=json.dumps(payload),
-                                       headers=headers or None, timeout=req_timeout)
+        resp = await self._post_with_codex_oauth_retry(target, payload, req_timeout)
 
         # Copilot: on 400, refresh token and retry; still 400 → fallback without reasoning
         if resp.status_code == 400 and self._provider_mode == "copilot":

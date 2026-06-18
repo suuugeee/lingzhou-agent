@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any, cast
 from .assemble_context import _assemble_context as _assemble_context_impl
 from .continue_context import _build_continue_context as _build_continue_context_impl
 from .model_routing import _build_model_routing_section
+from core.judgment.tiers import INITIAL_PHASE
 
 _build_model_routing_section_impl = _build_model_routing_section
 
@@ -190,7 +191,7 @@ class JudgmentContextAssembler:
         hard_boundaries: list[str] | None = None,
         perception_replay: PerceptionReplaySummary | None = None,
         cognitive_signals: CognitiveSignals | None = None,
-        phase: str = "initial",
+        phase: str = INITIAL_PHASE,
         current_action: str = "",
         tool_history: list[dict[str, Any]] | None = None,
         effective_thinking: str | None = None,

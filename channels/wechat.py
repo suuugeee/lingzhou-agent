@@ -72,6 +72,53 @@ _last_warn_at: float = 0.0
 _WARN_COOLDOWN: float = 60.0
 
 
+def _config_text(cfg: dict[str, Any], key: str, default: str) -> str:
+    return str(cfg.get(key, default))
+
+
+def _config_int(cfg: dict[str, Any], key: str, default: int) -> int:
+    return int(cfg.get(key, default))
+
+
+def _text_preview(value: str, limit: int = 50) -> str:
+    text = value.replace("\n", " ")
+    return text[:limit] + ("..." if len(text) > limit else "")
+
+
+def _image_download_url(full_url: str, encrypt_param: str) -> str:
+    if encrypt_param:
+        from urllib.parse import quote
+
+        return f"https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param={quote(encrypt_param, safe='')}"
+    return full_url
+
+
+def _image_ext(decrypted: bytes) -> str:
+    if decrypted[:4] == b"\x89PNG":
+        return ".png"
+    if decrypted[:4] == b"GIF8":
+        return ".gif"
+    return ".jpg"
+
+
+def _rows_by_user(rows: list[dict], replied: set[int]) -> dict[str, list[dict]]:
+    by_user: dict[str, list[dict]] = {}
+    for row in rows:
+        mid = int(row["id"])
+        if mid in replied:
+            continue
+        chat_id = str(row["chat_id"] or "")
+        from_user = chat_id.replace("wechat:", "", 1)
+        if not from_user:
+            continue
+        by_user.setdefault(from_user, []).append(row)
+    return by_user
+
+
+def _message_parts(user_rows: list[dict]) -> list[str]:
+    return [str(row["content"] or "").strip() for row in user_rows if str(row["content"] or "").strip()]
+
+
 def get_updates(base_url: str, token: str, buf: str = "", timeout: int | None = None) -> dict:
     global _last_warn_at
     req = _requests_module()
@@ -202,7 +249,7 @@ class WechatChannel:
             return
 
         ctx_token = msg.get("context_token", "")
-        short = text.replace("\n", " ")[:50]
+        short = _text_preview(text)
         facts: dict[str, str | tuple[str, str]] = {"wechat:last_user": from_user}
         if ctx_token:
             facts[f"wechat:ctx:{from_user}"] = ctx_token
@@ -225,23 +272,11 @@ class WechatChannel:
 
     def _check_and_reply(self) -> None:
         rows = self._ingress.list_pending_assistant_messages(chat_prefix="wechat:", limit=20)
-
-        # 按 from_user 分组，将同一轮询周期内的多条回复合并为一条发送，
-        # 避免 bot 多轮 tick 产生的进度更新变成独立消息堆叠。
-        by_user: dict[str, list[dict]] = {}
-        for row in rows:
-            mid = int(row["id"])
-            if mid in self._replied:
-                continue
-            chat_id = str(row["chat_id"] or "")
-            from_user = chat_id.replace("wechat:", "", 1)
-            if not from_user:
-                continue
-            by_user.setdefault(from_user, []).append(row)
+        by_user = _rows_by_user(rows, self._replied)
 
         for from_user, user_rows in by_user.items():
             # 合并同用户所有待发内容，空行分隔
-            parts = [str(r["content"] or "").strip() for r in user_rows if str(r["content"] or "").strip()]
+            parts = _message_parts(user_rows)
             if not parts:
                 continue
             content = "\n\n".join(parts)
@@ -310,12 +345,7 @@ class WechatChannel:
                 aes_key = bytes.fromhex(aeskey_hex)
                 cipher = Cipher(algorithms.AES(aes_key[:16]), cipher_modes.ECB())
                 decryptor = cipher.decryptor()
-                if encrypt_param:
-                    from urllib.parse import quote
-
-                    cdn_url = f"https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param={quote(encrypt_param, safe='')}"
-                else:
-                    cdn_url = full_url
+                cdn_url = _image_download_url(full_url, encrypt_param)
                 resp = req.get(cdn_url, timeout=30)
                 if resp.status_code != 200:
                     new_items.append(it)
@@ -326,11 +356,7 @@ class WechatChannel:
                     if 1 <= pad_len <= 16:
                         decrypted = decrypted[:-pad_len]
                 fhash = hashlib.md5(decrypted).hexdigest()[:12]
-                ext = ".jpg"
-                if decrypted[:4] == b"\x89PNG":
-                    ext = ".png"
-                elif decrypted[:4] == b"GIF8":
-                    ext = ".gif"
+                ext = _image_ext(decrypted)
                 fname = img_dir / f"{from_user[:16]}_{fhash}{ext}"
                 fname.write_bytes(decrypted)
                 new_items.append({"type": 1, "text_item": {"text": f"[图片消息，已保存] {fname} ({len(decrypted)} bytes)"}})
@@ -354,11 +380,11 @@ class WechatChannel:
 
 def start_wechat_channel(wc_cfg: dict[str, Any], db_path: str | Path) -> WechatChannel:
     config = WechatConfig(
-        base_url=wc_cfg.get("base_url", DEFAULT_BASE_URL),
-        poll_base_url=wc_cfg.get("poll_base_url", ""),
-        token=wc_cfg.get("token", ""),
-        poll_sec=int(wc_cfg.get("poll_sec", DEFAULT_POLL_SEC)),
-        reply_poll_sec=int(wc_cfg.get("reply_poll_sec", DEFAULT_REPLY_POLL)),
+        base_url=_config_text(wc_cfg, "base_url", DEFAULT_BASE_URL),
+        poll_base_url=_config_text(wc_cfg, "poll_base_url", ""),
+        token=_config_text(wc_cfg, "token", ""),
+        poll_sec=_config_int(wc_cfg, "poll_sec", DEFAULT_POLL_SEC),
+        reply_poll_sec=_config_int(wc_cfg, "reply_poll_sec", DEFAULT_REPLY_POLL),
     )
     channel = WechatChannel(config, db_path)
     channel.start()
@@ -366,7 +392,11 @@ def start_wechat_channel(wc_cfg: dict[str, Any], db_path: str | Path) -> WechatC
 
 
 def describe_wechat_channel(wc_cfg: dict[str, Any]) -> str:
-    poll_url = wc_cfg.get("poll_base_url") or wc_cfg.get("base_url", DEFAULT_BASE_URL)
-    send_url = wc_cfg.get("base_url", DEFAULT_BASE_URL)
-    poll_sec = int(wc_cfg.get("poll_sec", DEFAULT_POLL_SEC))
+    poll_url = _config_text(
+        wc_cfg,
+        "poll_base_url",
+        _config_text(wc_cfg, "base_url", DEFAULT_BASE_URL),
+    )
+    send_url = _config_text(wc_cfg, "base_url", DEFAULT_BASE_URL)
+    poll_sec = _config_int(wc_cfg, "poll_sec", DEFAULT_POLL_SEC)
     return f"微信 iLink: poll={poll_url}  send={send_url}  interval={poll_sec}s"

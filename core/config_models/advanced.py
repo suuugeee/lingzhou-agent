@@ -6,6 +6,21 @@ from typing import Literal
 from pydantic import AliasChoices, BaseModel, Field
 
 
+def _default_fact_context_exclude_prefixes() -> list[str]:
+    return [
+        "control:",
+        "durable_failure:",
+        "evolution:",
+        "pref:",
+        "run:",
+        "soul:",
+    ]
+
+
+def _default_fact_context_priority_prefixes() -> list[str]:
+    return ["interlocutor:", "user:"]
+
+
 class EmotionConfig(BaseModel):
     baseline_valence: float = Field(default=0.6, ge=0.0, le=1.0, description="情感基线效价")
     baseline_arousal: float = Field(default=0.5, ge=0.0, le=1.0, description="情感基线唤醒")
@@ -320,14 +335,7 @@ class ThresholdsConfig(BaseModel):
         description="topic anchor 进入检索前要求的最小字符数",
     )
     fact_context_exclude_prefixes: list[str] = Field(
-        default_factory=lambda: [
-            "control:",
-            "durable_failure:",
-            "evolution:",
-            "pref:",
-            "run:",
-            "soul:",
-        ],
+        default_factory=_default_fact_context_exclude_prefixes,
         description="构造 facts snapshot 时需要排除的 key 前缀",
     )
     fact_context_task_limit: int = Field(
@@ -339,7 +347,7 @@ class ThresholdsConfig(BaseModel):
         description="global 作用域 facts snapshot 的保留上限",
     )
     fact_context_priority_prefixes: list[str] = Field(
-        default_factory=lambda: ["interlocutor:", "user:"],
+        default_factory=_default_fact_context_priority_prefixes,
         description="构造 facts snapshot 时总是优先尝试保留的 durable fact 前缀",
     )
     fact_context_priority_limit: int = Field(
@@ -397,7 +405,7 @@ class ThresholdsConfig(BaseModel):
         description="任务相似度上下文快照阈值：judgment assembler 加载相似任务列表的最低分",
     )
     # 工作记忆（WM）优先级基准（微调注入顺序，不影响功能语义）
-    wm_pri_signal: float = Field(default=0.90, ge=0.0, le=1.0, description="调度信号、执行成功结果的 WM 优先级")
+    wm_pri_signal: float = Field(default=0.72, ge=0.0, le=1.0, description="调度信号、执行成功结果的 WM 优先级")
     wm_pri_history: float = Field(default=0.88, ge=0.0, le=1.0, description="近期对话历史的 WM 优先级")
     wm_pri_identity: float = Field(default=0.85, ge=0.0, le=1.0, description="身份/Soul 文件的 WM 优先级（bootstrap_identity 类型）")
     wm_pri_error: float = Field(default=0.30, ge=0.0, le=1.0, description="工具失败结果的 WM 优先级")

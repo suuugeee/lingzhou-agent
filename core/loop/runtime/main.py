@@ -39,6 +39,14 @@ if TYPE_CHECKING:
     from core.config import Config
 
 
+def _chain_recent_action_feedback() -> deque:
+    return deque(maxlen=3)
+
+
+def _chain_conversation_history() -> deque:
+    return deque(maxlen=6)
+
+
 @dataclasses.dataclass
 class ChainState:
     """tick 链运行状态快照（取代硬编码字符串元组 _CHAIN_STATE_FIELDS）。
@@ -59,7 +67,7 @@ class ChainState:
     _last_action_state_delta: str = ""
     _success_stall_task_id: str | None = None
     _success_stall_streak: int = 0
-    _recent_action_feedback: deque = dataclasses.field(default_factory=lambda: deque(maxlen=3))
+    _recent_action_feedback: deque = dataclasses.field(default_factory=_chain_recent_action_feedback)
     _last_action_sig: str = ""
     _last_result_fp: str = ""
     _idle_cycles: int = 0
@@ -69,7 +77,7 @@ class ChainState:
     _pending_idle_gap: float | None = None
     _pending_routing_overrides: dict | None = None
     _pending_thinking_override: str | None = None
-    _conv_history: deque = dataclasses.field(default_factory=lambda: deque(maxlen=6))
+    _conv_history: deque = dataclasses.field(default_factory=_chain_conversation_history)
 
 
 class CognitionLoop:

@@ -11,7 +11,7 @@ from core.evolution import EvolutionEngine
 from core.execution import ExecutionLayer
 from core.judgment import JudgmentLayer
 from core.log_fields import format_log_fields
-from core.loop.routing_overrides import normalize_routing_overrides
+from core.loop.routing_overrides import normalize_routing_overrides_payload
 from core.perception import PerceptionLayer
 from provider import create_provider
 
@@ -97,8 +97,10 @@ async def _refresh_runtime_routing_overrides(loop: CognitionLoop) -> None:
 
     if found and raw:
         try:
-            payload = json.loads(raw)
-            refreshed = normalize_routing_overrides(payload)
+            refreshed = normalize_routing_overrides_payload(
+                raw,
+                catalog_path=loop._cfg.workspace_dir / "models.json",
+            )
         except Exception as exc:
             _log.warning("[hot-reload] DB routing_overrides 解析失败,已清空内存态: %s", exc)
 

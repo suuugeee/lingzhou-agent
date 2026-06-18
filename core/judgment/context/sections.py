@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 from .utils import _cache_put, _clip_for_context, _context_fmt_cache, _estimate_tokens
 
@@ -15,6 +15,14 @@ if TYPE_CHECKING:
     from core.perception import EthosState, Percept
     from store.semantic import SemanticMemory
     from tools.registry import ToolManifest
+
+
+def _cached_section(cache_key: str, build: Callable[[], str]) -> str:
+    if cache_key in _context_fmt_cache:
+        return _context_fmt_cache[cache_key]
+    result = build()
+    _cache_put(cache_key, result)
+    return result
 
 
 def _fmt_memories(memories: list[dict[str, Any]]) -> str:
@@ -460,32 +468,38 @@ def _fmt_chat_history(messages: list[dict[str, Any]], max_chars: int = 300) -> s
 
 def _fmt_chat_continuity(text: str) -> str:
     cache_key = f"_fmt_chat_continuity:{hash(text) if text else 'none'}"
-    if cache_key in _context_fmt_cache:
-        return _context_fmt_cache[cache_key]
-    normalized = str(text or "").strip()
-    result = _clip_for_context(normalized, 1200) if normalized else "（暂无当前 chat 的连续性记忆）"
-    _cache_put(cache_key, result)
-    return result
+    return _cached_section(
+        cache_key,
+        lambda: (
+            _clip_for_context(str(text or "").strip(), 1200)
+            if str(text or "").strip()
+            else "（暂无当前 chat 的连续性记忆）"
+        ),
+    )
 
 
 def _fmt_cross_task_episodic(text: str) -> str:
     cache_key = f"_fmt_cross_task_episodic:{hash(text) if text else 'none'}"
-    if cache_key in _context_fmt_cache:
-        return _context_fmt_cache[cache_key]
-    normalized = str(text or "").strip()
-    result = _clip_for_context(normalized, 1600) if normalized else "（暂无直接相关的跨任务情节线索）"
-    _cache_put(cache_key, result)
-    return result
+    return _cached_section(
+        cache_key,
+        lambda: (
+            _clip_for_context(str(text or "").strip(), 1600)
+            if str(text or "").strip()
+            else "（暂无直接相关的跨任务情节线索）"
+        ),
+    )
 
 
 def _fmt_interlocutor_continuity(text: str) -> str:
     cache_key = f"_fmt_interlocutor_continuity:{hash(text) if text else 'none'}"
-    if cache_key in _context_fmt_cache:
-        return _context_fmt_cache[cache_key]
-    normalized = str(text or "").strip()
-    result = _clip_for_context(normalized, 1200) if normalized else "（暂无当前交互对象的跨 chat 互动连续性记忆）"
-    _cache_put(cache_key, result)
-    return result
+    return _cached_section(
+        cache_key,
+        lambda: (
+            _clip_for_context(str(text or "").strip(), 1200)
+            if str(text or "").strip()
+            else "（暂无当前交互对象的跨 chat 互动连续性记忆）"
+        ),
+    )
 
 
 def _fmt_chat_memories(memories: list[dict[str, Any]]) -> str:

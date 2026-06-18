@@ -16,6 +16,7 @@ import logging
 from typing import TYPE_CHECKING, Any
 
 from core.immune.policy import check_tool_blocked
+from core.metabolic.lifecycle_utils import decision_basis_from_parts
 from core.metabolic.state_writer import apply_state_write
 
 if TYPE_CHECKING:
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
     from tools.view_protocols import TaskStoreViewProtocol
 
 _log = logging.getLogger("lingzhou.metabolic")
+
+_FACT_IMMUNE_OPS = {"set_fact", "delete_fact"}
 
 
 class MetabolicEngine:
@@ -42,8 +45,7 @@ class MetabolicEngine:
         """
         # fact 写入/删除以 "fact:<key>" 形式过黑名单；soul_change 等高风险 op
         # 日后可在 check_tool_blocked 中新增规则，此处自动生效。
-        pseudo_tool = f"fact:{proposal.key}" if proposal.op in {"set_fact", "delete_fact"} else proposal.op
-        block_reason = check_tool_blocked(pseudo_tool)
+        block_reason = check_tool_blocked(_pseudo_tool_name(proposal))
 
         accepted = block_reason is None
         result = None
@@ -53,13 +55,7 @@ class MetabolicEngine:
 
         if not accepted:
             ledger_reason = str(block_reason or "immune_blocked")
-            _log.warning(
-                "[metabolic] 免疫器官拒绝写入 key=%r op=%r source=%r reason=%s",
-                proposal.key,
-                proposal.op,
-                proposal.source,
-                block_reason,
-            )
+            _log_blocked_write(proposal, block_reason)
         else:
             try:
                 applied = await apply_state_write(
@@ -84,25 +80,58 @@ class MetabolicEngine:
                     exc,
                 )
 
-        try:
-            value_str = _ledger_value(proposal.value)
-            await self._task_store.ledger_append(
-                op=proposal.op,
-                key=ledger_key,
-                value=value_str,
-                scope=proposal.scope,
-                source=proposal.source,
-                accepted=accepted,
-                run_id=proposal.run_id,
-                reason=ledger_reason,
-                proposal_hash=_proposal_hash(proposal),
-                decision_basis=_decision_basis(proposal),
-            )
-        except Exception as exc:
-            _log.warning("[metabolic] 生命史账本写入失败（不影响主流程）: %s", exc)
+        await _append_lifecycle_ledger(
+            self._task_store,
+            proposal,
+            ledger_key=ledger_key,
+            accepted=accepted,
+            ledger_reason=ledger_reason,
+        )
         if write_error is not None:
             raise write_error
         return result
+
+
+def _pseudo_tool_name(proposal: StateProposal) -> str:
+    return f"fact:{proposal.key}" if proposal.op in _FACT_IMMUNE_OPS else proposal.op
+
+
+def _log_blocked_write(proposal: StateProposal, block_reason: Any) -> None:
+    _log.warning(
+        "[metabolic] 免疫器官拒绝写入 key=%r op=%r source=%r reason=%s",
+        proposal.key,
+        proposal.op,
+        proposal.source,
+        block_reason,
+    )
+
+
+async def _append_lifecycle_ledger(
+    task_store: TaskStoreViewProtocol,
+    proposal: StateProposal,
+    *,
+    ledger_key: str,
+    accepted: bool,
+    ledger_reason: str,
+) -> None:
+    try:
+        await task_store.ledger_append(
+            op=proposal.op,
+            key=ledger_key,
+            value=_ledger_value(proposal.value),
+            scope=proposal.scope,
+            source=proposal.source,
+            accepted=accepted,
+            run_id=proposal.run_id,
+            reason=ledger_reason,
+            proposal_hash=_proposal_hash(proposal),
+            decision_basis=decision_basis_from_parts(
+                proposal.extras.get("decision_basis") or proposal.extras.get("basis") or "",
+                limit=1000,
+            ),
+        )
+    except Exception as exc:
+        _log.warning("[metabolic] 生命史账本写入失败（不影响主流程）: %s", exc)
 
 
 def _ledger_value(value: object) -> str:
@@ -130,13 +159,10 @@ def _proposal_hash(proposal: StateProposal) -> str:
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
-def _decision_basis(proposal: StateProposal) -> str:
-    """提取可公开审计的依据摘要，避免泄露模型内部思维链。"""
-    basis = proposal.extras.get("decision_basis") or proposal.extras.get("basis") or ""
-    text = " ".join(str(basis or "").split())
-    return text[:1000]
-
-
 def _write_error_reason(exc: Exception) -> str:
-    text = f"write_error:{exc.__class__.__name__}:{exc}"
-    return text[:500]
+    return decision_basis_from_parts(
+        "write_error",
+        exc.__class__.__name__,
+        exc,
+        limit=500,
+    )

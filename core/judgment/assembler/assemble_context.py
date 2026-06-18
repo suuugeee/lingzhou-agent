@@ -7,7 +7,9 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, cast
 
+from core.cortex import intent as cortex_intent
 from store.task import RUNNABLE_TASK_STATUSES
+from core.judgment.tiers import INITIAL_PHASE
 
 from ..context.facts import (
     _load_context_facts_snapshot,
@@ -62,6 +64,25 @@ def _clip_context_artifact(text: Any, max_chars: int) -> str:
     return value[:max_chars]
 
 
+def _is_process_scaffolding_text(text: Any) -> bool:
+    value = str(text or "").strip()
+    if not value:
+        return False
+    return cortex_intent.is_control_next_verification(value)
+
+
+def _memory_search_query_for_task(task: Any | None, user_message: str) -> str:
+    if task is None:
+        return user_message
+    if user_message:
+        return user_message
+    for candidate in (getattr(task, "next_step", None), getattr(task, "goal", None), getattr(task, "title", None)):
+        normalized = str(candidate or "").strip()
+        if normalized and not _is_process_scaffolding_text(normalized):
+            return normalized
+    return str(getattr(task, "goal", None) or getattr(task, "title", None) or getattr(task, "next_step", None) or "")
+
+
 def _build_context_anchors(
     assembler: Any,
     task: Any | None,
@@ -72,7 +93,7 @@ def _build_context_anchors(
 ) -> list[str]:
     anchors: list[str] = []
     if task:
-        primary_anchor = task.next_step or task.goal or task.title
+        primary_anchor = _memory_search_query_for_task(task, user_message="")
         if primary_anchor:
             anchors.append(primary_anchor)
         task_source = str(getattr(task, "source", "") or "")
@@ -127,7 +148,7 @@ async def _resolve_context_scope(
                 break
     include_open_task_overview = task is None
     task_id_str = str(task.id) if task else None
-    search_query = (user_message or (task.next_step or task.goal or task.title)) if task else user_message
+    search_query = _memory_search_query_for_task(task, user_message)
     resolved_chat_id = str(chat_id or "").strip()
     if not resolved_chat_id and task is not None:
         try:
@@ -351,6 +372,59 @@ async def _resolve_context_references(
     }
 
 
+async def _retrieve_multi_anchor_memories(
+    assembler: Any,
+    semantic: SemanticMemory,
+    anchors: list[str],
+    *,
+    task_id_str: str | None,
+    resolved_chat_id: str,
+) -> tuple[list[Any], float]:
+    memories_t0 = time.perf_counter()
+    _log.info(
+        "[context.stage] semantic_multi_anchor_start task=%s chat=%s anchors=%d",
+        task_id_str or "",
+        resolved_chat_id or "",
+        len(anchors),
+    )
+    try:
+        memories = await asyncio.wait_for(
+            asyncio.get_running_loop().run_in_executor(
+                None,
+                semantic.retrieve_multi_anchor,
+                anchors,
+                assembler._cfg.memory.semantic_top_k,
+            ),
+            timeout=8.0,
+        )
+    except TimeoutError:
+        memories = []
+        _log.warning(
+            "[context.stage] semantic_multi_anchor_timeout dt=%.3fs task=%s chat=%s anchors=%d fallback=empty",
+            time.perf_counter() - memories_t0,
+            task_id_str or "",
+            resolved_chat_id or "",
+            len(anchors),
+        )
+    except Exception:
+        memories = []
+        _log.exception(
+            "[context.stage] semantic_multi_anchor_failed dt=%.3fs task=%s chat=%s anchors=%d fallback=empty",
+            time.perf_counter() - memories_t0,
+            task_id_str or "",
+            resolved_chat_id or "",
+            len(anchors),
+        )
+    semantic_top_score = max((float(item.get("score") or 0.0) for item in memories if isinstance(item.get("score"), (int, float))), default=0.0)
+    _log.info(
+        "[context.stage] semantic_multi_anchor_done dt=%.3fs hits=%d top_score=%.4f",
+        time.perf_counter() - memories_t0,
+        len(memories),
+        semantic_top_score,
+    )
+    return memories, semantic_top_score
+
+
 async def _assemble_context(
     assembler: Any,
     frame_or_percept: CognitionFrame | Percept,
@@ -367,7 +441,7 @@ async def _assemble_context(
     hard_boundaries: list[str] | None = None,
     perception_replay: PerceptionReplaySummary | None = None,
     cognitive_signals: CognitiveSignals | None = None,
-    phase: str = "initial",
+    phase: str = INITIAL_PHASE,
     current_action: str = "",
     tool_history: list[dict[str, Any]] | None = None,
     effective_thinking: str | None = None,
@@ -420,47 +494,12 @@ async def _assemble_context(
     similar_tasks = loaded["similar_tasks"]
     cross_task_episodic_text = loaded["cross_task_episodic_text"]
     anchors = _build_context_anchors(assembler, task, user_message, resolved_chat_id, refs["resolved_speaker"], failures)
-    memories_t0 = time.perf_counter()
-    _log.info(
-        "[context.stage] semantic_multi_anchor_start task=%s chat=%s anchors=%d",
-        task_id_str or "",
-        resolved_chat_id or "",
-        len(anchors),
-    )
-    try:
-        memories = await asyncio.wait_for(
-            asyncio.get_running_loop().run_in_executor(
-                None,
-                semantic.retrieve_multi_anchor,
-                anchors,
-                assembler._cfg.memory.semantic_top_k,
-            ),
-            timeout=8.0,
-        )
-    except TimeoutError:
-        memories = []
-        _log.warning(
-            "[context.stage] semantic_multi_anchor_timeout dt=%.3fs task=%s chat=%s anchors=%d fallback=empty",
-            time.perf_counter() - memories_t0,
-            task_id_str or "",
-            resolved_chat_id or "",
-            len(anchors),
-        )
-    except Exception:
-        memories = []
-        _log.exception(
-            "[context.stage] semantic_multi_anchor_failed dt=%.3fs task=%s chat=%s anchors=%d fallback=empty",
-            time.perf_counter() - memories_t0,
-            task_id_str or "",
-            resolved_chat_id or "",
-            len(anchors),
-        )
-    semantic_top_score = max((float(item.get("score") or 0.0) for item in memories if isinstance(item.get("score"), (int, float))), default=0.0)
-    _log.info(
-        "[context.stage] semantic_multi_anchor_done dt=%.3fs hits=%d top_score=%.4f",
-        time.perf_counter() - memories_t0,
-        len(memories),
-        semantic_top_score,
+    memories, semantic_top_score = await _retrieve_multi_anchor_memories(
+        assembler,
+        semantic,
+        anchors,
+        task_id_str=task_id_str,
+        resolved_chat_id=resolved_chat_id,
     )
     should_use_daily_fallback = bool(search_query) and not cross_task_episodic_text and (not memories or semantic_top_score < assembler._cfg.memory.daily_recall_semantic_score_threshold)
     if should_use_daily_fallback:
@@ -543,7 +582,6 @@ async def _assemble_context(
         assembler,
         percept=percept,
         wm=wm,
-        semantic=semantic,
         emotion=emotion,
         ethos_state=ethos_state,
         judgment_signals=judgment_signals,
@@ -556,29 +594,8 @@ async def _assemble_context(
         user_message=user_message,
         tool_history=tool_history,
         routing_overrides=routing_overrides,
-        task=task,
-        recent_turns=recent_turns,
-        current_interlocutor_profile_section=refs["current_interlocutor_profile_section"],
-        current_interlocutor_continuity_section=refs["current_interlocutor_continuity_section"],
-        entity_section=refs["entity_section"],
-        similar_tasks=similar_tasks,
-        recent_runs=recent_runs,
-        waiting_tasks=waiting_tasks,
-        runnable_tasks=runnable_tasks,
-        context_facts=context_facts,
         durable_failure_snapshot=durable_failure_snapshot,
         failures=failures,
-        chat_memories=chat_memories,
-        memories=memories,
-        episodic_text=episodic_text,
-        cross_task_episodic_text=cross_task_episodic_text,
-        chat_continuity_text=chat_continuity_text,
-        search_query=search_query,
-        resolved_chat_id=resolved_chat_id,
-        daily_continuity_text=daily_continuity_text,
-        soul_section=soul_section,
-        skills=skills,
-        all_skills=all_skills,
         config_with_breaker=config_with_breaker,
         effective_registry=registry_override or assembler._registry,
         effective_thinking=effective_thinking,

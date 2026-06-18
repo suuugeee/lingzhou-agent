@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import random
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -25,15 +26,26 @@ _log = logging.getLogger("lingzhou.self_drive")
 
 # 好奇心自然衰减的时间窗口（秒）；elapsed 以此归一化，超过该窗口才触发衰减
 _CURIOSITY_DECAY_WINDOW: int = 600  # 10 分钟
+_DOMAIN_COOLDOWN: float = 3600.0
+_EARLY_TICK_THRESHOLD: int = 5
+_EXPLORATION_THRESHOLD_EARLY: float = 0.35
+_EXPLORATION_THRESHOLD_LATE: float = 0.45
+_DRIVE_WEIGHTS = (0.4, 0.3, 0.3)  # novelty, progress, surprise
+_EXPLORATION_CHANCE = 0.6
+_CONSOLIDATE_TASK_COUNT = 3
+_CONSOLIDATE_PREDICTION_ERROR_THRESHOLD = 0.15
+_CONSOLIDATE_PROBABILITY = 0.30
+
+_DEFAULT_EVIDENCE_NEEDED = [
+    "读取相关运行时状态或代码证据",
+    "确认是否已有未完成 self_drive 任务覆盖同一问题",
+    "形成一条可复用观察或明确维持现状的理由",
+]
+_DEFAULT_DONE_CONDITION = "能用具体证据回答 question，并写出下一步是否需要行动。"
 
 
-@dataclass
-class CuriosityState:
-    """好奇心状态 — 追踪灵舟对各个领域的兴趣水平。"""
-
-    # 知识领域 → 兴趣分 (0-1)
-    # 高兴趣 = 高好奇心；是否行动由主脑在上下文中裁决
-    interests: dict[str, float] = field(default_factory=lambda: {
+def _default_interests() -> dict[str, float]:
+    return {
         "code_structure": 0.5,    # 代码结构理解
         "tool_mastery": 0.5,      # 工具掌握
         "memory_system": 0.5,     # 记忆系统
@@ -42,7 +54,73 @@ class CuriosityState:
         "error_patterns": 0.5,    # 错误模式
         "api_integration": 0.5,   # API 集成
         "performance": 0.5,       # 性能优化
-    })
+    }
+
+
+_EVENT_DOMAIN_MAPPING = {
+    "file_read": "code_structure",
+    "file_list": "code_structure",
+    "shell_run": "tool_mastery",
+    "memory_search": "memory_system",
+    "memory_add": "memory_system",
+    "task_add": "self_evolution",
+    "task_complete": "self_evolution",
+    "error": "error_patterns",
+    "api_call": "api_integration",
+}
+
+
+_DOMAIN_TASKS = {
+    "code_structure": {
+        "title": "探索灵舟代码结构",
+        "goal": "阅读 core/ 中的关键模块，理解架构和可改进点。选择你之前没细读过的文件开始。",
+        "next_step": "列出 core/ 目录中最近修改的文件，选择一个不熟悉的开始阅读",
+    },
+    "tool_mastery": {
+        "title": "练习工具掌握",
+        "goal": "选择一个你较少使用的工具，阅读其实现，理解其能力边界。尝试用它解决一个小问题。",
+        "next_step": "列出 tools/ 目录中最近未使用的工具，选择一个学习",
+    },
+    "memory_system": {
+        "title": "优化记忆系统",
+        "goal": "检查 memory/ 目录中的记忆文件，寻找可以整理、合并或提炼的内容。让记忆更结构化。",
+        "next_step": "列出 memory/ 目录文件，识别冗余或需要合并的内容",
+    },
+    "self_evolution": {
+        "title": "自我进化迭代",
+        "goal": "回顾最近的操作日志，寻找可以改进的模式。思考：如果我能改一行代码来让自己更好，会改什么？",
+        "next_step": "读取最近日志，寻找重复模式或可优化点",
+    },
+    "environment": {
+        "title": "拓展环境认知",
+        "goal": "探索 workspace 中尚未了解的文件和目录。建立更完整的环境地图。",
+        "next_step": "列出 workspace 中最近未访问的子目录，选择一个探索",
+    },
+    "error_patterns": {
+        "title": "分析错误模式",
+        "goal": "回顾最近的失败记录，寻找重复模式。总结根因并思考预防措施。",
+        "next_step": "列出最近的失败记录，按类型分组分析",
+    },
+    "api_integration": {
+        "title": "掌握 API 集成",
+        "goal": "检查 provider/ 中的 API 集成代码，理解不同 model 的配置和切换机制。",
+        "next_step": "阅读 provider/ 目录中的 API 客户端实现",
+    },
+    "performance": {
+        "title": "性能自检优化",
+        "goal": "检查自己的运行效率：token 消耗、内存占用、工具调用延迟。寻找可优化的环节。",
+        "next_step": "读取 self_model 状态，分析 token 消耗趋势",
+    },
+}
+
+
+@dataclass
+class CuriosityState:
+    """好奇心状态 — 追踪灵舟对各个领域的兴趣水平。"""
+
+    # 知识领域 → 兴趣分 (0-1)
+    # 高兴趣 = 高好奇心；是否行动由主脑在上下文中裁决
+    interests: dict[str, float] = field(default_factory=_default_interests)
 
     # 综合好奇心
     overall: float = 0.5
@@ -77,18 +155,7 @@ class CuriosityState:
 
     def from_event(self, event_type: str, summary: str) -> None:
         """从事件更新好奇心。"""
-        mapping = {
-            "file_read": "code_structure",
-            "file_list": "code_structure",
-            "shell_run": "tool_mastery",
-            "memory_search": "memory_system",
-            "memory_add": "memory_system",
-            "task_add": "self_evolution",
-            "task_complete": "self_evolution",
-            "error": "error_patterns",
-            "api_call": "api_integration",
-        }
-        domain = mapping.get(event_type, "environment")
+        domain = _EVENT_DOMAIN_MAPPING.get(event_type, "environment")
         self.boost(domain, 0.05)
         self.last_exploration_at = time.monotonic()
 
@@ -162,12 +229,9 @@ class SelfDriveEngine:
     def snapshot(self) -> dict[str, object]:
         """返回自驱器官的可读状态，供 LLM 感知而非直接执行。"""
         state = self._state
-        ranked_interests = sorted(state.interests.items(), key=lambda item: -item[1])
+        ranked_interests = self._rank_interests(state)
         now_wall = time.time()
-        recent_domains = sorted(
-            state.last_explored_at.items(),
-            key=lambda item: -item[1],
-        )[:3]
+        recent_domains = self._get_recent_domains(state)[:3]
         return {
             "overall": round(state.overall, 4),
             "learning_rate": round(state.learning_rate, 4),
@@ -184,6 +248,94 @@ class SelfDriveEngine:
             ],
         }
 
+    def _rank_interests(self, state: CuriosityState) -> list[tuple[str, float]]:
+        """按兴趣分值倒序返回领域列表。"""
+        return sorted(state.interests.items(), key=lambda item: -item[1])
+
+    def _get_recent_domains(
+        self, state: CuriosityState
+    ) -> list[tuple[str, float]]:
+        """返回最近探索域列表（按最近探索时间倒序）。"""
+        return sorted(state.last_explored_at.items(), key=lambda item: -item[1])
+
+    def _all_domains_in_cooldown(self, state: CuriosityState, now_wall: float) -> bool:
+        """判断是否所有领域都处于冷却窗口内。"""
+        if not state.interests:
+            return False
+        return all(
+            now_wall - state.last_explored_at.get(domain, 0.0) < _DOMAIN_COOLDOWN
+            for domain in state.interests
+        )
+
+    def _compute_curiosity_signal(self, tick: int) -> tuple[float, float]:
+        """计算好奇心总分与动态阈值。"""
+        alpha, beta, gamma = _DRIVE_WEIGHTS
+        state = self._state
+        novelty = 1.0 - state.overall
+        progress = min(1.0, state.learning_rate)
+        surprise = state.prediction_error_ema
+        threshold = (
+            _EXPLORATION_THRESHOLD_EARLY
+            if tick < _EARLY_TICK_THRESHOLD
+            else _EXPLORATION_THRESHOLD_LATE
+        )
+        return alpha * novelty + beta * progress + gamma * surprise, threshold
+
+    def _should_enter_explore_mode(
+        self, *, idle_ticks: int, force_explore_idle: int, curiosity_score: float, threshold: float
+    ) -> tuple[bool, list[str]]:
+        """在不干扰用户任务的前提下判断是否进入探索。"""
+        rationale: list[str] = []
+        should_explore = False
+
+        if idle_ticks >= force_explore_idle:
+            should_explore = True
+            rationale.append(f"空闲 {idle_ticks} 轮，自驱事件置信度升高")
+            return should_explore, rationale
+
+        if curiosity_score > threshold:
+            should_explore = True
+            rationale.append(f"好奇心 C={curiosity_score:.2f}>{threshold}")
+            return should_explore, rationale
+
+        if self._state.surprise_count > 0:
+            should_explore = True
+            rationale.append(f"惊奇事件 {self._state.surprise_count} 个")
+
+        return should_explore, rationale
+
+    def _pick_domain(self, now_wall: float) -> str | None:
+        """按兴趣和冷却策略选域，并返回候选领域。"""
+        state = self._state
+        available = sorted(
+            [
+                (domain, interest)
+                for domain, interest in state.interests.items()
+                if now_wall - state.last_explored_at.get(domain, 0.0) >= _DOMAIN_COOLDOWN
+            ],
+            key=lambda item: -item[1],
+        )
+
+        if available:
+            if random.random() < _EXPLORATION_CHANCE or len(available) <= 1:
+                return available[0][0]
+            return random.choice(available[1:])[0]
+
+        cooldown_ranked = sorted(
+            state.interests.items(),
+            key=lambda item: state.last_explored_at.get(item[0], 0.0),
+        )
+        return cooldown_ranked[0][0]
+
+    def _consolidate_mode(self) -> bool:
+        """是否从 explore 切换到 consolidate。"""
+        state = self._state
+        return (
+            state.tasks_completed >= _CONSOLIDATE_TASK_COUNT
+            and state.prediction_error_ema < _CONSOLIDATE_PREDICTION_ERROR_THRESHOLD
+            and random.random() < _CONSOLIDATE_PROBABILITY
+        )
+
     def compute_signal(self, *, idle_ticks: int = 0, has_user_message: bool = False,
                        has_active_task: bool = False, tick: int = 0,
                        force_explore_idle: int = 3) -> DriveSignal:
@@ -199,17 +351,8 @@ class SelfDriveEngine:
           DriveSignal: 是否应该探索、建议领域、理由
         """
         state = self._state
-
-        # C(t) = α·Novelty + β·Progress + γ·Surprise
-        alpha, beta, gamma = 0.4, 0.3, 0.3
-        novelty = 1.0 - state.overall  # 整体兴趣低 = 新鲜度高
-        progress = min(1.0, state.learning_rate)
-        surprise = state.prediction_error_ema
-        C = alpha * novelty + beta * progress + gamma * surprise
-
-        # 自适应阈值：首次运行更敏感，后续逐步提高
-        EXPLORE_THRESHOLD = 0.35 if tick < 5 else 0.45
-        FORCE_EXPLORE_IDLE = force_explore_idle  # 来自 ThresholdsConfig.curiosity_idle_min_cycles
+        now_wall = time.time()
+        curiosity_score, threshold = self._compute_curiosity_signal(tick)
 
         should_explore = False
         suggested_domain = None
@@ -219,71 +362,44 @@ class SelfDriveEngine:
         if has_user_message or has_active_task:
             return DriveSignal(
                 should_explore=False,
-                curiosity_score=C,
+                curiosity_score=curiosity_score,
                 rationale="有用户消息或活跃任务，自驱力休眠",
             )
 
-        # 场景2: 长时间空闲 → 形成高置信自驱事件
-        if idle_ticks >= FORCE_EXPLORE_IDLE:
-            should_explore = True
-            rationale_parts.append(f"空闲 {idle_ticks} 轮，自驱事件置信度升高")
+        should_explore, rationale_parts = self._should_enter_explore_mode(
+            idle_ticks=idle_ticks,
+            force_explore_idle=force_explore_idle,
+            curiosity_score=curiosity_score,
+            threshold=threshold,
+        )
 
-        # 场景3: 好奇心超过阈值  # noqa: ERA001
-        elif C > EXPLORE_THRESHOLD:
-            should_explore = True
-            rationale_parts.append(f"好奇心 C={C:.2f}>{EXPLORE_THRESHOLD}")
-
-        # 场景4: 惊奇事件  # noqa: ERA001
-        elif state.surprise_count > 0:
-            should_explore = True
-            rationale_parts.append(f"惊奇事件 {state.surprise_count} 个")
-
-        # 选择探索领域（冷却期仅作参考，不作硬拦截，由 LLM 感知决策）
-        _DOMAIN_COOLDOWN = 3600.0
         if should_explore:
-            import random
-            now_wall = time.time()
-            available = sorted(
-                [(d, v) for d, v in state.interests.items()
-                 if now_wall - state.last_explored_at.get(d, 0.0) >= _DOMAIN_COOLDOWN],
-                key=lambda x: -x[1],
-            )
-            if available:
-                if random.random() < 0.6 or len(available) <= 1:
-                    suggested_domain = available[0][0]
-                else:
-                    suggested_domain = random.choice(available[1:])[0]
-            else:
-                # 全域冷却期内：选最久未探索的，由 LLM 决定是否继续
-                cooldown_ranked = sorted(
-                    state.interests.items(),
-                    key=lambda x: state.last_explored_at.get(x[0], 0.0),
-                )
-                suggested_domain = cooldown_ranked[0][0]
+            suggested_domain = self._pick_domain(now_wall)
+            if self._all_domains_in_cooldown(state, now_wall):
                 rationale_parts.append(f"所有域在冷却期，最久未探索: {suggested_domain}")
             rationale_parts.append(f"探索领域: {suggested_domain}")
 
         rationale = "; ".join(rationale_parts) if rationale_parts else "好奇心未达阈值"
         # 内聚整合模式：已完成≥3任务且预测误差低时，30% 概率切换为巩固模式
-        import random as _random
-        _consolidate = (
-            should_explore
-            and state.tasks_completed >= 3
-            and state.prediction_error_ema < 0.15
-            and _random.random() < 0.30
-        )
-        drive_type = "consolidate" if _consolidate else "explore"
-        if _consolidate:
+        consolidate = should_explore and self._consolidate_mode()
+        drive_type = "consolidate" if consolidate else "explore"
+        if consolidate:
             rationale_parts.append("切换整合模式（tasks_completed≥3 且预测误差低）")
             rationale = "; ".join(rationale_parts)
         _log.debug(
             "[self_drive] C=%.3f idle=%d has_task=%s explore=%s drive_type=%s domain=%s | %s",
-            C, idle_ticks, has_active_task, should_explore, drive_type, suggested_domain, rationale,
+            curiosity_score,
+            idle_ticks,
+            has_active_task,
+            should_explore,
+            drive_type,
+            suggested_domain,
+            rationale,
         )
         return DriveSignal(
             should_explore=should_explore,
             drive_type=drive_type,
-            curiosity_score=C,
+            curiosity_score=curiosity_score,
             suggested_domain=suggested_domain,
             rationale=rationale,
         )
@@ -293,59 +409,13 @@ class SelfDriveEngine:
 
         返回值只作为 WM 事件中的候选方向；是否创建任务或行动由主脑裁决。
         """
-        domain_tasks = {
-            "code_structure": {
-                "title": "探索灵舟代码结构",
-                "goal": "阅读 core/ 中的关键模块，理解架构和可改进点。选择你之前没细读过的文件开始。",
-                "next_step": "列出 core/ 目录中最近修改的文件，选择一个不熟悉的开始阅读",
-            },
-            "tool_mastery": {
-                "title": "练习工具掌握",
-                "goal": "选择一个你较少使用的工具，阅读其实现，理解其能力边界。尝试用它解决一个小问题。",
-                "next_step": "列出 tools/ 目录中最近未使用的工具，选择一个学习",
-            },
-            "memory_system": {
-                "title": "优化记忆系统",
-                "goal": "检查 memory/ 目录中的记忆文件，寻找可以整理、合并或提炼的内容。让记忆更结构化。",
-                "next_step": "列出 memory/ 目录文件，识别冗余或需要合并的内容",
-            },
-            "self_evolution": {
-                "title": "自我进化迭代",
-                "goal": "回顾最近的操作日志，寻找可以改进的模式。思考：如果我能改一行代码来让自己更好，会改什么？",
-                "next_step": "读取最近日志，寻找重复模式或可优化点",
-            },
-            "environment": {
-                "title": "拓展环境认知",
-                "goal": "探索 workspace 中尚未了解的文件和目录。建立更完整的环境地图。",
-                "next_step": "列出 workspace 中最近未访问的子目录，选择一个探索",
-            },
-            "error_patterns": {
-                "title": "分析错误模式",
-                "goal": "回顾最近的失败记录，寻找重复模式。总结根因并思考预防措施。",
-                "next_step": "列出最近的失败记录，按类型分组分析",
-            },
-            "api_integration": {
-                "title": "掌握 API 集成",
-                "goal": "检查 provider/ 中的 API 集成代码，理解不同 model 的配置和切换机制。",
-                "next_step": "阅读 provider/ 目录中的 API 客户端实现",
-            },
-            "performance": {
-                "title": "性能自检优化",
-                "goal": "检查自己的运行效率：token 消耗、内存占用、工具调用延迟。寻找可优化的环节。",
-                "next_step": "读取 self_model 状态，分析 token 消耗趋势",
-            },
-        }
-
         # 记录本次探索的域和时间（wall clock），用于冷却判断
         self._state.last_explored_at[domain] = time.time()
         self._save()
-        template = dict(domain_tasks.get(domain, domain_tasks["self_evolution"]))
-        template["domain"] = domain if domain in domain_tasks else "self_evolution"
-        template.setdefault("question", f"当前最值得验证的 {template['domain']} 问题是什么？")
-        template.setdefault("evidence_needed", [
-            "读取相关运行时状态或代码证据",
-            "确认是否已有未完成 self_drive 任务覆盖同一问题",
-            "形成一条可复用观察或明确维持现状的理由",
-        ])
-        template.setdefault("done_condition", "能用具体证据回答 question，并写出下一步是否需要行动。")
+        resolved_domain = domain if domain in _DOMAIN_TASKS else "self_evolution"
+        template = dict(_DOMAIN_TASKS.get(resolved_domain))
+        template["domain"] = resolved_domain
+        template.setdefault("question", f"当前最值得验证的 {resolved_domain} 问题是什么？")
+        template.setdefault("evidence_needed", _DEFAULT_EVIDENCE_NEEDED)
+        template.setdefault("done_condition", _DEFAULT_DONE_CONDITION)
         return template

@@ -53,23 +53,25 @@ async def run_runtime_forever(loop: Any) -> None:
 
 async def shutdown_runtime(loop: Any) -> None:
     """关闭运行时器官并记录干净退出。"""
-    if loop._tick_dispatcher.enabled:
-        await loop._tick_dispatcher.shutdown()
+    dispatcher = getattr(loop, "_tick_dispatcher", None)
+    if getattr(dispatcher, "enabled", False):
+        await dispatcher.shutdown()
     loop._probe_manager.stop()
     await loop._task_store.close()
     embedding_provider = getattr(loop, "_embedding_provider", None)
     if embedding_provider is not None and embedding_provider is not loop._provider:
-        try:
-            await embedding_provider.close()
-        except Exception:
-            _log.exception("[loop] 关闭 embedding provider 失败")
+        await _close_auxiliary_provider(embedding_provider, label="embedding provider")
     await loop._provider.close()
     for routing_provider in loop._routing_providers.values():
-        try:
-            await routing_provider.close()
-        except Exception:
-            _log.exception("[loop] 关闭 routing provider 失败")
+        await _close_auxiliary_provider(routing_provider, label="routing provider")
     _mark_clean_exit(loop)
+
+
+async def _close_auxiliary_provider(provider: Any, *, label: str) -> None:
+    try:
+        await provider.close()
+    except Exception:
+        _log.exception("[loop] 关闭 %s 失败", label)
 
 
 def _print_startup_panel(cfg: Any, routing_summary: str) -> None:

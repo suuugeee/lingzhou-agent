@@ -5,6 +5,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+_RUN_RESULT_SUCCESS_ACTIVATION = 0.72
+_RUN_RESULT_FAILURE_ACTIVATION = 0.82
+_RUN_RESULT_SUCCESS_VALENCE = 0.65
+_RUN_RESULT_FAILURE_VALENCE = 0.35
+
 
 class PromptsConfig(BaseModel):
     """提示词文件路径。支持相对路径（相对于 lingzhou.json）或绝对路径。
@@ -23,10 +28,10 @@ class MemoryConfig(BaseModel):
     """
     working_capacity: int = Field(default=40, ge=1, description="工作记忆最大条目数（条目数上限兑底）")
     wm_token_budget_ratio: float = Field(
-        default=0.15, ge=0.001, le=0.5,
+        default=0.2, ge=0.001, le=0.5,
         description=(
             "工作记忆 token 预算占 judgment 输入预算的比例（自动随模型 context window 伸缩）。"
-            "默认 0.15（15%）：GPT-5.4 400K → ~45K；Qwen3.6-plus 1M → ~112K。"
+            "默认 0.20（20%）：GPT-5.4 400K → ~80K；Qwen3.6-plus 1M → ~200K。"
             "pressure = total_wm_tokens / effective_wm_token_budget()。"
         ),
     )
@@ -222,19 +227,19 @@ class MemoryConfig(BaseModel):
         description="global.md 行数告警阈值；超过后在 maintenance 阶段向 WM 注入记忆压力感知信号",
     )
     run_result_success_activation: float = Field(
-        default=0.72, ge=0.0, le=1.0,
+        default=_RUN_RESULT_SUCCESS_ACTIVATION, ge=0.0, le=1.0,
         description="语义记忆中 run_result 成功节点的 activation；值越高，后续检索越容易回想成功执行证据",
     )
     run_result_failure_activation: float = Field(
-        default=0.82, ge=0.0, le=1.0,
+        default=_RUN_RESULT_FAILURE_ACTIVATION, ge=0.0, le=1.0,
         description="语义记忆中 run_result 失败节点的 activation；默认高于成功，用于放大失败证据的可回忆性",
     )
     run_result_success_valence: float = Field(
-        default=0.65, ge=0.0, le=1.0,
+        default=_RUN_RESULT_SUCCESS_VALENCE, ge=0.0, le=1.0,
         description="语义记忆中 run_result 成功节点的 valence；供后续检索与情绪线索参考",
     )
     run_result_failure_valence: float = Field(
-        default=0.35, ge=0.0, le=1.0,
+        default=_RUN_RESULT_FAILURE_VALENCE, ge=0.0, le=1.0,
         description="语义记忆中 run_result 失败节点的 valence；默认低于成功，用于保留负反馈线索",
     )
 
@@ -243,10 +248,10 @@ def run_result_memory_affect(memory_cfg: Any | None, *, is_failure: bool) -> tup
     cfg = memory_cfg if memory_cfg is not None else MemoryConfig()
     if is_failure:
         return (
-            float(getattr(cfg, "run_result_failure_activation", 0.82)),
-            float(getattr(cfg, "run_result_failure_valence", 0.35)),
+            float(getattr(cfg, "run_result_failure_activation", _RUN_RESULT_FAILURE_ACTIVATION)),
+            float(getattr(cfg, "run_result_failure_valence", _RUN_RESULT_FAILURE_VALENCE)),
         )
     return (
-        float(getattr(cfg, "run_result_success_activation", 0.72)),
-        float(getattr(cfg, "run_result_success_valence", 0.65)),
+        float(getattr(cfg, "run_result_success_activation", _RUN_RESULT_SUCCESS_ACTIVATION)),
+        float(getattr(cfg, "run_result_success_valence", _RUN_RESULT_SUCCESS_VALENCE)),
     )

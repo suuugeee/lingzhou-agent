@@ -5,8 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from cli.common import console
+from core.judgment.tiers import JUDGMENT_TIERS, JUDGMENT_TIER_SET
 
-_RUNTIME_ROUTING_TIERS = frozenset({"reader", "reasoner", "repair"})
+_RUNTIME_ROUTING_TIERS = JUDGMENT_TIER_SET
+_RUNTIME_TARGET_OPTIONS = ("primary", "vision", *JUDGMENT_TIERS)
+_RUNTIME_TARGET_HELP_TEXT = ", ".join(_RUNTIME_TARGET_OPTIONS)
 _MODEL_TARGET_ALIASES = {
     "": "primary",
     "model": "primary",
@@ -18,10 +21,9 @@ _MODEL_TARGET_ALIASES = {
     "vision_model": "vision",
     "识图": "vision",
     "视图": "vision",
-    "reasoner": "reasoner",
-    "reader": "reader",
-    "repair": "repair",
 }
+for _tier in _RUNTIME_ROUTING_TIERS:
+    _MODEL_TARGET_ALIASES[_tier] = _tier
 
 
 def _provider_name(model_ref: str) -> str:
@@ -101,7 +103,7 @@ def _apply_model_target_selection(
             "runtime_override_tier": None,
         }
     if normalized not in _RUNTIME_ROUTING_TIERS:
-        raise ValueError(f"未知模型目标: {target!r}；可用值: primary, vision, reader, reasoner, repair")
+        raise ValueError(f"未知模型目标: {target!r}；可用值: {_RUNTIME_TARGET_HELP_TEXT}")
 
     routing = cfg_data.get("routing")
     if not isinstance(routing, dict):

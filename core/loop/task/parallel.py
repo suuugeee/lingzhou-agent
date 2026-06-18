@@ -26,6 +26,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any
 
+from core.metabolic.lifecycle_utils import _decision_basis_from_parts as _decision_basis
 from core.metabolic import (
     amend_task,
     create_task,
@@ -272,6 +273,26 @@ class _ScopedTaskStore:
         await self._call("cancel_signal", signal_id)
 
 
+def _parallel_history_entry(
+    *,
+    spec_id: str,
+    task: Task,
+    result: str,
+    summary: str,
+    error: str = "",
+    status: str = "ok",
+    goal: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "tool": f"task.parallel.{spec_id}",
+        "params": {"goal": goal or task.goal, "task_id": task.id},
+        "result": result,
+        "summary": summary,
+        "error": error,
+        "status": status,
+    }
+
+
 async def _run_one_task(
     task: Task,
     spec: dict[str, Any],
@@ -364,7 +385,7 @@ async def _run_one_task(
             status="failed",
             result_json=result_data,
             source="loop/task.parallel",
-            decision_basis=(error or final_rationale or "parallel child task failed")[:240],
+            decision_basis=_decision_basis(error, final_rationale, "parallel child task failed"),
         )
     elif terminal_decision in {"wait", "pause"}:
         wait_key = str(getattr(task, "parent_task_id", "") or "")
@@ -382,7 +403,10 @@ async def _run_one_task(
             next_step=next_step,
             result_json=result_data,
             source="loop/task.parallel",
-            decision_basis=(final_rationale or f"parallel child task ended with {terminal_decision}")[:240],
+            decision_basis=_decision_basis(
+                final_rationale,
+                f"parallel child task ended with {terminal_decision}",
+            ),
         )
     else:
         await update_task_status(
@@ -391,7 +415,7 @@ async def _run_one_task(
             status="done",
             result_json=result_data,
             source="loop/task.parallel",
-            decision_basis=(final_rationale or "parallel child task completed")[:240],
+            decision_basis=_decision_basis(final_rationale, "parallel child task completed"),
         )
 
     # 构建返回给主 tick 的 history entry
@@ -417,14 +441,14 @@ async def _run_one_task(
         summary = f"{summary_prefix} {ok_steps} 步完成: {(final_rationale or '(无结论)')}"
 
     entry_status = "error" if error else (terminal_decision if terminal_decision in {"wait", "pause"} else "ok")
-    return {
-        "tool": f"task.parallel.{spec_id}",
-        "params": {"goal": task.goal, "task_id": task.id},
-        "result": result_text,
-        "summary": summary,
-        "error": error,
-        "status": entry_status,
-    }
+    return _parallel_history_entry(
+        spec_id=spec_id,
+        task=task,
+        result=result_text,
+        summary=summary,
+        error=error,
+        status=entry_status,
+    )
 
 
 async def run_tasks_parallel(
@@ -458,14 +482,13 @@ async def run_tasks_parallel(
             f"相似度: {score:.2f}\n"
             f"下一步: {task.next_step or '（未指定）'}"
         )
-        return {
-            "tool": f"task.parallel.{spec_id}",
-            "params": {"goal": spec.get("goal") or task.goal, "task_id": task.id},
-            "result": result_text,
-            "summary": f"[{spec_id}/task:{task.id}] reused existing {task.status}: {task.title}",
-            "error": "",
-            "status": "ok",
-        }
+        return _parallel_history_entry(
+            spec_id=spec_id,
+            task=task,
+            result=result_text,
+            summary=f"[{spec_id}/task:{task.id}] reused existing {task.status}: {task.title}",
+            goal=str(spec.get("goal") or task.goal),
+        )
 
     # 先顺序创建所有 Task（写 DB 不适合并发）
     scheduled: list[dict[str, Any] | tuple[Task, dict]] = []
@@ -494,7 +517,10 @@ async def run_tasks_parallel(
             source="internal",
             parent_task_id=str(parent_task_id) if parent_task_id else "",
             next_step=str(spec["goal"]),
-            decision_basis=f"parallel decomposition scheduled child task for: {spec['goal']}"[:240],
+            decision_basis=_decision_basis(
+                "parallel decomposition scheduled child task for",
+                spec.get("goal"),
+            ),
         )
         task = await loop._task_store.get_task_by_id(task_id)
         if task:

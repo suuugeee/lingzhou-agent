@@ -75,20 +75,21 @@ def collect_runtime_life_snapshot(loop: Any) -> RuntimeLifeSnapshot:
 
 
 def _safe_semantic_stats(semantic: Any) -> Mapping[str, Any]:
-    if semantic is None or not hasattr(semantic, "stats"):
-        return {}
-    try:
-        stats = semantic.stats()
-        return stats if isinstance(stats, Mapping) else {}
-    except Exception:
-        return {}
+    return _safe_mapping_method(semantic, "stats")
 
 
 def _safe_drive_snapshot(self_drive: Any) -> dict[str, Any]:
-    if self_drive is None or not hasattr(self_drive, "snapshot"):
+    return dict(_safe_mapping_method(self_drive, "snapshot"))
+
+
+def _safe_mapping_method(target: Any, method_name: str) -> Mapping[str, Any]:
+    if target is None:
+        return {}
+    method = getattr(target, method_name, None)
+    if not callable(method):
         return {}
     try:
-        snapshot = self_drive.snapshot()
-        return dict(snapshot) if isinstance(snapshot, Mapping) else {}
+        value = method()
+        return value if isinstance(value, Mapping) else {}
     except Exception:
         return {}

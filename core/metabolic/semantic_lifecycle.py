@@ -4,7 +4,34 @@ from __future__ import annotations
 from typing import Any
 
 from core.metabolic.fact_lifecycle import resolve_metabolic
-from core.metabolic.proposal import StateProposal
+from core.metabolic.lifecycle_utils import build_proposal
+
+
+def _semantic_memory_value(
+    *,
+    node_id: str,
+    kind: str,
+    title: str,
+    body: str,
+    activation: float,
+    valence: float,
+    importance: float,
+    tags: list[str] | None,
+    created_at: str,
+    source: str,
+) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "kind": kind,
+        "title": title,
+        "body": body,
+        "activation": activation,
+        "valence": valence,
+        "importance": importance,
+        "tags": tags or [],
+        "created_at": created_at,
+        "source": source,
+    }
 
 
 async def add_semantic_memory(
@@ -35,25 +62,25 @@ async def add_semantic_memory(
     if metabolic is None:
         raise RuntimeError("metabolic semantic memory write requires task_store and semantic memory")
     result = await metabolic.submit(
-        StateProposal(
+        build_proposal(
             op="add_semantic_memory",
             key=node_id,
-            value={
-                "id": node_id,
-                "kind": kind,
-                "title": title,
-                "body": body,
-                "activation": activation,
-                "valence": valence,
-                "importance": importance,
-                "tags": tags or [],
-                "created_at": created_at,
-                "source": source,
-            },
+            value=_semantic_memory_value(
+                node_id=node_id,
+                kind=kind,
+                title=title,
+                body=body,
+                activation=activation,
+                valence=valence,
+                importance=importance,
+                tags=tags,
+                created_at=created_at,
+                source=source,
+            ),
             scope="semantic",
             source=source,
             run_id=run_id,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
+            decision_basis=decision_basis,
         )
     )
     return str(result or node_id)

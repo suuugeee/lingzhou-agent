@@ -6,6 +6,8 @@ import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from core.cortex import intent as cortex_intent
+from core.judgment.tiers import JUDGMENT_TIERS, is_judgment_tier
 from core.metabolic import submit_fact, update_task_data
 from memory.working import WMItem, WorkingMemory
 
@@ -14,13 +16,11 @@ if TYPE_CHECKING:
     from store.task import Task, TaskStore
 
 _log = logging.getLogger("lingzhou.loop")
-
-VALID_MODEL_TIERS = frozenset({"reader", "reasoner", "repair"})
-
+_RUNTIME_TIER_HINT_SCAN_ORDER = tuple(reversed(JUDGMENT_TIERS))
 
 def _suggest_tier_from_text(text: str) -> str | None:
     lowered = (text or "").lower()
-    for tier in ("repair", "reasoner", "reader"):
+    for tier in _RUNTIME_TIER_HINT_SCAN_ORDER:
         if tier in lowered:
             return tier
     return None
@@ -39,6 +39,42 @@ def _normalize_routing_tier(text: str) -> str:
     return _suggest_tier_from_text(text) or ""
 
 
+def _loads_json_dict(raw: Any) -> dict[str, Any]:
+    try:
+        loaded = json.loads(str(raw or ""))
+    except Exception:
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+async def _submit_json_fact(
+    fact_owner: Any,
+    *,
+    key: str,
+    value: dict[str, Any],
+    scope: str,
+    source: str = "task_runtime/ingest",
+) -> None:
+    await submit_fact(
+        fact_owner,
+        key=key,
+        value=json.dumps(value, ensure_ascii=False),
+        scope=scope,
+        source=source,
+    )
+
+
+def _reflection_payload(reflection: Any, **extra: Any) -> dict[str, Any]:
+    payload = {
+        "reflection_id": reflection.id,
+        "decision": reflection.decision,
+        "proposal": reflection.proposal,
+        "verification_plan": reflection.verification_plan,
+    }
+    payload.update(extra)
+    return payload
+
+
 async def _ingest_actionable_meta_reflections(task_store: TaskStore, wm: WorkingMemory, metabolic: Any | None = None) -> list[str]:
     injected: list[str] = []
     fact_owner = metabolic or task_store
@@ -55,13 +91,9 @@ async def _ingest_actionable_meta_reflections(task_store: TaskStore, wm: Working
             raw_policy, policy_found = await task_store.get_fact("control:durable_failure_policy")
             policy = {"threshold": 3, "ttl_sec": 7200}
             if policy_found and raw_policy.strip():
-                try:
-                    loaded = json.loads(raw_policy)
-                    if isinstance(loaded, dict):
-                        policy["threshold"] = int(loaded.get("threshold") or policy["threshold"])
-                        policy["ttl_sec"] = int(loaded.get("ttl_sec") or policy["ttl_sec"])
-                except Exception:
-                    pass
+                loaded = _loads_json_dict(raw_policy)
+                policy["threshold"] = int(loaded.get("threshold") or policy["threshold"])
+                policy["ttl_sec"] = int(loaded.get("ttl_sec") or policy["ttl_sec"])
             if reflection.decision == "rollback":
                 policy = {"threshold": 3, "ttl_sec": 7200}
                 applied_change = "queued durable failure policy rollback hint"
@@ -71,21 +103,11 @@ async def _ingest_actionable_meta_reflections(task_store: TaskStore, wm: Working
                 applied_change = (
                     f"queued durable failure policy hint threshold={policy['threshold']} ttl={policy['ttl_sec']}"
                 )
-            await submit_fact(
+            await _submit_json_fact(
                 fact_owner,
                 key="control:meta_reflection_hint:threshold",
-                value=json.dumps(
-                    {
-                        "reflection_id": reflection.id,
-                        "decision": reflection.decision,
-                        "proposal": reflection.proposal,
-                        "verification_plan": reflection.verification_plan,
-                        "suggested_policy": policy,
-                    },
-                    ensure_ascii=False,
-                ),
+                value=_reflection_payload(reflection, suggested_policy=policy),
                 scope="system",
-                source="task_runtime/ingest",
             )
             followup = _meta_reflection_set_fact_instruction(
                 "control:durable_failure_policy",
@@ -93,63 +115,41 @@ async def _ingest_actionable_meta_reflections(task_store: TaskStore, wm: Working
                 scope="system",
             )
         elif reflection.target_kind == "task_split" and reflection.task_id:
-            await submit_fact(
+            await _submit_json_fact(
                 fact_owner,
                 key=f"task:{reflection.task_id}:needs_replan",
-                value=json.dumps(
-                    {
-                        "reflection_id": reflection.id,
-                        "decision": reflection.decision,
-                        "proposal": reflection.proposal,
-                        "verification_plan": reflection.verification_plan,
-                    },
-                    ensure_ascii=False,
-                ),
+                value=_reflection_payload(reflection),
                 scope="task",
-                source="task_runtime/ingest",
             )
             applied_change = "set task replan hint"
             followup = "该建议尚未自动写回任务。若认可，请调用 task.update 修改 next_step。"
         elif reflection.target_kind == "routing":
             preferred_tier = _normalize_routing_tier(reflection.proposal)
             if reflection.task_id:
-                await submit_fact(
+                await _submit_json_fact(
                     fact_owner,
                     key=f"task:{reflection.task_id}:routing_guard",
-                    value=json.dumps(
-                        {
-                            "reflection_id": reflection.id,
-                            "decision": reflection.decision,
-                            "tool_name": reflection.tool_name,
-                            "proposal": reflection.proposal,
-                            "preferred_tier": preferred_tier,
-                        },
-                        ensure_ascii=False,
+                    value=_reflection_payload(
+                        reflection,
+                        tool_name=reflection.tool_name,
+                        preferred_tier=preferred_tier,
                     ),
                     scope="task",
-                    source="task_runtime/ingest",
                 )
-            await submit_fact(
+            await _submit_json_fact(
                 fact_owner,
                 key="control:meta_reflection_hint:routing",
-                value=json.dumps(
-                    {
-                        "reflection_id": reflection.id,
-                        "decision": reflection.decision,
-                        "tool_name": reflection.tool_name,
-                        "proposal": reflection.proposal,
-                        "verification_plan": reflection.verification_plan,
-                        "preferred_tier": preferred_tier,
-                        "task_id": reflection.task_id,
-                    },
-                    ensure_ascii=False,
+                value=_reflection_payload(
+                    reflection,
+                    tool_name=reflection.tool_name,
+                    preferred_tier=preferred_tier,
+                    task_id=reflection.task_id,
                 ),
                 scope="system",
-                source="task_runtime/ingest",
             )
             if reflection.task_id:
                 applied_change = "queued task routing guard"
-                if preferred_tier in VALID_MODEL_TIERS:
+                if is_judgment_tier(preferred_tier):
                     followup = f"该建议已识别 routing tier={preferred_tier}，已进入下一轮任务提示闭环"
                 else:
                     followup = (
@@ -163,20 +163,11 @@ async def _ingest_actionable_meta_reflections(task_store: TaskStore, wm: Working
                 applied_change = "queued routing control hint"
                 followup = "该建议尚未自动改写全局路由。若认可，请调用 memory.set_fact 更新 pref:routing_overrides。"
         else:
-            await submit_fact(
+            await _submit_json_fact(
                 fact_owner,
                 key=f"control:meta_reflection_hint:{reflection.target_kind}",
-                value=json.dumps(
-                    {
-                        "reflection_id": reflection.id,
-                        "decision": reflection.decision,
-                        "proposal": reflection.proposal,
-                        "verification_plan": reflection.verification_plan,
-                    },
-                    ensure_ascii=False,
-                ),
+                value=_reflection_payload(reflection),
                 scope="system",
-                source="task_runtime/ingest",
             )
             applied_change = f"queued {reflection.target_kind} control hint"
             followup = "该建议尚未自动生效。若认可，请调用 memory.set_fact 写入相应 control/pref 事实。"
@@ -193,21 +184,14 @@ async def _ingest_actionable_meta_reflections(task_store: TaskStore, wm: Working
             priority=0.76 if reflection.decision == "rollback" else 0.72,
         ))
         if reflection.task_id:
-            await submit_fact(
+            await _submit_json_fact(
                 fact_owner,
                 key=f"task:{reflection.task_id}:meta_reflection",
-                value=json.dumps(
-                    {
-                        "reflection_id": reflection.id,
-                        "decision": reflection.decision,
-                        "target_kind": reflection.target_kind,
-                        "proposal": reflection.proposal,
-                        "verification_plan": reflection.verification_plan,
-                    },
-                    ensure_ascii=False,
+                value=_reflection_payload(
+                    reflection,
+                    target_kind=reflection.target_kind,
                 ),
                 scope="task",
-                source="task_runtime/ingest",
             )
         await submit_fact(
             fact_owner,
@@ -235,10 +219,7 @@ async def _consume_task_runtime_hints(
     last_replan_id = str(task.extras.get("last_replan_reflection_id") or "")
     raw_replan, replan_found = await task_store.get_fact(f"task:{task.id}:needs_replan")
     if replan_found and raw_replan.strip():
-        try:
-            replan = json.loads(raw_replan)
-        except Exception:
-            replan = {}
+        replan = _loads_json_dict(raw_replan)
         reflection_id = str(replan.get("reflection_id") or "")
         if reflection_id and reflection_id != last_replan_id:
             proposal = str(replan.get("proposal") or "").strip()
@@ -266,10 +247,7 @@ async def _consume_task_runtime_hints(
     last_meta_id = str(task.extras.get("last_task_meta_reflection_id") or "")
     raw_meta, meta_found = await task_store.get_fact(f"task:{task.id}:meta_reflection")
     if meta_found and raw_meta.strip():
-        try:
-            meta_payload = json.loads(raw_meta)
-        except Exception:
-            meta_payload = {}
+        meta_payload = _loads_json_dict(raw_meta)
         reflection_id = str(meta_payload.get("reflection_id") or "")
         if reflection_id and reflection_id != last_meta_id:
             target_kind = str(meta_payload.get("target_kind") or "reflection")
@@ -297,17 +275,14 @@ async def _consume_task_runtime_hints(
     last_routing_id = str(task.extras.get("last_routing_reflection_id") or "")
     raw_guard, guard_found = await task_store.get_fact(f"task:{task.id}:routing_guard")
     if guard_found and raw_guard.strip():
-        try:
-            guard = json.loads(raw_guard)
-        except Exception:
-            guard = {}
+        guard = _loads_json_dict(raw_guard)
         reflection_id = str(guard.get("reflection_id") or "")
         if reflection_id and reflection_id != last_routing_id:
             tool_name = str(guard.get("tool_name") or "unknown")
             proposal = str(guard.get("proposal") or "").strip()
             decision = str(guard.get("decision") or "apply").strip()
             preferred_tier = _normalize_routing_tier(proposal)
-            tier = preferred_tier if preferred_tier in VALID_MODEL_TIERS else ""
+            tier = preferred_tier if is_judgment_tier(preferred_tier) else ""
             update_payload: dict[str, Any] = {"last_routing_reflection_id": reflection_id}
             auto_applied_tier = False
             if tier:
@@ -386,6 +361,7 @@ async def _sync_task_progress_state(
             or cortex_next
             or ""
         ).strip()
+        state_next = cortex_intent.clean_next_verification_text(state_next)
         action_tool = str(getattr(action, "chosen_action_id", "") or "").strip()
         state_next_authoritative = bool(
             state_next

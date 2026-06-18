@@ -3,8 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.metabolic.fact_lifecycle import resolve_metabolic
-from core.metabolic.proposal import StateProposal
+from core.metabolic.lifecycle_utils import build_proposal, submit_proposal
 
 
 async def create_task(
@@ -15,18 +14,17 @@ async def create_task(
     **data: Any,
 ) -> int:
     """经代谢器官创建任务，并返回新任务 id。"""
-    metabolic = resolve_metabolic(owner)
-    if metabolic is None:
-        raise RuntimeError("metabolic task creation requires a task store")
-    task_id = await metabolic.submit(
-        StateProposal(
+    task_id = await submit_proposal(
+        owner=owner,
+        action="creation",
+        proposal=build_proposal(
             op="create_task",
             key="task:new",
             value=data,
             scope="task",
             source=proposal_source,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
-        )
+            decision_basis=decision_basis,
+        ),
     )
     return int(task_id)
 
@@ -44,11 +42,10 @@ async def update_task_status(
     decision_basis: str = "",
 ) -> None:
     """经代谢器官更新任务状态和步骤。"""
-    metabolic = resolve_metabolic(owner)
-    if metabolic is None:
-        raise RuntimeError("metabolic task update requires a task store")
-    await metabolic.submit(
-        StateProposal(
+    await submit_proposal(
+        owner=owner,
+        action="update",
+        proposal=build_proposal(
             op="update_task_status",
             key=str(task_id),
             value={
@@ -60,8 +57,8 @@ async def update_task_status(
             },
             scope="task",
             source=source,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
-        )
+            decision_basis=decision_basis,
+        ),
     )
 
 
@@ -79,11 +76,10 @@ async def mark_task_waiting(
     decision_basis: str = "",
 ) -> None:
     """经代谢器官将任务切入 waiting。"""
-    metabolic = resolve_metabolic(owner)
-    if metabolic is None:
-        raise RuntimeError("metabolic task wait requires a task store")
-    await metabolic.submit(
-        StateProposal(
+    await submit_proposal(
+        owner=owner,
+        action="wait",
+        proposal=build_proposal(
             op="mark_task_waiting",
             key=str(task_id),
             value={
@@ -96,8 +92,8 @@ async def mark_task_waiting(
             },
             scope="task",
             source=source,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
-        )
+            decision_basis=decision_basis,
+        ),
     )
 
 
@@ -113,11 +109,10 @@ async def resume_task(
     decision_basis: str = "",
 ) -> None:
     """经代谢器官恢复 waiting/blocked 任务。"""
-    metabolic = resolve_metabolic(owner)
-    if metabolic is None:
-        raise RuntimeError("metabolic task resume requires a task store")
-    await metabolic.submit(
-        StateProposal(
+    await submit_proposal(
+        owner=owner,
+        action="resume",
+        proposal=build_proposal(
             op="resume_task",
             key=str(task_id),
             value={
@@ -128,8 +123,8 @@ async def resume_task(
             },
             scope="task",
             source=source,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
-        )
+            decision_basis=decision_basis,
+        ),
     )
 
 
@@ -141,18 +136,17 @@ async def update_task_data(
     source: str,
     decision_basis: str = "",
 ) -> None:
-    metabolic = resolve_metabolic(owner)
-    if metabolic is None:
-        raise RuntimeError("metabolic task data update requires a task store")
-    await metabolic.submit(
-        StateProposal(
+    await submit_proposal(
+        owner=owner,
+        action="data update",
+        proposal=build_proposal(
             op="update_task_data",
             key=str(task_id),
             value=data,
             scope="task",
             source=source,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
-        )
+            decision_basis=decision_basis,
+        ),
     )
 
 
@@ -164,18 +158,17 @@ async def update_task_result(
     source: str,
     decision_basis: str = "",
 ) -> None:
-    metabolic = resolve_metabolic(owner)
-    if metabolic is None:
-        raise RuntimeError("metabolic task result update requires a task store")
-    await metabolic.submit(
-        StateProposal(
+    await submit_proposal(
+        owner=owner,
+        action="result update",
+        proposal=build_proposal(
             op="update_task_result",
             key=str(task_id),
             value=result_json if isinstance(result_json, dict) else {"value": result_json},
             scope="task",
             source=source,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
-        )
+            decision_basis=decision_basis,
+        ),
     )
 
 
@@ -190,11 +183,10 @@ async def amend_task(
     amendment_reason: str,
     decision_basis: str = "",
 ) -> bool:
-    metabolic = resolve_metabolic(owner)
-    if metabolic is None:
-        raise RuntimeError("metabolic task amendment requires a task store")
-    result = await metabolic.submit(
-        StateProposal(
+    result = await submit_proposal(
+        owner=owner,
+        action="amendment",
+        proposal=build_proposal(
             op="amend_task",
             key=str(task_id),
             value={
@@ -205,7 +197,7 @@ async def amend_task(
             },
             scope="task",
             source=source,
-            extras={"decision_basis": decision_basis} if decision_basis else {},
-        )
+            decision_basis=decision_basis,
+        ),
     )
     return bool(result)

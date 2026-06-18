@@ -49,13 +49,14 @@ class JudgmentExecutor(
         self.self_model = SelfModel()
 
     def set_routing_providers(self, providers: dict[str, Provider]) -> None:
-        changed = set(providers.keys()) != set(self._routing_providers.keys())
+        provider_names = list(providers)
+        changed = set(provider_names) != set(self._routing_providers)
         self._routing_providers = providers
         if providers:
             if changed:
-                _log.info("[judgment] 路由 providers 已设置: %s", list(providers.keys()))
+                _log.info("[judgment] 路由 providers 已设置: %s", provider_names)
             else:
-                _log.debug("[judgment] 路由 providers 刷新（无变化）: %s", list(providers.keys()))
+                _log.debug("[judgment] 路由 providers 刷新（无变化）: %s", provider_names)
 
     @property
     def last_call_meta(self) -> dict[str, Any]:
@@ -71,6 +72,8 @@ class JudgmentExecutor(
         prefer_tier: str | None = None,
         thinking_override: str | None = None,
         routing_overrides: dict[str, str] | None = None,
+        excluded_model_refs: set[str] | None = None,
+        excluded_provider_names: set[str] | None = None,
     ) -> tuple[Provider, ModelSelection]:
         return _select_provider_impl(
             self,
@@ -81,6 +84,8 @@ class JudgmentExecutor(
             prefer_tier=prefer_tier,
             thinking_override=thinking_override,
             routing_overrides=routing_overrides,
+            excluded_model_refs=excluded_model_refs,
+            excluded_provider_names=excluded_provider_names,
         )
 
     def _set_last_call_meta(

@@ -16,10 +16,14 @@ if TYPE_CHECKING:
     from store.task import Task
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 @dataclass
 class Percept:
     """一个认知 tick 的感知结果。"""
-    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = field(default_factory=_utc_now)
     prediction_error: float = 0.0      # 与上一轮预期的偏差 [0, 1]
     workspace_dirty: bool = False       # 工作目录是否有未追踪变更
     workspace_fingerprint: str = ""     # 用于检测变化的哈希

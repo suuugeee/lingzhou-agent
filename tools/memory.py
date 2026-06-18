@@ -10,7 +10,8 @@ from typing import Any
 
 from core.metabolic import add_semantic_memory, submit_fact
 from memory.quality_checker import evaluate_retrieval_quality
-from memory.working import WMItem
+from memory.working import TASK_SWITCH_PRESERVE_KINDS, WMItem
+from core.judgment.decision.helpers import _decision_basis_from_parts as _decision_basis
 from tools.registry import (
     CAPS_EXEMPT,
     ToolContext,
@@ -59,6 +60,17 @@ def _parse_float(val: Any, default: float) -> float:
         return float(s)
     except ValueError:
         return default
+
+
+def _bounded_int_param(
+    params: dict[str, Any],
+    name: str,
+    *,
+    default: int,
+    min_value: int,
+    max_value: int,
+) -> int:
+    return max(min_value, min(int(params.get(name) or default), max_value))
 
 
 def _memory_cfg(ctx: ToolContext) -> Any | None:
@@ -173,7 +185,7 @@ async def memory_add_semantic(params: dict[str, Any], ctx: ToolContext) -> ToolR
         body=body,
         activation=_parse_float(params.get("activation"), 0.7),
         source="tools/memory.add_semantic",
-        decision_basis=f"memory.add_semantic title={resolved_title} kind={kind}"[:240],
+        decision_basis=_decision_basis("memory.add_semantic", "title", resolved_title, "kind", kind),
     )
     return ToolResult(
         summary=f"已写入语义记忆: {resolved_title}",
@@ -203,7 +215,7 @@ async def memory_set_fact(params: dict[str, Any], ctx: ToolContext) -> ToolResul
         value=value,
         scope=scope,
         source="tools/memory.set_fact",
-        decision_basis=f"memory.set_fact requested key={key} scope={scope}"[:240],
+        decision_basis=_decision_basis("memory.set_fact requested", "key", key, "scope", scope),
     )
     return ToolResult(summary=f"已设置事实: {key}={value}", evidence=f"key={key}")
 
@@ -369,7 +381,10 @@ async def memory_embed_backfill(params: dict[str, Any], ctx: ToolContext) -> Too
             processed_ids.append(str(node_id))
         except Exception as exc:
             failed += 1
-            failures.append({"node_id": str(node_id), "error": f"{exc.__class__.__name__}: {exc}"[:240]})
+            failures.append({
+                "node_id": str(node_id),
+                "error": _decision_basis(f"{exc.__class__.__name__}: ", exc),
+            })
         if sleep_seconds > 0:
             await asyncio.sleep(sleep_seconds)
 
@@ -441,8 +456,7 @@ async def memory_list_facts(params: dict[str, Any], ctx: ToolContext) -> ToolRes
     prefix = (params.get("prefix") or "").strip()
     if not prefix:
         return ToolResult(summary="prefix 不能为空", skipped=True)
-    limit = int(params.get("limit") or 20)
-    limit = max(1, min(limit, 100))
+    limit = _bounded_int_param(params, "limit", default=20, min_value=1, max_value=100)
     rows = await ctx.task_store.list_facts(prefix=prefix, limit=limit)
     if not rows:
         return ToolResult(summary=f"前缀 {prefix!r} 下无 facts", skipped=True)
@@ -503,7 +517,7 @@ async def reflect_structural(params: dict[str, Any], ctx: ToolContext) -> ToolRe
         body=body,
         activation=0.85,
         source="tools/reflect.structural",
-        decision_basis=f"reflect.structural title={resolved_title}"[:240],
+        decision_basis=_decision_basis("reflect.structural", "title", resolved_title),
     )
 
     # 同时写入情节记忆，保留推理轨迹
@@ -551,8 +565,8 @@ async def memory_snapshot(params: dict[str, Any], ctx: ToolContext) -> ToolResul
         task_id=str(task.id) if task else None,
     )
 
-    # 快照后清空 WM，保留身份镀樔（快照的语义：持久化草稿 → 清空草稿）
-    ctx.wm.clear(preserve_kinds={"bootstrap_identity"})
+    # 快照后清空 WM，保留任务切换所需的关键上下文锚点
+    ctx.wm.clear(preserve_kinds=set(TASK_SWITCH_PRESERVE_KINDS))
 
     return ToolResult(
         summary=f"运行时快照已记录并清空 WM（{pressure_before:.0%} → 0%）\n{snapshot_text}",
@@ -577,7 +591,7 @@ async def memory_snapshot(params: dict[str, Any], ctx: ToolContext) -> ToolResul
     ],
 ))
 async def memory_ledger_recent(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
-    limit = max(1, min(int(params.get("limit") or 30), 100))
+    limit = _bounded_int_param(params, "limit", default=30, min_value=1, max_value=100)
     rows = await ctx.task_store.ledger_recent(limit=limit)
     if not rows:
         return ToolResult(summary="生命史账本暂无记录", skipped=True)
@@ -610,7 +624,7 @@ async def memory_ledger_recent(params: dict[str, Any], ctx: ToolContext) -> Tool
 ))
 async def memory_ledger_since(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     after_id = int(params.get("after_id") or 0)
-    limit = max(1, min(int(params.get("limit") or 50), 200))
+    limit = _bounded_int_param(params, "limit", default=50, min_value=1, max_value=200)
     rows = await ctx.task_store.ledger_since(after_id, limit=limit)
     if not rows:
         return ToolResult(summary=f"id > {after_id} 无新增账本记录", skipped=True)

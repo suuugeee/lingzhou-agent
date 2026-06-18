@@ -1,12 +1,4 @@
-"""provider/catalog.py — 模型目录查询（显式路径优先，兼容全局运行时路径）。
-
-设计思路：
-  - 内置模板（provider/models.json）：随源码发布，记录 context_window / max_tokens /
-    thinking 等静态参数，作为种子文件。
-    - 运行时文件（workspace_dir/models.json）：由 provider.models_gen.ensure_models_json()
-        在每次启动时生成；融入 lingzhou.json 中的 provider 连接参数，用指纹
-        决定 skip / noop / write。
-"""
+"""provider/catalog.py — provider 模型与 run_type 映射查询."""
 from __future__ import annotations
 
 import functools
@@ -15,11 +7,52 @@ from pathlib import Path
 from typing import Any
 
 # 内置模板路径（随包发布，只读种子）
+
 BUILTIN_CATALOG_PATH: Path = Path(__file__).parent / "models.json"
 
 # 运行时路径（兼容 fallback；主运行时应优先显式传 catalog_path）
 _runtime_path: Path = BUILTIN_CATALOG_PATH
 _context_window_hints: dict[str, int] = {}
+
+
+def _catalog_key(catalog_path: Path | None) -> str | None:
+    """将可选 catalog_path 转成缓存 key。"""
+    return str(catalog_path.expanduser()) if catalog_path is not None else None
+
+
+def _coerce_string_mapping(
+    raw: dict[str, Any] | None,
+    *,
+    keep_empty: bool = False,
+    normalize_key_case: bool = False,
+    normalize_value_case: bool = False,
+) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, value in raw.items():
+        if not isinstance(key, str) or not isinstance(value, str):
+            continue
+        normalized_key = key.strip()
+        normalized_value = value.strip()
+        if normalize_key_case:
+            normalized_key = normalized_key.lower()
+        if normalize_value_case:
+            normalized_value = normalized_value.lower()
+        if not keep_empty and (not normalized_key or not normalized_value):
+            continue
+        out[normalized_key] = normalized_value
+    return out
+
+
+def _merged_model(defaults: dict[str, Any], model: dict[str, Any]) -> dict[str, Any]:
+    if not defaults:
+        return model
+    merged = {**defaults, **model}
+    for key, value in defaults.items():
+        if isinstance(value, dict) and isinstance(model.get(key), dict):
+            merged[key] = {**value, **model[key]}
+    return merged
 
 
 @functools.lru_cache(maxsize=8)
@@ -36,16 +69,20 @@ def get_run_type_routing(*, catalog_path: Path | None = None) -> dict[str, str]:
 
     "_doc" 键及非字符串值会被过滤掉。调用方可将返回值与自身默认值合并使用。
     """
-    catalog_key = str(catalog_path.expanduser()) if catalog_path is not None else None
-    routing = _load(catalog_key).get("run_type_routing", {})
-    return {k: v for k, v in routing.items() if isinstance(v, str) and k != "_doc"}
+    routing = _load(_catalog_key(catalog_path)).get("run_type_routing", {})
+    sanitized = _coerce_string_mapping(
+        {k: v for k, v in routing.items() if k != "_doc"},
+        normalize_key_case=True,
+        normalize_value_case=True,
+    )
+    sanitized.pop("_doc", None)
+    return sanitized
 
 
 def lookup_model(model_id: str, *, catalog_path: Path | None = None) -> dict[str, Any] | None:
     """在所有 provider 里查找 model_id，返回模型元数据字典；未找到返回 None。"""
-    catalog_key = str(catalog_path.expanduser()) if catalog_path is not None else None
-    for provider_data in _load(catalog_key).values():
-        for m in provider_data.get("models", []):
+    for provider_name in list_providers(catalog_path=catalog_path):
+        for m in list_provider_models(provider_name, catalog_path=catalog_path):
             if m.get("id") == model_id:
                 return m
     return None
@@ -99,8 +136,7 @@ def find_model_ref_for_capability(
 
     选择顺序：优先当前 provider，其次其它 provider；每个 provider 内保持 models.json 的声明顺序。
     """
-    catalog_key = str(catalog_path.expanduser()) if catalog_path is not None else None
-    catalog = _load(catalog_key)
+    catalog = _load(_catalog_key(catalog_path))
     provider_names = [name for name in catalog if "models" in catalog[name]]
     if preferred_provider and preferred_provider in provider_names:
         provider_names = [preferred_provider] + [name for name in provider_names if name != preferred_provider]
@@ -120,14 +156,19 @@ def find_model_ref_for_capability(
 
 def list_providers(*, catalog_path: Path | None = None) -> list[str]:
     """返回 models.json 中所有 provider 名称（过滤掉 _doc 等非 provider 键）。"""
-    catalog_key = str(catalog_path.expanduser()) if catalog_path is not None else None
-    return [k for k, v in _load(catalog_key).items() if "models" in v]
+    return [k for k, v in _load(_catalog_key(catalog_path)).items() if "models" in v]
 
 
 def list_provider_models(provider_name: str, *, catalog_path: Path | None = None) -> list[dict[str, Any]]:
     """返回指定 provider 的模型列表； provider 不存在时返回空列表。"""
-    catalog_key = str(catalog_path.expanduser()) if catalog_path is not None else None
-    return _load(catalog_key).get(provider_name, {}).get("models", [])
+    provider_data = _load(_catalog_key(catalog_path)).get(provider_name, {})
+    models = provider_data.get("models", [])
+    if not isinstance(models, list):
+        return []
+    defaults = provider_data.get("model_defaults", {})
+    if not isinstance(defaults, dict):
+        return [m for m in models if isinstance(m, dict)]
+    return [_merged_model(defaults, m) for m in models if isinstance(m, dict)]
 
 
 def is_reasoning_model(model_id: str, *, catalog_path: Path | None = None) -> bool:

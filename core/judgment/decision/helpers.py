@@ -6,9 +6,15 @@ import logging
 import re
 from typing import TYPE_CHECKING, Any
 
-from core.judgment.context.budget import resolve_judgment_prompt_budget
+from core.judgment.context.budget import resolve_judgment_prompt_budget, target_prompt_budget as _calc_target_prompt_budget
 from core.judgment.output import JudgmentOutput, ModelSelection
+from core.judgment.tiers import (
+    JUDGMENT_TIERS,
+    REPAIR_TIER,
+    retry_fallback_tier,
+)
 from core.log_fields import format_log_fields, llm_call_fields
+from core.metabolic.lifecycle_utils import _decision_basis_from_parts
 
 if TYPE_CHECKING:
     from core.judgment.executor import JudgmentExecutor
@@ -25,6 +31,10 @@ _PROMPT_OVERFLOW_TIGHT_STUB = "[省略]"
 _PROMPT_OVERFLOW_CAPSULE_HEADER = (
     "[上下文超限压缩胶囊：保留任务皮层、守卫、近期动作和继续指令；外围材料已省略。]"
 )
+_PROMPT_OVERFLOW_SECTION_LIMIT = 1700
+_PROMPT_OVERFLOW_SECTION_LIMIT_TIGHT = 1250
+_PROMPT_OVERFLOW_TAIL_LIMIT = 1200
+_PROMPT_OVERFLOW_TAIL_LIMIT_TIGHT = 700
 _PROMPT_OVERFLOW_CAPSULE_SECTIONS = (
     "### 活跃任务",
     "### 任务级皮层工作区",
@@ -116,8 +126,8 @@ def _build_prompt_context_capsule(content: str, *, tight: bool = False) -> str:
     if not text.strip():
         return _PROMPT_OVERFLOW_TIGHT_STUB if tight else _PROMPT_OVERFLOW_OMIT_STUB
 
-    per_section_limit = 900 if tight else 1400
-    tail_limit = 500 if tight else 900
+    per_section_limit = _PROMPT_OVERFLOW_SECTION_LIMIT_TIGHT if tight else _PROMPT_OVERFLOW_SECTION_LIMIT
+    tail_limit = _PROMPT_OVERFLOW_TAIL_LIMIT_TIGHT if tight else _PROMPT_OVERFLOW_TAIL_LIMIT
     sections: list[str] = []
     for heading in _PROMPT_OVERFLOW_CAPSULE_SECTIONS:
         section = _extract_markdown_section(text, heading)
@@ -155,6 +165,11 @@ def _role_drop_priority(role: str, *, is_last_message: bool) -> int:
     return 50
 
 
+def _decision_basis(action: Any, fallback: str = "") -> str:
+    """提炼决策可审计摘要，压平空白并截断长度。"""
+    return _decision_basis_from_parts(getattr(action, "rationale", ""), fallback=fallback)
+
+
 def _llm_scope(selection: ModelSelection, **extra: Any) -> str:
     return llm_call_fields(
         model_ref=selection.model_ref,
@@ -162,6 +177,155 @@ def _llm_scope(selection: ModelSelection, **extra: Any) -> str:
         phase=selection.phase,
         **extra,
     )
+
+
+def _provider_of_model(model_ref: str) -> str:
+    return model_ref.partition("/")[0]
+
+
+def _usage_metrics(selected_provider: Provider) -> tuple[int, int, int, str]:
+    usage = getattr(selected_provider, "last_usage", None)
+    if not isinstance(usage, dict):
+        return 0, 0, 0, "missing"
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens))
+    usage_source = str(usage.get("usage_source") or "missing")
+    return prompt_tokens, completion_tokens, total_tokens, usage_source
+
+
+def _pick_retry_provider(
+    executor: JudgmentExecutor,
+    *,
+    selection: ModelSelection,
+    phase: str,
+    user_message: str,
+    current_action: str,
+    tool_history: list[dict[str, Any]] | None,
+    thinking_override: str | None,
+    routing_overrides: dict[str, str] | None,
+    fallback_prefer_tier: str | None,
+    blocked_model_refs: set[str],
+    blocked_provider_names: set[str],
+) -> tuple[Provider, ModelSelection]:
+    """在重试场景下按偏序选择备选模型。"""
+    fallback_tier = retry_fallback_tier(
+        selection.tier,
+        phase,
+        fallback_prefer_tier=fallback_prefer_tier,
+    )
+    return executor._select_provider(
+        phase=phase,
+        user_message=user_message,
+        current_action=current_action,
+        tool_history=tool_history,
+        prefer_tier=fallback_tier,
+        thinking_override=thinking_override,
+        routing_overrides=routing_overrides,
+        excluded_model_refs=blocked_model_refs,
+        excluded_provider_names=blocked_provider_names,
+    )
+
+
+def _emit_retry_failover_log(
+    *,
+    log_prefix: str,
+    selection: ModelSelection,
+    fb_selection: ModelSelection,
+    attempt_no: int,
+    max_attempts: int,
+    overflow_kind: str,
+    err: str,
+    use_overflow_reason: bool = True,
+) -> None:
+    if use_overflow_reason:
+        _log.warning(
+            "%s LLM failover %s -> %s overflow_kind=%s attempt=%s/%s err=%s",
+            log_prefix,
+            _llm_scope(selection),
+            _llm_scope(fb_selection),
+            overflow_kind,
+            attempt_no,
+            max_attempts,
+            err,
+        )
+    else:
+        _log.warning(
+            "%s LLM failover %s -> %s attempt=%s/%s",
+            log_prefix,
+            _llm_scope(selection),
+            _llm_scope(fb_selection),
+            attempt_no,
+            max_attempts,
+        )
+
+
+async def _apply_retry_plan(
+    executor: JudgmentExecutor,
+    *,
+    selected_provider: Provider,
+    log_prefix: str,
+    selection: ModelSelection,
+    attempt_no: int,
+    max_attempts: int,
+    overflow_kind: str,
+    err: str,
+    exc: Exception,
+    phase: str,
+    user_message: str,
+    current_action: str,
+    tool_history: list[dict[str, Any]] | None,
+    thinking_override: str | None,
+    routing_overrides: dict[str, str] | None,
+    blocked_model_refs: set[str],
+    blocked_provider_names: set[str],
+    fallback_prefer_tier: str | None,
+) -> tuple[bool, Provider, ModelSelection]:
+    """统一重试分支：先尝试切换 provider；仍失败则按 retry-after + 指数退避休眠。"""
+    fb_provider, fb_selection = _pick_retry_provider(
+        executor,
+        phase=phase,
+        user_message=user_message,
+        current_action=current_action,
+        tool_history=tool_history,
+        selection=selection,
+        thinking_override=thinking_override,
+        excluded_model_refs=blocked_model_refs,
+        excluded_provider_names=blocked_provider_names,
+        routing_overrides=routing_overrides,
+        fallback_prefer_tier=fallback_prefer_tier,
+    )
+    if fb_selection.model_ref != selection.model_ref:
+        _emit_retry_failover_log(
+            log_prefix=log_prefix,
+            selection=selection,
+            fb_selection=fb_selection,
+            attempt_no=attempt_no,
+            max_attempts=max_attempts,
+            overflow_kind=overflow_kind,
+            err=err,
+        )
+        return True, fb_provider, fb_selection
+
+    retry_after = executor._extract_retry_after_seconds(err, exc)
+    delay = executor._retry_delay_seconds(
+        attempt_no,
+        retry_after_seconds=retry_after,
+    )
+    _log.warning(
+        "%s LLM backoff %s delay_sec=%.2f retry_after=%s err=%s",
+        log_prefix,
+        _llm_scope(
+            selection,
+            overflow_kind=overflow_kind,
+            attempt=f"{attempt_no}/{max_attempts}",
+        ),
+        delay,
+        f"{retry_after:.2f}s" if retry_after is not None else "none",
+        err,
+    )
+    await asyncio.sleep(delay)
+    return True, selected_provider, selection
 
 
 def _message_log_stats(executor: JudgmentExecutor, messages: list[Any]) -> tuple[int, int, int]:
@@ -186,7 +350,11 @@ def _select_provider_impl(
     prefer_tier: str | None = None,
     thinking_override: str | None = None,
     routing_overrides: dict[str, str] | None = None,
+    excluded_model_refs: set[str] | None = None,
+    excluded_provider_names: set[str] | None = None,
 ) -> tuple[Provider, ModelSelection]:
+    excluded_model_refs = set(excluded_model_refs or set())
+    excluded_provider_names = set(excluded_provider_names or set())
     _effective_prefer_tier = prefer_tier
     tier = executor._select_tier(
         phase=phase,
@@ -200,12 +368,17 @@ def _select_provider_impl(
     provider: Provider = executor._provider
     selected = False
 
-    exclude_reader = phase in executor._REASONER_ONLY_PHASES and _effective_prefer_tier is None
+    exclude_reader = executor._should_exclude_reader(phase, prefer_tier=_effective_prefer_tier)
 
     candidates: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
     for cand_tier in (tier, *executor._fallback_tiers(tier, exclude_reader=exclude_reader)):
-        for model_ref in executor._tier_model_candidates(cand_tier, routing_overrides=routing_overrides):
+        for model_ref in executor._tier_model_candidates(
+            cand_tier,
+            routing_overrides=routing_overrides,
+            excluded_model_refs=excluded_model_refs,
+            excluded_provider_names=excluded_provider_names,
+        ):
             duplicate_key = (cand_tier, model_ref)
             if duplicate_key in seen:
                 continue
@@ -234,7 +407,13 @@ def _select_provider_impl(
             break
 
     if not selected:
-        fallback_ref = executor._least_bad_model(tier, routing_overrides, exclude_reader=exclude_reader)
+        fallback_ref = executor._least_bad_model(
+            tier,
+            routing_overrides,
+            exclude_reader=exclude_reader,
+            excluded_model_refs=excluded_model_refs,
+            excluded_provider_names=excluded_provider_names,
+        )
         if fallback_ref:
             try:
                 provider = executor._find_or_create_provider(fallback_ref)
@@ -243,27 +422,16 @@ def _select_provider_impl(
                 if exclude_reader:
                     _log.info("[routing] 全部可用模型被冷却，强制使用冷却最短模型: %s", fallback_ref)
                 else:
-                    _log.info("[routing] 全部 reasoner/reader/repair 冷却，强制使用冷却最短模型: %s", fallback_ref)
+                    _log.info(
+                        "[routing] 全部 %s 冷却，强制使用冷却最短模型: %s",
+                        "/".join(JUDGMENT_TIERS),
+                        fallback_ref,
+                    )
             except Exception as e:
                 _log.warning("[routing] least-bad model %s 构建失败: %s", fallback_ref, e)
 
     thinking = thinking_override if thinking_override is not None else executor._cfg.thinking
     return provider, ModelSelection(phase=phase, tier=chosen_tier, model_ref=chosen_model, thinking=thinking)
-
-
-def _retry_fallback_tier(
-    executor: JudgmentExecutor,
-    selection: ModelSelection,
-    phase: str,
-    fallback_prefer_tier: str | None,
-) -> str:
-    if fallback_prefer_tier:
-        return fallback_prefer_tier
-    exclude_reader = phase in executor._REASONER_ONLY_PHASES
-    tiers = executor._fallback_tiers(selection.tier, exclude_reader=exclude_reader)
-    if tiers:
-        return tiers[0]
-    return selection.tier
 
 
 def _trim_messages_for_prompt_limit_impl(
@@ -298,7 +466,7 @@ def _trim_messages_for_prompt_limit_impl(
     executor._last_prompt_capsule = ""
     executor._last_prompt_capsule_source_tokens = 0
 
-    target_prompt_budget = max(1024, int(prompt_limit * 0.82))
+    target_prompt_budget = _calc_target_prompt_budget(prompt_limit)
     current_total = prompt_count if prompt_count and prompt_count > 0 else approx_total
     if current_total <= target_prompt_budget and approx_total <= target_prompt_budget:
         return messages
@@ -385,6 +553,8 @@ async def _chat_with_retry_impl(
     call_timeout = _configured_llm_timeout(executor._cfg)
     executor._last_prompt_capsule = ""
     executor._last_prompt_capsule_source_tokens = 0
+    blocked_model_refs: set[str] = set()
+    blocked_provider_names: set[str] = set()
     for _attempt in range(max_attempts):
         executor._set_last_call_meta(
             selection,
@@ -422,11 +592,7 @@ async def _chat_with_retry_impl(
             raw = await asyncio.wait_for(chat_coro, timeout=call_timeout) if call_timeout is not None else await chat_coro
             executor._mark_model_success(selection.model_ref)
             executor._track_token_usage(selected_provider)
-            usage = getattr(selected_provider, "last_usage", None)
-            prompt_tokens = int(usage.get("prompt_tokens") or 0) if isinstance(usage, dict) else 0
-            completion_tokens = int(usage.get("completion_tokens") or 0) if isinstance(usage, dict) else 0
-            total_tokens = int(usage.get("total_tokens") or (prompt_tokens + completion_tokens)) if isinstance(usage, dict) else 0
-            usage_source = str(usage.get("usage_source") or "missing") if isinstance(usage, dict) else "missing"
+            prompt_tokens, completion_tokens, total_tokens, usage_source = _usage_metrics(selected_provider)
             scope = _llm_scope(
                 selection,
                 usage_source=usage_source,
@@ -459,56 +625,37 @@ async def _chat_with_retry_impl(
             )
             executor._mark_model_failure(selection.model_ref, _err)
             if _attempt < max_attempts - 1:
-                _fallback_tier = _retry_fallback_tier(
+                should_continue, selected_provider, selection = await _apply_retry_plan(
                     executor,
-                    selection,
-                    phase,
-                    fallback_prefer_tier,
-                )
-                fb_provider, fb_selection = executor._select_provider(
+                    selected_provider=selected_provider,
+                    log_prefix=log_prefix,
+                    selection=selection,
+                    attempt_no=_attempt + 1,
+                    max_attempts=max_attempts,
+                    overflow_kind="timeout",
+                    err=_err,
+                    exc=exc,
                     phase=phase,
                     user_message=user_message,
                     current_action=current_action,
                     tool_history=tool_history,
-                    prefer_tier=_fallback_tier,
                     thinking_override=thinking_override,
                     routing_overrides=routing_overrides,
+                    blocked_model_refs=blocked_model_refs,
+                    blocked_provider_names=blocked_provider_names,
+                    fallback_prefer_tier=fallback_prefer_tier,
                 )
-                if fb_selection.model_ref != selection.model_ref:
-                    _log.warning(
-                        "%s LLM failover %s -> %s overflow_kind=timeout attempt=%s/%s err=%s",
-                        log_prefix,
-                        _llm_scope(selection),
-                        _llm_scope(fb_selection),
-                        _attempt + 1,
-                        max_attempts,
-                        _err,
-                    )
-                    selected_provider, selection = fb_provider, fb_selection
+                if should_continue:
                     continue
-                retry_after = executor._extract_retry_after_seconds(_err, exc)
-                delay = executor._retry_delay_seconds(
-                    _attempt + 1,
-                    retry_after_seconds=retry_after,
-                )
-                _log.warning(
-                    "%s LLM backoff %s delay_sec=%.2f retry_after=%s err=%s",
-                    log_prefix,
-                    _llm_scope(
-                        selection,
-                        overflow_kind="timeout",
-                        attempt=f"{_attempt + 1}/{max_attempts}",
-                    ),
-                    delay,
-                    f"{retry_after:.2f}s" if retry_after is not None else "none",
-                    _err,
-                )
-                await asyncio.sleep(delay)
-                continue
             continue
         except Exception as exc:
             last_error = exc
             _err = str(exc) or repr(exc)
+            failure_code = executor._mark_model_failure(selection.model_ref, _err)
+            if executor._is_blocked_candidate_after_failure(selection.model_ref, failure_code, _err):
+                blocked_model_refs.add(selection.model_ref)
+            if executor._is_provider_blocked_after_failure(failure_code):
+                blocked_provider_names.add(_provider_of_model(selection.model_ref))
             prompt_count, prompt_limit = executor._extract_prompt_limit(_err)
             is_output_overflow = executor._is_output_overflow_error(_err)
             overflow_kind = "output" if is_output_overflow else ("prompt" if prompt_limit else "none")
@@ -562,55 +709,29 @@ async def _chat_with_retry_impl(
                     _err,
                 )
 
-            executor._mark_model_failure(selection.model_ref, _err)
             if _attempt < max_attempts - 1:
-                _fallback_tier = _retry_fallback_tier(
+                should_continue, selected_provider, selection = await _apply_retry_plan(
                     executor,
-                    selection,
-                    phase,
-                    fallback_prefer_tier,
-                )
-                fb_provider, fb_selection = executor._select_provider(
+                    selected_provider=selected_provider,
+                    log_prefix=log_prefix,
+                    selection=selection,
+                    attempt_no=_attempt + 1,
+                    max_attempts=max_attempts,
+                    overflow_kind=overflow_kind,
+                    err=_err,
+                    exc=exc,
                     phase=phase,
                     user_message=user_message,
                     current_action=current_action,
                     tool_history=tool_history,
-                    prefer_tier=_fallback_tier,
                     thinking_override=thinking_override,
                     routing_overrides=routing_overrides,
+                    blocked_model_refs=blocked_model_refs,
+                    blocked_provider_names=blocked_provider_names,
+                    fallback_prefer_tier=fallback_prefer_tier,
                 )
-                if fb_selection.model_ref != selection.model_ref:
-                    _log.warning(
-                        "%s LLM failover %s -> %s overflow_kind=%s attempt=%s/%s err=%s",
-                        log_prefix,
-                        _llm_scope(selection, overflow_kind=overflow_kind),
-                        _llm_scope(fb_selection),
-                        overflow_kind,
-                        _attempt + 1,
-                        max_attempts,
-                        _err,
-                    )
-                    selected_provider, selection = fb_provider, fb_selection
+                if should_continue:
                     continue
-                retry_after = executor._extract_retry_after_seconds(_err, exc)
-                delay = executor._retry_delay_seconds(
-                    _attempt + 1,
-                    retry_after_seconds=retry_after,
-                )
-                _log.warning(
-                    "%s LLM backoff %s delay_sec=%.2f retry_after=%s err=%s",
-                    log_prefix,
-                    _llm_scope(
-                        selection,
-                        overflow_kind=overflow_kind,
-                        attempt=f"{_attempt + 1}/{max_attempts}",
-                    ),
-                    delay,
-                    f"{retry_after:.2f}s" if retry_after is not None else "none",
-                    _err,
-                )
-                await asyncio.sleep(delay)
-                continue
             _log.warning("%s LLM failed %s err=%s", log_prefix, _llm_scope(selection), _err)
     return raw, selection, last_error
 
@@ -650,9 +771,9 @@ async def _repair_output_impl(
     ]
 
     try:
-        _, repair_model_ref = executor._resolve_tier_model("repair")
+        _, repair_model_ref = executor._resolve_tier_model(REPAIR_TIER)
         repair_provider = executor._find_or_create_provider(repair_model_ref)
-        _log.info("[judgment] repair %s", format_log_fields(tier="repair", model_ref=repair_model_ref))
+        _log.info("[judgment] repair %s", format_log_fields(tier=REPAIR_TIER, model_ref=repair_model_ref))
         repair_coro = repair_provider.chat(repair_messages, temperature=0.0)
         repair_timeout = _configured_llm_timeout(executor._cfg)
         repaired_raw = await asyncio.wait_for(repair_coro, timeout=repair_timeout) if repair_timeout is not None else await repair_coro
@@ -667,7 +788,7 @@ async def _repair_output_impl(
 
     _log.info(
         "[judgment] repair_ok %s",
-        format_log_fields(tier="repair", model_ref=repair_model_ref),
+        format_log_fields(tier=REPAIR_TIER, model_ref=repair_model_ref),
     )
     return repaired
 
