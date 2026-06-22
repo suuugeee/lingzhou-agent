@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 
 _REPLY_PSEUDO_TOOLS = {"chat_reply"}
 
-
 def _copy_model_strategy(output: JudgmentOutput) -> dict[str, Any]:
     return dict(output.model_strategy or {})
 
@@ -87,6 +86,14 @@ def normalize_reply_pseudo_tool(output: JudgmentOutput) -> JudgmentOutput:
     )
 
 
+def _has_action_payload(output: JudgmentOutput) -> bool:
+    return bool(
+        str(output.chosen_action_id or "").strip()
+        or output.parallel_actions
+        or output.delegate_tasks
+    )
+
+
 def normalize_action_shape(
     output: JudgmentOutput,
     *,
@@ -105,8 +112,15 @@ def normalize_action_shape(
         output.params = {}
 
     if output.decision not in {"act", "pause", "wait"}:
+        if _has_action_payload(output):
+            output.decision = "act"
+            return normalize_action_shape(
+                output,
+                registry=registry,
+                allow_delegate_tasks=allow_delegate_tasks,
+            )
         return JudgmentOutput(
-            decision="wait",
+            decision="pause",
             rationale=f"无效 decision: {output.decision!r}",
             reflection=output.reflection,
             reply_to_user=output.reply_to_user,

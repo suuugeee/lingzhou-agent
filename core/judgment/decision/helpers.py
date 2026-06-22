@@ -755,6 +755,8 @@ async def _repair_output_impl(
                 "你是一个严格的 JSON 修复器。"
                 "只输出合法 JSON，不要解释，不要使用 markdown 代码块。"
                 "必须遵循这个 schema: {decision, chosen_action_id, params, parallel_actions, delegate_tasks, rationale, reflection, reply_to_user, next_step, model_strategy}."
+                "decision 只能是 act、pause、wait。"
+                "如果原意是 continue/run/execute 且包含工具动作，请改成 decision=act 并保留 chosen_action_id/params。"
                 "只根据 broken_output 修复 JSON，不要依赖原始判断上下文。"
                 "如果原输出被截断，请尽量保留已经可见的字段并补全成合法 JSON。"
                 "如果 broken_output 是裸代码（bash/python 脚本等），将代码原文放入 reply_to_user 字段，decision 设为 pause，rationale 说明代码已封装。"

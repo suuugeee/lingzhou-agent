@@ -89,6 +89,57 @@ async def test_normalize_judgment_output_unknown_tool_becomes_wait() -> None:
 
 
 @pytest.mark.asyncio
+async def test_normalize_judgment_output_invalid_decision_with_action_becomes_act() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "shell.run" else None
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(
+            decision="continue",
+            chosen_action_id="shell.run",
+            params={"command": "pwd"},
+            rationale="继续执行验证",
+        ),
+        context_text="",
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "shell.run"
+    assert out.params == {"command": "pwd"}
+
+
+@pytest.mark.asyncio
+async def test_normalize_judgment_output_invalid_decision_without_action_becomes_pause() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="continue", rationale="继续处理"),
+        context_text="",
+        raw="{}",
+    )
+
+    assert out.decision == "pause"
+    assert "无效 decision" in out.rationale
+
+
+@pytest.mark.asyncio
 async def test_problem_solving_guard_redirects_non_workbench_actions_to_workbench() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput
