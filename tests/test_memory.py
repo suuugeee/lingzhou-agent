@@ -1185,6 +1185,39 @@ def test_semantic_fts_short_ascii_filtered():
                 f"含中文关键词的节点应排第一，实际: {[r['id'] for r in results_mixed]}"
 
 
+def test_semantic_search_ignores_literal_boolean_operators():
+    from store.semantic import MemoryNode, SemanticMemory
+
+    with tempfile.TemporaryDirectory() as d:
+        sm = SemanticMemory(Path(d), decay_lambda=0.0)
+        sm.upsert(MemoryNode(
+            id="storage",
+            kind="fact",
+            title="semantic db storage",
+            body="semantic.db episodic.db memory_root registry",
+            activation=0.5,
+        ))
+
+        results = sm.retrieve("chroma OR qdrant OR semantic.db OR memory_root", top_k=5)
+
+        assert results
+        assert results[0]["id"] == "storage"
+        assert sm._fts5_ok is True
+
+
+def test_episodic_search_ignores_literal_boolean_operators():
+    from store.episodic import EpisodicMemory
+
+    with tempfile.TemporaryDirectory() as d:
+        ep = EpisodicMemory(Path(d), max_events=0)
+        ep.record("assistant_reply", "semantic.db episodic.db memory_root registry 已盘点", task_id="task-1")
+
+        result = ep.search("semantic.db OR episodic.db OR memory_root", max_chars=2000)
+
+        assert "memory_root" in result
+        assert "task=task-1" in result
+
+
 def test_semantic_upsert_disables_fts_when_sync_fails_and_retrieval_falls_back():
     """FTS 同步失败后，不应继续依赖残缺索引。"""
     from store.semantic import MemoryNode, SemanticMemory

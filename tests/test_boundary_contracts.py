@@ -168,3 +168,19 @@ def test_recovery_fallback_still_uses_positive_memory_search_request() -> None:
     fallback = _build_recovery_fallback_action("搜索历史记录里是否有同类失败。", _Registry())
 
     assert fallback == ("memory.search", {"query": "搜索历史记录里是否有同类失败。", "top_k": 5})
+
+
+def test_recovery_fallback_blocks_memory_search_after_low_increment_budget() -> None:
+    from core.judgment.boundary.pipeline import _build_recovery_fallback_action
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "memory.search" else None
+
+    fallback = _build_recovery_fallback_action(
+        "先综合已有证据；仍需验证时不要重复搜索，改用更高信息增量证据源。",
+        _Registry(),
+        recovery_state="continue_low_increment_budget_reached",
+    )
+
+    assert fallback is None
