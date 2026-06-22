@@ -130,6 +130,18 @@ def _build_recovery_fallback_action(
     return None
 
 
+def _recovery_state_blocks_generic_action_first(recovery_state: str, next_verification: str) -> bool:
+    state = str(recovery_state or "").strip()
+    if state not in {
+        "continue_low_increment_budget_reached",
+        "continue_repeat_action_gated",
+        "memory_search_control_query_gated",
+    }:
+        return False
+    lowered = str(next_verification or "").lower()
+    return not any(marker in lowered for marker in ("task.list", "任务列表", "任务状态", "列出任务"))
+
+
 def _problem_solving_guard_active(context_text: str) -> bool:
     marker_index = context_text.find(_PROBLEM_SOLVING_GUARD_ACTIVE)
     if marker_index < 0:
@@ -302,6 +314,10 @@ def enforce_action_first_progress(
                 params={"path": path, "max_chars": 12000},
                 rationale="Action-first fallback: 用户给出文件路径且本轮不能空等，先读取路径形成证据。",
             )
+
+    recovery_state, next_verification = _extract_recovery_fields(context_text)
+    if _recovery_state_blocks_generic_action_first(recovery_state, next_verification):
+        return output
 
     if _registry_has(registry, "task.list"):
         return _fallback_action_output(
