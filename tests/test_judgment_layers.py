@@ -337,6 +337,42 @@ async def test_action_first_wait_ignores_control_text_paths_outside_captured_inp
 
 
 @pytest.mark.asyncio
+async def test_action_first_wait_does_not_task_list_after_continue_gate_resolved() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "task.list" else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "action_first:\n"
+        "- intent=execute\n"
+        "- must_act=yes\n"
+        "problem_solving:\n"
+        "- recovery_state=continue_repeat_action_gated\n"
+        "- next_verification=先综合已有证据；仍需验证时换不同证据源。\n"
+        "\n### 近期关键事实\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="我还没有形成足够可靠的答复，需要先整理现有证据。"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "wait"
+    assert out.chosen_action_id == ""
+
+
+@pytest.mark.asyncio
 async def test_recovery_wait_is_forced_to_probe_if_next_verification_contains_probe() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput
