@@ -94,6 +94,10 @@ def test_worker_rewrites_task_workbench_recovery_aliases():
     asyncio.run(_worker_rewrites_task_workbench_recovery_aliases())
 
 
+def test_worker_fills_task_tool_id_from_active_task():
+    asyncio.run(_worker_fills_task_tool_id_from_active_task())
+
+
 def test_task_complete_refreshes_active_task_before_growth_guard():
     asyncio.run(_task_complete_refreshes_active_task_before_growth_guard())
 
@@ -282,6 +286,38 @@ async def _worker_rewrites_task_workbench_recovery_aliases():
 
     assert result.error is None
     assert result.state_delta["seen"] is True
+
+
+async def _worker_fills_task_tool_id_from_active_task():
+    from core.execution import WorkerLayer
+    from core.judgment import JudgmentOutput
+    from tools.registry import ToolEntry, ToolManifest, ToolParam, ToolResult
+
+    seen_params: dict[str, Any] = {}
+
+    async def _handler(params, ctx):
+        seen_params.update(params)
+        return ToolResult(summary="ok", state_delta={"seen": True})
+
+    entry = ToolEntry(
+        manifest=ToolManifest(
+            name="task.resume",
+            description="demo",
+            params=[ToolParam("task_id", "number", "task id", required=True)],
+        ),
+        handler=_handler,
+    )
+
+    result = await WorkerLayer(_test_config()).dispatch(
+        "tool-chain-worker",
+        entry,
+        JudgmentOutput(decision="act", chosen_action_id="task.resume", params={"task_id": 0}),
+        _tool_ctx(active_task=SimpleNamespace(id=77)),
+    )
+
+    assert result.error is None
+    assert result.state_delta["seen"] is True
+    assert seen_params["task_id"] == 77
 
 
 def test_task_store_get_active_prefers_started_task_over_pending():
@@ -3970,6 +4006,47 @@ async def _shell_limits_local_embedding_rebuild_when_memory_low(monkeypatch):
     assert res.error is None
     assert res.metadata["resource_guard"]["reason"] == "insufficient_available_memory_for_local_embedding"
     assert res.metadata["resource_guard"]["limit_mib"] == 768
+
+
+def test_shell_run_keeps_large_output_as_artifact_not_inline(monkeypatch, tmp_path):
+    asyncio.run(_shell_run_keeps_large_output_as_artifact_not_inline(monkeypatch, tmp_path))
+
+
+async def _shell_run_keeps_large_output_as_artifact_not_inline(monkeypatch, tmp_path):
+    import core.paths as paths_mod
+    from tools.shell import shell_run
+
+    monkeypatch.setenv("LINGZHOU_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setattr(paths_mod, "_DATA_DIR", None)
+    monkeypatch.setattr(paths_mod, "_GENERATED_DIR", None)
+
+    raw = "START-" + ("x" * 20_000) + "-TAIL"
+    ctx = _tool_ctx()
+
+    res = await shell_run(
+        {"command": f"{_sys_executable()} -c \"import sys; sys.stdout.write('START-' + 'x' * 20000 + '-TAIL')\"", "timeout": 5},
+        ctx,
+    )
+
+    assert res.error is None
+    assert res.metadata["output_chars"] > 20_000
+    assert res.metadata["output_truncated"] is True
+    assert res.metadata["output_sha256"]
+    assert res.metadata["full_output_path"]
+    assert res.artifact_paths == [res.metadata["full_output_path"]]
+    assert Path(res.metadata["full_output_path"]).read_text(encoding="utf-8").strip() == raw
+    assert len(res.summary) < 5000
+    assert len(res.evidence) < 6000
+    assert "preview_chars=" in res.metadata["log_summary"]
+    assert "raw_chars=" in res.metadata["log_summary"]
+    assert "output omitted" in res.evidence
+    assert raw not in res.evidence
+
+
+def _sys_executable() -> str:
+    import sys
+
+    return sys.executable
 
 
 def test_memory_embed_backfill_runs_in_small_batches():

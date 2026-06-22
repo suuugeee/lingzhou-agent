@@ -62,6 +62,12 @@ _TOOL_PARAM_ALIASES = {
             "params.sandbox",
         ),
     },
+    "task.resume": {
+        "task_id": ("id", "payload.task_id", "params.task_id", "payload.id", "params.id"),
+    },
+    "task.workbench": {
+        "task_id": ("id", "payload.task_id", "params.task_id", "payload.id", "params.id"),
+    },
 }
 
 _DEFAULT_WORKER_TYPE = WORKER_TOOL_CHAIN
@@ -91,6 +97,11 @@ def _is_missing_param_value(param_name: str, value: Any) -> bool:
         return True
     if param_name == "command" and isinstance(value, str) and not value.strip():
         return True
+    if param_name == "task_id":
+        try:
+            return int(value or 0) <= 0
+        except (TypeError, ValueError):
+            return True
     return False
 
 
@@ -216,7 +227,7 @@ def _validate_required_params(entry: ToolEntry, params: dict[str, Any]) -> ToolR
         if not param.required:
             continue
         value = params.get(param.name)
-        if value is None:
+        if _is_missing_param_value(param.name, value):
             missing.append(param.name)
             continue
         if param.type == "string" and not str(value).strip():
@@ -257,9 +268,32 @@ def _validate_required_params(entry: ToolEntry, params: dict[str, Any]) -> ToolR
     )
 
 
+async def _repair_task_id_from_active_task(entry: ToolEntry, params: dict[str, Any], ctx: ToolContext) -> dict[str, Any]:
+    if not isinstance(params, dict):
+        return params
+    if entry.manifest.name not in {"task.resume", "task.workbench"}:
+        return params
+    if not _is_missing_param_value("task_id", params.get("task_id")):
+        return params
+    get_active = getattr(ctx, "get_active_task", None)
+    if not callable(get_active):
+        return params
+    try:
+        active_task = await get_active()
+    except Exception:
+        active_task = None
+    task_id = getattr(active_task, "id", None)
+    if _is_missing_param_value("task_id", task_id):
+        return params
+    repaired = dict(params)
+    repaired["task_id"] = task_id
+    return repaired
+
+
 async def _call_handler(entry: ToolEntry, params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     """调用工具 handler，兼容同步函数与 dict 返回值（进化工具可能产生这两种情况）。"""
     params = _repair_tool_param_aliases(entry, _repair_task_workbench_params(entry, params))
+    params = await _repair_task_id_from_active_task(entry, params, ctx)
     validation_error = _validate_required_params(entry, params)
     if validation_error is not None:
         return validation_error

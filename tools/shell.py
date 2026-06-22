@@ -23,6 +23,7 @@ from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, too
 _DEFAULT_TIMEOUT = 30.0
 _MAX_SUMMARY_CHARS = 4096
 _MAX_OUTPUT_PREVIEW_CHARS = 2048
+_MAX_INLINE_OUTPUT_CHARS = 12_000
 _MANIFEST = ToolManifest(
     name="shell.run",
     description=(
@@ -124,6 +125,23 @@ def _shorten_output(text: str, *, max_chars: int = _MAX_OUTPUT_PREVIEW_CHARS) ->
         + f"\n...[output omitted {omitted} chars]...\n"
         + value[-keep_each:]
     )
+
+
+def _output_digest(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _persist_full_output(command: str, output: str) -> str:
+    """把完整 shell 输出落盘为 artifact，runtime/context 只引用路径和 sha。"""
+    from core.paths import data_dir
+
+    root = data_dir() / "state" / "shell_outputs"
+    root.mkdir(parents=True, exist_ok=True)
+    digest = _output_digest(command + "\0" + output)
+    path = root / f"shell-{digest[:16]}.log"
+    if not path.exists():
+        path.write_text(output, encoding="utf-8", errors="replace")
+    return str(path)
 
 
 def _build_summary(status: str, workdir: Path, *, use_sandbox: bool, is_risky: bool, risk_reason: str, output_preview: str) -> str:
@@ -278,8 +296,16 @@ async def _shell_run_impl(params: dict[str, Any], ctx: ToolContext, command: str
         output_preview=output_preview,
     )
 
+    output_sha256 = _output_digest(combined)
+    output_truncated = len(output_text) > _MAX_OUTPUT_PREVIEW_CHARS
+    full_output_path = ""
+    if len(combined) > _MAX_INLINE_OUTPUT_CHARS:
+        full_output_path = _persist_full_output(command, combined)
+
     log_summary = (
-        f"shell.run {'timeout' if timed_out else f'exit={returncode}'} chars={len(combined)}"
+        f"shell.run {'timeout' if timed_out else f'exit={returncode}'} "
+        f"chars={len(combined)} preview_chars={len(output_preview)} "
+        f"raw_chars={len(combined)} truncated={output_truncated}"
     )
     evidence_preview = _shorten_output(output_text, max_chars=_MAX_OUTPUT_PREVIEW_CHARS)
     stdout_preview = _shorten_output(stdout or "")
@@ -295,11 +321,14 @@ async def _shell_run_impl(params: dict[str, Any], ctx: ToolContext, command: str
         stdout_chars=len(stdout),
         stderr_chars=len(stderr),
         output_chars=len(combined),
+        output_sha256=output_sha256,
+        output_truncated=output_truncated,
         output_preview=evidence_preview,
         stdout_preview=stdout_preview,
         stderr_preview=stderr_preview,
         output_preview_chars=len(output_preview),
         output_omitted_chars=max(0, len(output_text) - len(evidence_preview)),
+        full_output_path=full_output_path,
         sandbox=use_sandbox,
         sandbox_dir=_sandbox_dir,
         risky=is_risky,
@@ -312,6 +341,7 @@ async def _shell_run_impl(params: dict[str, Any], ctx: ToolContext, command: str
         evidence=json.dumps(payload, ensure_ascii=False),
         resource_key=str(workdir),
         fingerprint=_fingerprint(command, workdir, returncode, combined),
+        artifact_paths=[full_output_path] if full_output_path else [],
         metadata=payload,
         error="timeout" if timed_out else (f"exit={returncode}" if returncode != 0 else None),
         state_delta={
@@ -321,5 +351,10 @@ async def _shell_run_impl(params: dict[str, Any], ctx: ToolContext, command: str
             "sandbox": use_sandbox,
             "risky": is_risky,
             "resource_guard": "limited" if guard.matched and guard.limit_mib else ("passed" if guard.matched else ""),
+            "output_chars": len(combined),
+            "output_preview_chars": len(output_preview),
+            "output_truncated": output_truncated,
+            "output_sha256": output_sha256,
+            "full_output_path": full_output_path,
         },
     )
