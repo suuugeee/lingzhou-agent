@@ -396,7 +396,11 @@ async def resolve_focus_task(
         if not fallback_active:
             return None
 
-    current_focus = await _load_focus_task_from_fact(loop, _FOCUS_CURRENT_TASK_KEY, include_waiting=False)
+    current_focus = await _load_focus_task_from_fact(
+        loop,
+        _FOCUS_CURRENT_TASK_KEY,
+        include_waiting=include_waiting,
+    )
     if current_focus is not None:
         if not normalized_chat_id or await task_matches_chat(loop, current_focus, normalized_chat_id):
             return current_focus
