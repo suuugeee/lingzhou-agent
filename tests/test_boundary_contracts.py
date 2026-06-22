@@ -108,6 +108,12 @@ def test_action_key_param_from_contracts() -> None:
     from core.contracts.execution import action_key_param
 
     assert action_key_param({"command": "ls"}) == "ls"
+    assert action_key_param({"path": "/tmp/a.py"}) == "/tmp/a.py"
+    assert action_key_param({"path": "/tmp/a.py", "start": 12000, "max_chars": 12000}) == "/tmp/a.py start=12000 max_chars=12000"
+    assert action_key_param({"path": "/tmp/a.py", "offset": 21, "limit": 20}) == "/tmp/a.py offset=21 limit=20"
+    assert action_key_param({"query": "legacy runtime", "top_k": 5}) == "legacy runtime top_k=5"
+    assert action_key_param({"status": "all", "limit": 8}) == "all limit=8"
+    assert action_key_param({"path": "/tmp/a.py", "content": "x" * 1000}) == "/tmp/a.py"
     assert action_key_param({}) == ""
 
 

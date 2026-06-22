@@ -123,8 +123,12 @@ async def _execute_tick_action(
         path = (action.params or {}).get("path") or ""
         if tool == "file.read":
             max_chars = int((action.params or {}).get("max_chars") or 4000)
-            start = int((action.params or {}).get("start") or 0)
-            end = int((action.params or {}).get("end") or 0)
+            if "offset" in (action.params or {}):
+                start = int((action.params or {}).get("offset") or 1)
+                end = start + int((action.params or {}).get("limit") or 50)
+            else:
+                start = int((action.params or {}).get("start") or 0)
+                end = int((action.params or {}).get("end") or 0)
             for item in loop._behavior.on_read(path, max_chars, result.summary, start=start, end=end):
                 loop._wm.add(item)
         elif tool == "file.list":
