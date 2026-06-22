@@ -93,8 +93,6 @@ def _clean_workbench_patch(raw: Any) -> tuple[dict[str, Any], list[str]]:
             continue
         if key in _TEXT_FIELDS:
             text = _clean_text(value)
-            if key == "next_verification":
-                text = cortex_intent.clean_next_verification_text(text)
             if text:
                 patch[key] = text
         elif key in _DICT_FIELDS and isinstance(value, dict):
@@ -153,8 +151,10 @@ async def task_workbench(params: dict[str, Any], ctx: ToolContext) -> ToolResult
     if not isinstance(cortex, dict):
         cortex = {}
     merged_cortex = dict(cortex)
-    merged_cortex.update(patch)
     verification_state = cortex_intent.build_verification_state(patch, source="workbench")
+    if "next_verification" in patch:
+        patch["next_verification"] = cortex_intent.clean_next_verification_text(patch["next_verification"])
+    merged_cortex.update(patch)
     if verification_state is not None:
         merged_cortex["verification_state"] = verification_state
     await ctx.task_store.update_task_result(int(task.id), {"cortex": merged_cortex})
