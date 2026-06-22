@@ -3460,6 +3460,47 @@ async def test_persist_tick_user_reply_does_not_append_skill_suffix():
     assert store.messages == [("assistant", "这是最终答复。", "")]
 
 
+@pytest.mark.asyncio
+async def test_persist_tick_user_reply_dedupes_repeated_status_point():
+    from core.loop.tick import _persist_tick_user_reply
+
+    class _Store:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str, str]] = []
+
+        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
+            self.messages.append((role, content, chat_id))
+            return len(self.messages)
+
+    store = _Store()
+    loop = cast("Any", SimpleNamespace(_task_store=store))
+    repeated = "最近发现继续重复同一个 memory.search 查询的信息增量很低，所以已经停止重复搜索。"
+    action = _judgment_output(
+        decision="pause",
+        rationale="证据已足够，直接回复用户。",
+        reply_to_user=(
+            "已确认的状态：\n"
+            "1. 活跃任务仍在继续。\n"
+            "2. 当前已建立工作台。\n"
+            f"3. {repeated}\n"
+            "目前还不能说全部找回。  3. 最近发现继续重复同一个 memory.search "
+            "查询的信息增量很低，所以已经停止重复搜索。"
+        ),
+    )
+
+    await _persist_tick_user_reply(
+        loop,
+        action,
+        active_task=None,
+        chat_id="",
+    )
+
+    assert action.reply_to_user.count(repeated) == 1
+    assert store.messages[0][1].count(repeated) == 1
+    assert "1. 活跃任务仍在继续。" in action.reply_to_user
+    assert "2. 当前已建立工作台。" in action.reply_to_user
+
+
 def test_infer_valence_from_text_uses_explicit_hint_only():
     from core.config_models import EmotionConfig
     from core.loop.shared.common import _infer_valence_from_text

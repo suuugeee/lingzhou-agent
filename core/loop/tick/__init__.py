@@ -264,6 +264,29 @@ def _check_mouth_consistency(reply: str, action_result: _ActionResultSummary) ->
             break
 
 
+def _dedupe_reply_lines(reply: str) -> str:
+    text = str(reply or "").strip()
+    if not text:
+        return ""
+    # LLMs sometimes append a numbered point after a sentence without a newline.
+    text = re.sub(r"(?<=[。！？.!?])\s+(\d+[.．、]\s+)", r"\n\1", text)
+
+    seen: set[str] = set()
+    lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            lines.append(line)
+            continue
+        key = re.sub(r"^\s*(?:[-*]|\d+[.．、])\s*", "", stripped)
+        key = re.sub(r"\s+", " ", key).strip("。；;，,、 ")
+        if key and key in seen:
+            continue
+        seen.add(key)
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 async def _should_skip_duplicate_autonomous_reply(
     loop: Any,
     *,
@@ -324,6 +347,9 @@ async def _persist_tick_user_reply(
         return
 
     action.reply_to_user = _strip_memory_context(action.reply_to_user)
+    action.reply_to_user = _dedupe_reply_lines(action.reply_to_user)
+    if not action.reply_to_user:
+        return
     _log.info(
         "[task-reply] task=%s decision=%s reply=%s",
         active_task.id if active_task else 0,
