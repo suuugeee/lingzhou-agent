@@ -81,6 +81,21 @@ def _task_signature(task: Any | None) -> tuple[Any, Any]:
     return (task.id if task else None, task.status if task else None)
 
 
+async def _task_change_signature(loop: Any, before_sig: tuple[Any, Any]) -> tuple[Any, Any]:
+    now = await resolve_focus_task(loop)
+    now_sig = _task_signature(now)
+    if now_sig != (None, None):
+        return now_sig
+    before_task_id = before_sig[0]
+    if before_task_id in (None, ""):
+        return now_sig
+    waiting = await resolve_focus_task(loop, include_waiting=True)
+    waiting_sig = _task_signature(waiting)
+    if waiting_sig[0] == before_task_id and waiting_sig[1] == "waiting":
+        return before_sig
+    return now_sig
+
+
 def _resolve_wait_gap_seconds(
     loop: Any,
     *,
@@ -175,8 +190,7 @@ async def _wait_for_event_impl(loop: Any, max_wait: float, before_task: Any) -> 
                 _log.info("[wake] %s", format_log_fields(reason="chat_pending"))
                 break
         if cfg.loop.wake_on_task_change:
-            now = await resolve_focus_task(loop)
-            now_sig = _task_signature(now)
+            now_sig = await _task_change_signature(loop, before_sig)
             if now_sig != before_sig:
                 _log.info(
                     "[wake] %s",
