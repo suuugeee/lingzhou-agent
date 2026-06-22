@@ -344,9 +344,11 @@ async def _sync_task_progress_state(
     planned_next = str(action.next_step or "").strip()
     state_next = ""
     state_next_authoritative = False
+    state_next_resolved = False
     if isinstance(state_delta, dict):
         cortex_delta = state_delta.get("cortex")
         cortex_next = ""
+        cortex_verification_status = ""
         if isinstance(cortex_delta, dict):
             cortex_next = str(
                 cortex_delta.get("next_step")
@@ -354,6 +356,7 @@ async def _sync_task_progress_state(
                 or cortex_delta.get("next_verification")
                 or ""
             ).strip()
+            cortex_verification_status, _ = cortex_intent.verification_state_from_cortex(cortex_delta)
         state_next = str(
             state_delta.get("next_step")
             or state_delta.get("recovery_next_step")
@@ -363,6 +366,9 @@ async def _sync_task_progress_state(
         ).strip()
         state_next = cortex_intent.clean_next_verification_text(state_next)
         action_tool = str(getattr(action, "chosen_action_id", "") or "").strip()
+        if action_tool == "task.workbench" and cortex_verification_status in {"resolved", "none"}:
+            state_next = ""
+            state_next_resolved = True
         state_next_authoritative = bool(
             state_next
             and (
@@ -380,6 +386,10 @@ async def _sync_task_progress_state(
 
     if explicit_current_step is not None and current_step != explicit_current_step:
         current_step = explicit_current_step
+        updated = True
+
+    if state_next_resolved and next_step:
+        next_step = ""
         updated = True
 
     if progressful and previous_next_step:
