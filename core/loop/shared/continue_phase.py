@@ -235,7 +235,7 @@ def _continue_low_increment_budget(loop: Any, max_inner_rounds: int) -> int:
             return max(1, int(explicit))
         except (TypeError, ValueError):
             pass
-    return max(3, min(4, int(max_inner_rounds)))
+    return max(1, min(2, int(max_inner_rounds)))
 
 
 def _low_increment_history_count(history: list[dict[str, Any]]) -> int:

@@ -18,7 +18,7 @@ from conftest import (
 )
 
 
-def _continue_cfg(*, thresholds: dict[str, Any], loop: dict[str, Any] | None = None):
+def _continue_cfg(*, thresholds: dict[str, Any] | None = None, loop: dict[str, Any] | None = None):
     from core.config import Config
 
     data: dict[str, Any] = {
@@ -32,8 +32,9 @@ def _continue_cfg(*, thresholds: dict[str, Any], loop: dict[str, Any] | None = N
         "model": "bailian/qwen3.6-plus",
         "temperature": 0.7,
         "timeout": 60.0,
-        "thresholds": thresholds,
     }
+    if thresholds is not None:
+        data["thresholds"] = thresholds
     if loop:
         data["loop"] = loop
     return Config.model_validate(data)
@@ -664,6 +665,10 @@ def test_continue_phase_records_workbench_when_inner_round_limit_reached():
     asyncio.run(_continue_phase_records_workbench_when_inner_round_limit_reached())
 
 
+def test_continue_phase_default_inner_round_limit_is_conservative():
+    asyncio.run(_continue_phase_default_inner_round_limit_is_conservative())
+
+
 def test_continue_phase_gates_repeated_same_action_before_dispatch():
     asyncio.run(_continue_phase_gates_repeated_same_action_before_dispatch())
 
@@ -782,6 +787,50 @@ async def _continue_phase_records_workbench_when_inner_round_limit_reached():
     assert workbench["recovery_state"] == "continue_round_limit_reached"
     assert "本 tick continue 阶段已执行 2 轮工具续判" in workbench["evidence"][0]
     assert "基于最近一次低信息探索成功结果形成结论" in workbench["next_verification"]
+
+
+async def _continue_phase_default_inner_round_limit_is_conservative():
+    from core.loop.shared.continue_phase import _run_continue_phase
+
+    cfg = _continue_cfg(thresholds=None)
+
+    class _Judgment:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def decide_continue(self, tool_history, **kwargs):
+            self.calls += 1
+            return _judgment_output(
+                decision="act",
+                chosen_action_id="file.read",
+                params={"path": f"/tmp/default-{self.calls}.txt"},
+                rationale="继续读取",
+            )
+
+    judgment = _Judgment()
+    execution = _ContinueExecution(workbench_summary="默认上限工作台已更新")
+    loop = _continue_loop(
+        cfg=cfg,
+        judgment=judgment,
+        execution=execution,
+        registry=_ContinueWorkbenchRegistry(),
+    )
+
+    final_action, final_result = await _run_continue_phase(
+        loop=loop,
+        ctx=SimpleNamespace(),
+        user_message="",
+        active_task=SimpleNamespace(id=1),
+        cognitive_signals=SimpleNamespace(),
+        action=_judgment_output(decision="act", chosen_action_id="file.read", params={"path": "/tmp/start.txt"}),
+        result=_tool_result("初始结果"),
+        tool_history=[],
+    )
+
+    assert cfg.thresholds.continue_max_inner_rounds == 2
+    assert judgment.calls == 2
+    assert final_action.chosen_action_id == "task.workbench"
+    assert final_result.summary == "默认上限工作台已更新"
 
 
 def test_continue_round_limit_prefers_runtime_recovery_next_step():
