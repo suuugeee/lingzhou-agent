@@ -12,6 +12,7 @@ from rich.console import Console
 from core.cortex import build_action_first_cortex_patch, extract_action_first_signal
 from core.immune import extract_constitution_boundaries, load_constitution
 from core.log_fields import tick_scope_fields
+from core.judgment import JudgmentOutput
 from core.judgment.tiers import INITIAL_PHASE, REPLY_ONLY_FALLBACK_TIER
 from core.loop.runs.refresh import refresh_running_runs
 from core.loop.runtime.memory_hooks import build_task_anchor_item
@@ -713,6 +714,10 @@ class _TickJudgmentPhase:
         action = await _decide_initial_action(loop, cycle, user_message, active_task, chat_id, prep)
         _log_tick_decision(loop, cycle, action)
         action = await _review_delegate_tasks(loop, ctx, action, user_message, active_task)
+        if action.decision == "act" and active_task is None and not str(user_message or "").strip():
+            action = JudgmentOutput.wait(
+                "空闲 tick 没有活跃任务，拒绝把 waiting/context 里的任务线索当作可执行工具链。"
+            )
         if action.decision == "act" and action.reply_to_user:
             action.speech_intent = action.reply_to_user
             action.reply_to_user = ""

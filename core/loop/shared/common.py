@@ -113,6 +113,8 @@ def _should_continue_within_tick(
     """task.complete/fail 真正终结后不续判；被守卫拒绝的 complete 继续恢复闭环。"""
     if action.decision != "act":
         return False
+    if not user_message and not has_active_task:
+        return False
     tool_name = action.chosen_action_id or ""
     if result is not None and result.skipped and (
         str(result.error or "") == "ToolInputInvalid"
