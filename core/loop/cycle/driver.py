@@ -24,6 +24,13 @@ from .focus import (
 _log = logging.getLogger("lingzhou.loop")
 
 
+async def _waiting_focus_task(loop: Any) -> Any | None:
+    waiting = await resolve_focus_task(loop, include_waiting=True)
+    if waiting is None:
+        return None
+    return waiting if str(getattr(waiting, "status", "") or "") == "waiting" else None
+
+
 async def _run_cycle_impl(loop: Any, cycle: int) -> int:
     cycle, handled_chat = await _process_pending_chat_turn(loop, cycle)
     if not handled_chat:
@@ -48,6 +55,10 @@ async def _run_cycle_impl(loop: Any, cycle: int) -> int:
                 source="auto",
             )
             active_task = dispatch_context.active_task
+            if active_task is None and await _waiting_focus_task(loop) is not None:
+                loop._auto_tick_due = False
+                _log.debug("[tick-dispatch] waiting task is parked, skip auto tick")
+                return cycle
             if active_task is None and not getattr(loop, "_auto_tick_due", True):
                 _log.debug("[tick-dispatch] auto tick not due, wait for idle gap")
                 return cycle
@@ -63,6 +74,9 @@ async def _run_cycle_impl(loop: Any, cycle: int) -> int:
             else:
                 _log.debug("[tick-dispatch] queue full, skip auto tick")
         else:
+            if await _waiting_focus_task(loop) is not None:
+                _log.debug("[loop] waiting task is parked, skip direct auto tick")
+                return cycle
             cycle += 1
             await loop._tick(cycle)
     return cycle
