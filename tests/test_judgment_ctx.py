@@ -3470,10 +3470,18 @@ def test_should_continue_within_tick_for_autonomous_act():
     from core.loop.shared.common import _next_initial_tier_hint, _should_continue_within_tick
     from tools.registry import ToolResult
 
-    assert _should_continue_within_tick(_judgment_output(decision="act", chosen_action_id="file.read")) is True
+    assert _should_continue_within_tick(
+        _judgment_output(decision="act", chosen_action_id="file.read"),
+        has_active_task=True,
+    ) is True
+    assert _should_continue_within_tick(
+        _judgment_output(decision="act", chosen_action_id="file.read"),
+        has_active_task=False,
+    ) is False
     assert _should_continue_within_tick(_judgment_output(decision="act", chosen_action_id="task.complete")) is False
     assert _should_continue_within_tick(
         _judgment_output(decision="act", chosen_action_id="task.complete"),
+        has_active_task=True,
         result=ToolResult(
             summary="任务皮层仍有未验证的下一步",
             skipped=True,
@@ -3482,6 +3490,7 @@ def test_should_continue_within_tick_for_autonomous_act():
     ) is True
     assert _should_continue_within_tick(
         _judgment_output(decision="act", chosen_action_id="task.workbench"),
+        has_active_task=True,
         result=ToolResult(
             summary="工具参数缺失: task.workbench requires workbench",
             skipped=True,

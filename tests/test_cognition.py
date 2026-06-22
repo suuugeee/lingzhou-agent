@@ -673,6 +673,10 @@ def test_continue_phase_gates_repeated_same_action_before_dispatch():
     asyncio.run(_continue_phase_gates_repeated_same_action_before_dispatch())
 
 
+def test_idle_decision_phase_blocks_taskless_autonomous_act(monkeypatch: pytest.MonkeyPatch):
+    asyncio.run(_idle_decision_phase_blocks_taskless_autonomous_act(monkeypatch))
+
+
 def test_continue_phase_inherits_task_id_for_task_scoped_tools():
     asyncio.run(_continue_phase_inherits_task_id_for_task_scoped_tools())
 
@@ -951,6 +955,55 @@ async def _continue_phase_gates_repeated_same_action_before_dispatch():
     assert workbench["recovery_state"] == "continue_repeat_action_gated"
     assert "/tmp/repeat.py" in workbench["next_verification"]
     assert "shell.run/grep" in workbench["next_verification"]
+
+
+async def _idle_decision_phase_blocks_taskless_autonomous_act(monkeypatch: pytest.MonkeyPatch):
+    import core.loop.tick.prep as prep_module
+
+    async def _fake_decide(*args, **kwargs):
+        return _judgment_output(
+            decision="act",
+            chosen_action_id="memory.search",
+            params={"query": "OpenClaw"},
+            rationale="waiting 任务的下一步要求继续取证",
+        )
+
+    async def _fake_review(loop, ctx, action, user_message, active_task):
+        return action
+
+    async def _maybe_curiosity_task(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(prep_module, "_decide_initial_action", _fake_decide)
+    monkeypatch.setattr(prep_module, "_review_delegate_tasks", _fake_review)
+    monkeypatch.setattr(prep_module, "_log_tick_decision", lambda *args, **kwargs: None)
+
+    loop = SimpleNamespace(_maybe_curiosity_task=_maybe_curiosity_task)
+    prep = SimpleNamespace(ethos_state=SimpleNamespace())
+
+    blocked = await prep_module._TickJudgmentPhase.run(
+        loop,
+        SimpleNamespace(),
+        1,
+        "",
+        None,
+        None,
+        prep,
+    )
+    allowed = await prep_module._TickJudgmentPhase.run(
+        loop,
+        SimpleNamespace(),
+        1,
+        "",
+        SimpleNamespace(id=1, extras={}),
+        None,
+        prep,
+    )
+
+    assert blocked.decision == "wait"
+    assert "没有活跃任务" in blocked.rationale
+    assert allowed.decision == "act"
+    assert allowed.chosen_action_id == "memory.search"
 
 
 async def _continue_phase_inherits_task_id_for_task_scoped_tools():
