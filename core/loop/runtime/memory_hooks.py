@@ -188,7 +188,7 @@ async def emit_self_drive_signal(loop: Any) -> None:
     )
     # 补充检查：可能处于 wait/观察期，但 task_store 或 run 仍有进行中的状态。
     if not has_real_work:
-        active = await resolve_focus_task(loop)
+        active = await resolve_focus_task(loop, include_waiting=True)
         if active is not None:
             # 自驱任务如果长期仅更新 next_step 但无实质变化，不应等同于真实推进工作。
             is_stalled_sd = (
@@ -315,11 +315,21 @@ async def emit_curiosity_signal(loop: Any, ethos_state: Any) -> None:
         return
 
     recent = await loop._task_store.list_tasks(limit=10)
-    pending_curiosity = [
+    open_tasks = [
         task for task in recent
-        if getattr(task, "source", None) == "curiosity"
-        and getattr(task, "status", "done") not in ("done", "failed")
+        if getattr(task, "status", "done") not in ("done", "failed")
     ]
+    pending_curiosity = [
+        task for task in open_tasks
+        if getattr(task, "source", None) == "curiosity"
+    ]
+    if open_tasks:
+        _log.info(
+            "[curiosity] skip open_tasks=%d pending_curiosity_tasks=%d",
+            len(open_tasks),
+            len(pending_curiosity),
+        )
+        return
     loop._last_curiosity_signal_idle_cycle = loop._idle_cycles
     _log.info(
         "[curiosity] idle=%d curiosity=%.2f pending_tasks=%d",

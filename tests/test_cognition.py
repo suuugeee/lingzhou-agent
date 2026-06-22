@@ -243,6 +243,10 @@ def test_curiosity_signal_does_not_auto_create_task():
     asyncio.run(_curiosity_signal_does_not_auto_create_task())
 
 
+def test_curiosity_signal_skips_when_waiting_task_exists():
+    asyncio.run(_curiosity_signal_skips_when_waiting_task_exists())
+
+
 async def _curiosity_signal_does_not_auto_create_task():
     os.environ.setdefault("DASHSCOPE_API_KEY", "test-key")
     os.environ.setdefault("GITHUB_TOKEN", "test-token")
@@ -278,6 +282,45 @@ async def _curiosity_signal_does_not_auto_create_task():
             await loop.provider.close()
 
 
+async def _curiosity_signal_skips_when_waiting_task_exists():
+    os.environ.setdefault("DASHSCOPE_API_KEY", "test-key")
+    os.environ.setdefault("GITHUB_TOKEN", "test-token")
+    from core.config import Config
+    from core.loop import CognitionLoop
+
+    cfg = Config.load(_proj_root() / "lingzhou.json.example")
+    with tempfile.TemporaryDirectory() as d:
+        cfg.loop.db_path = f"{d}/state/runtime.db"
+        cfg.loop.memory_dir = f"{d}/memory"
+        cfg.loop.workspace_dir = f"{d}/workspace"
+        cfg.loop.act = False
+        cfg.evolution.enabled = False
+
+        loop = CognitionLoop(cfg)
+        await loop.task_store.open()
+        try:
+            await loop.task_store.add_task(
+                "等待用户反馈的任务",
+                goal="等待同一个会话里的用户输入，不应触发 curiosity 空闲自唤醒",
+                status="waiting",
+                wait_kind="external",
+                next_step="收到用户消息后继续",
+            )
+            loop._idle_cycles = cfg.thresholds.curiosity_idle_min_cycles
+            loop._last_curiosity_signal_idle_cycle = 0
+            ethos_state = cast("Any", SimpleNamespace(
+                values=SimpleNamespace(curiosity=cfg.thresholds.curiosity_idle_task + 0.1)
+            ))
+
+            await loop._emit_curiosity_signal(ethos_state)
+
+            assert loop._last_curiosity_signal_idle_cycle == 0
+            assert [item for item in loop._wm.get_top(10) if item["kind"] == "curiosity"] == []
+        finally:
+            await loop.task_store.close()
+            await loop.provider.close()
+
+
 def test_self_drive_signal_auto_creates_lightweight_growth_task():
     asyncio.run(_self_drive_signal_auto_creates_lightweight_growth_task())
 
@@ -292,6 +335,10 @@ def test_self_drive_signal_does_not_duplicate_pending_growth_task():
 
 def test_self_drive_signal_does_not_duplicate_waiting_growth_task():
     asyncio.run(_self_drive_signal_does_not_duplicate_waiting_growth_task())
+
+
+def test_self_drive_signal_skips_when_waiting_external_task_exists():
+    asyncio.run(_self_drive_signal_skips_when_waiting_external_task_exists())
 
 
 def test_self_drive_signal_preserves_in_progress_focus_when_exploration_stuck():
@@ -605,6 +652,46 @@ async def _self_drive_signal_does_not_duplicate_waiting_growth_task():
             tasks = await loop.task_store.list_tasks(limit=20)
             self_drive_tasks = [task for task in tasks if task.source == "self_drive"]
             assert [task.id for task in self_drive_tasks] == [existing_id]
+            assert [item for item in loop._wm.get_top(10) if item["kind"] == "self_drive"] == []
+        finally:
+            await loop.task_store.close()
+            await loop.provider.close()
+
+
+async def _self_drive_signal_skips_when_waiting_external_task_exists():
+    os.environ.setdefault("DASHSCOPE_API_KEY", "test-key")
+    os.environ.setdefault("GITHUB_TOKEN", "test-token")
+    from core.config import Config
+    from core.loop import CognitionLoop
+    from core.loop.cycle.focus import claim_focus_task
+
+    cfg = Config.load(_proj_root() / "lingzhou.json.example")
+    with tempfile.TemporaryDirectory() as d:
+        cfg.loop.db_path = f"{d}/state/runtime.db"
+        cfg.loop.memory_dir = f"{d}/memory"
+        cfg.loop.workspace_dir = f"{d}/workspace"
+        cfg.loop.act = False
+        cfg.evolution.enabled = False
+
+        loop = CognitionLoop(cfg)
+        await loop.task_store.open()
+        try:
+            existing_id = await loop.task_store.add_task(
+                "等待用户输入的普通任务",
+                goal="waiting 普通任务也应阻止 self_drive 抢跑",
+                source="external",
+                status="waiting",
+                wait_kind="external",
+                next_step="收到用户消息后继续",
+            )
+            task = await loop.task_store.get_task_by_id(existing_id)
+            await claim_focus_task(loop, task, clear_current=True)
+            loop._behavior._wait_streak = cfg.thresholds.curiosity_idle_min_cycles
+
+            await loop._emit_self_drive_signal()
+
+            tasks = await loop.task_store.list_tasks(limit=20)
+            assert [task.id for task in tasks if task.source == "self_drive"] == []
             assert [item for item in loop._wm.get_top(10) if item["kind"] == "self_drive"] == []
         finally:
             await loop.task_store.close()
