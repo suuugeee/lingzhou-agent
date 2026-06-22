@@ -332,6 +332,28 @@ def test_normalize_action_shape_clears_non_act_tool_payload():
     assert normalized.applied_skills == ["anti-loop"]
 
 
+def test_normalize_action_shape_clears_parallel_when_primary_tool_is_chosen():
+    from core.judgment.boundary import normalize_action_shape
+
+    output = _judgment_output(
+        decision="act",
+        chosen_action_id="task.workbench",
+        params={"workbench": {"intent": "收敛重复动作"}},
+        rationale="写工作台收敛，不再检索。",
+    )
+    output.parallel_actions = [
+        {
+            "action_id": "memory.search",
+            "params": {"query": "find OR semantic.db OR memory_root"},
+        }
+    ]
+
+    normalized = normalize_action_shape(output)
+
+    assert normalized.chosen_action_id == "task.workbench"
+    assert normalized.parallel_actions == []
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 今日新增功能验证
 # ══════════════════════════════════════════════════════════════════════════════

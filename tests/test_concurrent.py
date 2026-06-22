@@ -837,3 +837,47 @@ async def _dispatch_parallel_defers_terminal_task_action():
     assert "已延后" in result.summary
     assert result.state_delta["deferred_terminal_actions"] == ["task.complete"]
     assert "单独执行 task.complete" in result.state_delta["recovery_next_step"]
+
+
+def test_dispatch_prefers_primary_action_over_stale_parallel_actions():
+    asyncio.run(_dispatch_prefers_primary_action_over_stale_parallel_actions())
+
+
+async def _dispatch_prefers_primary_action_over_stale_parallel_actions():
+    from core.execution import ExecutionLayer
+    from core.judgment import JudgmentOutput
+    from tools.registry import ToolRegistry, ToolResult
+
+    registry = ToolRegistry()
+
+    class _FakeCfg:
+        class loop:
+            debug = False
+
+    layer = ExecutionLayer(registry, cast("Any", _FakeCfg()))
+    call_log: list[str] = []
+
+    async def _mock_dispatch_act(action, ctx):
+        call_log.append(action.chosen_action_id)
+        return ToolResult(summary=f"ok-{action.chosen_action_id}")
+
+    async def _mock_dispatch_parallel(action, ctx):
+        call_log.append("__parallel__")
+        return ToolResult(summary="unexpected-parallel")
+
+    layer._dispatch_act = _mock_dispatch_act  # type: ignore[method-assign]
+    layer._dispatch_parallel = _mock_dispatch_parallel  # type: ignore[method-assign]
+
+    action = JudgmentOutput(
+        decision="act",
+        chosen_action_id="task.workbench",
+        params={"workbench": {"intent": "收敛重复动作"}},
+        parallel_actions=[
+            {"action_id": "memory.search", "params": {"query": "semantic.db"}},
+        ],
+    )
+
+    result = await layer.dispatch(action, _tool_ctx())
+
+    assert call_log == ["task.workbench"]
+    assert result.summary == "ok-task.workbench"
