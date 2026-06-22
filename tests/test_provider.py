@@ -1131,6 +1131,70 @@ def test_codex_responses_refreshes_once_on_revoked_oauth_token(monkeypatch):
     assert provider.last_usage["total_tokens"] == 2
 
 
+def test_codex_responses_downgrades_chatgpt_account_unsupported_pro_model(monkeypatch):
+    import httpx
+
+    from provider.base import Message
+    from provider.openai_compat import OpenAICompatProvider
+
+    class _FakeMode:
+        def resolve_url(self, path: str) -> str:
+            return f"https://chatgpt.com/backend-api/codex{path}"
+
+        async def request_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+            return {"Authorization": "Bearer token"}
+
+    class _FakeAsyncClient:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+            self.is_closed = False
+            self.timeout = SimpleNamespace(read=30.0, connect=30.0)
+
+        async def post(self, url, *, content=None, headers=None, timeout=None):
+            payload = json.loads(content or "{}")
+            self.calls.append({"url": url, "payload": payload, "headers": headers, "timeout": timeout})
+            request = httpx.Request("POST", "https://chatgpt.com/backend-api/codex/responses")
+            if len(self.calls) == 1:
+                return httpx.Response(
+                    400,
+                    text=json.dumps({
+                        "detail": "The 'gpt-5.5-pro' model is not supported when using Codex with a ChatGPT account.",
+                    }),
+                    request=request,
+                )
+            body = "\n\n".join([
+                'event: response.completed\n'
+                'data: {"type":"response.completed","response":{"output_text":"ok after downgrade","usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}',
+                "data: [DONE]",
+            ])
+            return httpx.Response(200, text=body, request=request)
+
+    monkeypatch.setattr("provider.openai_compat.lookup_model_ref", lambda model_ref, catalog_path=None: {
+        "api": "responses",
+        "reasoning": True,
+        "request_params": {"unsupported": ["temperature"]},
+    } if model_ref in {"openai-codex/gpt-5.5-pro", "openai-codex/gpt-5.5"} else None)
+
+    fake_client = _FakeAsyncClient()
+    provider = OpenAICompatProvider.__new__(OpenAICompatProvider)
+    provider.model_ref = "openai-codex/gpt-5.5-pro"
+    provider._provider_mode = "codex"
+    provider._model = "gpt-5.5-pro"
+    provider._temperature = 0.7
+    provider._thinking_level = "low"
+    provider._extra_body = {}
+    provider._client = cast("Any", fake_client)
+    provider._mode = _FakeMode()
+    provider.last_usage = {}
+
+    result = asyncio.run(provider.chat([Message(role="user", content="hi")]))
+
+    assert result == "ok after downgrade"
+    assert [call["payload"]["model"] for call in fake_client.calls] == ["gpt-5.5-pro", "gpt-5.5"]
+    assert provider.model_ref == "openai-codex/gpt-5.5"
+    assert provider._model == "gpt-5.5"
+
+
 def test_codex_chat_completions_refreshes_once_on_invalidated_oauth_token(monkeypatch):
     import httpx
 

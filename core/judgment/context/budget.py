@@ -16,6 +16,7 @@ _MESSAGE_TRIM_TARGET_RATIO = 0.9
 _MESSAGE_TRIM_MIN_TOKENS = 1024
 
 _CRITICAL_CONTEXT_SECTIONS = frozenset({
+    "tools_section",
     "task_section",
     "chat_continuity_section",
     "memories_section",

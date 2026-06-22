@@ -2088,6 +2088,33 @@ def test_fmt_chat_history_keeps_budget_by_dropping_old_turns_then_clipping_singl
     assert len(clipped) <= 120
 
 
+def test_context_budget_preserves_compacted_tools_section_under_pressure():
+    from core.judgment.context.budget import apply_context_budget
+
+    tools = "\n".join(
+        [
+            "- `memory.search`: 搜索长期记忆 参数: [query(*)]",
+            "- `shell.run`: 执行 shell 命令 参数: [command(*), timeout, workdir]",
+            "- `task.workbench`: 写入任务工作台 参数: [task_id(*), workbench(*)]",
+        ]
+        + [f"- `demo.tool{i}`: demo 参数: [value]" for i in range(80)]
+    )
+    ctx = {
+        "tools_section": tools,
+        "wm_section": "noise " * 8000,
+        "probe_sensors_section": "probe " * 8000,
+        "memories_section": "重要记忆 " * 100,
+        "task_section": "当前任务: 找回 OpenClaw 记忆并修复膨胀。",
+    }
+
+    budgeted = apply_context_budget(ctx, token_budget=1200)
+
+    assert "TOOL CATALOG COMPACTED" in budgeted["tools_section"]
+    assert "`memory.search`" in budgeted["tools_section"]
+    assert "`shell.run`" in budgeted["tools_section"]
+    assert "`task.workbench`" in budgeted["tools_section"]
+
+
 def test_tool_tier_uses_manifest_truth_for_reasoner_tools():
     from core.judgment.output import is_plan_alignment_exempt, tool_tier, tool_tier_mapping
 

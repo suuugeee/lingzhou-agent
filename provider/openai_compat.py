@@ -85,6 +85,27 @@ def _is_codex_revoked_oauth_response(resp: httpx.Response) -> bool:
     return "your authentication token has been invalidated" in body
 
 
+def _is_codex_account_unsupported_model_response(resp: httpx.Response) -> bool:
+    if resp.status_code != 400:
+        return False
+    body = (resp.text or "").lower()
+    return (
+        "model is not supported when using codex with a chatgpt account" in body
+        or "not supported when using codex with a chatgpt account" in body
+    )
+
+
+def _codex_account_model_fallback(model_ref: str, model_id: str) -> tuple[str, str] | None:
+    ref = str(model_ref or "").strip()
+    model = str(model_id or "").strip()
+    if not ref.startswith("openai-codex/") or not model.endswith("-pro"):
+        return None
+    fallback_model = model[:-4]
+    if not fallback_model:
+        return None
+    return f"openai-codex/{fallback_model}", fallback_model
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 模式适配器：用数据封装 openai / copilot 的差异，消除 if/elif 堆砌
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -701,6 +722,21 @@ class OpenAICompatProvider:
                 headers = await self._copilot_refreshed_headers()
                 resp = await self._client.post(target, content=json.dumps(payload),
                                                headers=headers or None, timeout=req_timeout)
+            if self._provider_mode == "codex" and _is_codex_account_unsupported_model_response(resp):
+                fallback = _codex_account_model_fallback(str(self.model_ref), str(self._model))
+                if fallback is not None:
+                    fallback_ref, fallback_model = fallback
+                    _log.warning(
+                        "[codex.model] account does not support %s; falling back to %s",
+                        self.model_ref,
+                        fallback_ref,
+                    )
+                    self.model_ref = fallback_ref
+                    self._model = fallback_model
+                    payload = self._build_responses_payload(
+                        messages, temperature=temp, thinking_override=thinking_override,
+                    )
+                    resp = await self._post_with_codex_oauth_retry(target, payload, req_timeout)
 
             _raise_for_status_with_body(resp)
             if self._provider_mode == "codex" and payload.get("stream") is True:
