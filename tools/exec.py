@@ -28,6 +28,7 @@ from tools.exec_helpers import (
     ProcessManager,
     _append_output,
     _build_capabilities,
+    _preview,
     _spawn_pty_process,
     _terminate_info,
     _watch_pty_process,
@@ -247,14 +248,14 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
                 ),
             )
 
-        output_text = output or "(无输出)"
+        output_text = _preview(output, 4000) if output else "(无输出)"
         evidence = json.dumps({
             "command": command,
             "exit_code": info.return_code,
             "timeout": timeout,
             "workdir": workdir,
             "output_chars": len(output),
-            "preview_chars": len(output),
+            "preview_chars": len(output_text),
             "pty": use_pty,
             "resource_guard": guard.as_metadata() if guard.matched else None,
         }, ensure_ascii=False)
@@ -275,7 +276,7 @@ async def exec_run(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         return ToolResult(
             summary=f"执行出错 (exit={info.return_code}):\n{output_text}",
             evidence=json.dumps(payload, ensure_ascii=False),
-            error=(output or info.error or f"exit={info.return_code}"),
+            error=(output_text if output else (info.error or f"exit={info.return_code}")),
             resource_key=session_id,
             fingerprint=f"exec:{info.return_code}:{payload['output_chars']}",
             artifact_paths=[info.meta_path, info.log_path],
@@ -456,7 +457,7 @@ async def process_log(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if not info:
         return ToolResult(summary=f"进程不存在: {session_id}", error="ProcessNotFound")
     offset = int(params.get("offset") or 0)
-    limit = int(params.get("limit") or 2000)
+    limit = max(1, min(12_000, int(params.get("limit") or 2000)))
     if info.log_path and await asyncio.to_thread(Path(info.log_path).exists):
         try:
             output = await asyncio.to_thread(Path(info.log_path).read_text, encoding="utf-8", errors="replace")

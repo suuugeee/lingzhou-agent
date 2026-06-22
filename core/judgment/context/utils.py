@@ -12,6 +12,7 @@ _log = logging.getLogger("lingzhou.judgment")
 
 _context_fmt_cache: OrderedDict[str, Any] = OrderedDict()
 _MAX_CONTEXT_CACHE_SIZE = 512
+_FACT_VALUE_CONTEXT_MAX_CHARS = 360
 
 
 def _cache_put(key: str, value: Any) -> None:
@@ -66,13 +67,13 @@ def _format_fact_value(raw: str) -> str:
     try:
         payload = json.loads(text)
     except Exception:
-        return _clip_text(text, 180)
+        return _clip_for_context(text, _FACT_VALUE_CONTEXT_MAX_CHARS)
     if isinstance(payload, dict):
         parts = [f"{key}={payload[key]}" for key in sorted(payload)]
-        return _clip_text("; ".join(parts), 180)
+        return _clip_for_context("; ".join(parts), _FACT_VALUE_CONTEXT_MAX_CHARS)
     if isinstance(payload, list):
-        return _clip_text(", ".join(str(item) for item in payload), 180)
-    return _clip_text(str(payload), 180)
+        return _clip_for_context(", ".join(str(item) for item in payload), _FACT_VALUE_CONTEXT_MAX_CHARS)
+    return _clip_for_context(str(payload), _FACT_VALUE_CONTEXT_MAX_CHARS)
 
 
 def _fill_template(template: str, ctx: dict[str, Any]) -> str:

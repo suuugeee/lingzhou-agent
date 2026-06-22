@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from core.metabolic import add_semantic_memory, submit_fact
+from memory.consolidation import is_low_value_semantic_text
 from memory.working import WMItem
 
 from ..cycle.chat import _resolve_reply_chat_id
@@ -53,20 +54,22 @@ async def _crystallize_reflection_to_semantic(
     """将本轮反思写入 semantic insight 节点，调节情感，并按阈值结晶任务事件摘要。"""
     if not clean_reflection:
         return
-    node_id = f"insight_{hashlib.md5(clean_reflection.encode()).hexdigest()[:10]}"
-    insight_suffix = f" [{node_id.split('_', 1)[-1][:6]}]"
-    await add_semantic_memory(
-        loop,
-        node_id=node_id,
-        kind="learned_insight",
-        title=f"{clean_reflection}{insight_suffix}",
-        body=clean_reflection,
-        activation=0.9,
-        valence=loop._emotion.valence,
-        tags=["reflection", active_task.title[:_SEM_TAG_TASK_CHARS] if active_task else "free"],
-        source="loop/tick/reflection",
-        decision_basis="reflection_crystallization",
-    )
+    semantic_worthy = not is_low_value_semantic_text("learned_insight", "", clean_reflection)
+    if semantic_worthy:
+        node_id = f"insight_{hashlib.md5(clean_reflection.encode()).hexdigest()[:10]}"
+        insight_suffix = f" [{node_id.split('_', 1)[-1][:6]}]"
+        await add_semantic_memory(
+            loop,
+            node_id=node_id,
+            kind="learned_insight",
+            title=f"{clean_reflection}{insight_suffix}",
+            body=clean_reflection,
+            activation=0.9,
+            valence=loop._emotion.valence,
+            tags=["reflection", active_task.title[:_SEM_TAG_TASK_CHARS] if active_task else "free"],
+            source="loop/tick/reflection",
+            decision_basis="reflection_crystallization",
+        )
     ref_valence = _infer_valence_from_text(clean_reflection, loop._emotion.valence, loop._cfg.emotion)
     delta = ref_valence - loop._emotion.valence
     if abs(delta) > 0.01:
@@ -87,7 +90,7 @@ async def _crystallize_reflection_to_semantic(
         source="loop/tick/reflection_turns",
     )
     crystallize_every = loop._cfg.memory.chat_crystallize_every
-    if turns % crystallize_every == 0:
+    if semantic_worthy and turns % crystallize_every == 0:
         ts_label = datetime.now(UTC).strftime("%Y-%m-%d")
         evt_id = f"event-task{active_task.id}-{ts_label}"
         existing = loop._semantic.get(evt_id)
@@ -151,6 +154,8 @@ async def _crystallize_chat_to_semantic(
     user_text = str(user_message or "").strip()
     reply_text = _strip_memory_context(action.reply_to_user or "").strip()
     reflection_text = str(clean_reflection or "").strip()
+    if is_low_value_semantic_text("learned_insight", "", reflection_text):
+        reflection_text = ""
     if user_text:
         summary_parts.append(f"用户: {user_text}")
     if reply_text:

@@ -83,4 +83,6 @@ async def add_semantic_memory(
             decision_basis=decision_basis,
         )
     )
-    return str(result or node_id)
+    if not result:
+        raise RuntimeError(f"semantic memory write rejected: {node_id}")
+    return str(result)

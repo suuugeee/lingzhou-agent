@@ -12,6 +12,7 @@ from core.execution import (
     record_run_outcome_memory,
 )
 from core.metabolic import resolve_metabolic, submit_fact, update_run, update_task_result
+from store.compact import compact_runtime_text
 from store.task import Run, TaskStore, build_task_run_result_patch
 from tools.registry import ToolResult
 
@@ -22,6 +23,69 @@ if TYPE_CHECKING:
 _log = logging.getLogger("lingzhou.loop")
 
 _RUN_PROGRESS_CRYSTAL_CHARS = 120
+_RUN_REFRESH_TEXT_PREVIEW_CHARS = 4000
+
+
+def _refresh_text_preview(value: Any, *, marker_label: str = "run monitor output") -> str:
+    return compact_runtime_text(
+        value,
+        limit=_RUN_REFRESH_TEXT_PREVIEW_CHARS,
+        marker_label=marker_label,
+    )
+
+
+def _first_nonempty_preview(*values: Any, fallback: str = "") -> str:
+    for value in values:
+        text = str(value or "").strip()
+        if text:
+            return _refresh_text_preview(text)
+    return fallback
+
+
+def _compact_monitor_value(value: Any, *, label: str = "run monitor value", depth: int = 0) -> Any:
+    if isinstance(value, str):
+        return _refresh_text_preview(value, marker_label=label)
+    if isinstance(value, dict):
+        if depth >= 4:
+            return _refresh_text_preview(value, marker_label=label)
+        compacted: dict[str, Any] = {}
+        for key, item in value.items():
+            text_key = str(key)
+            compacted[text_key] = _compact_monitor_value(
+                item,
+                label=f"run monitor {text_key}",
+                depth=depth + 1,
+            )
+            if isinstance(item, str) and len(item) > _RUN_REFRESH_TEXT_PREVIEW_CHARS:
+                compacted[f"{text_key}_chars"] = len(item)
+        return compacted
+    if isinstance(value, list):
+        if depth >= 4:
+            return _refresh_text_preview(value, marker_label=label)
+        if len(value) <= 80:
+            return [
+                _compact_monitor_value(item, label=label, depth=depth + 1)
+                for item in value
+            ]
+        head_count = 39
+        tail_count = 40
+        omitted = len(value) - head_count - tail_count
+        return [
+            *[
+                _compact_monitor_value(item, label=label, depth=depth + 1)
+                for item in value[:head_count]
+            ],
+            {"_persistent_omitted_items": omitted},
+            *[
+                _compact_monitor_value(item, label=label, depth=depth + 1)
+                for item in value[-tail_count:]
+            ],
+        ]
+    return value
+
+
+def _compact_monitor_snapshot(payload: Any) -> Any:
+    return _compact_monitor_value(payload, label="run monitor snapshot")
 
 
 def _run_monitor_config(run: Run) -> dict[str, Any] | None:
@@ -189,20 +253,27 @@ async def _refresh_run_via_fact_monitor(
         return _run_update_summary(run)
 
     status, progress, payload = _parse_run_monitor_snapshot(raw, monitor)
-    crystal = progress if progress and progress != run.progress else ""
+    compact_payload = _compact_monitor_snapshot(payload)
+    progress_preview = _refresh_text_preview(progress, marker_label="run monitor progress")
+    crystal = progress_preview if progress and progress_preview != run.progress else ""
     if crystal:
-        _log.debug("[run-monitor] fact key=%s run=%s progress=%s", key, run.id, progress)
+        _log.debug("[run-monitor] fact key=%s run=%s progress=%s", key, run.id, progress_preview)
     output_json = dict(run.output_json)
-    output_json["monitor_snapshot"] = payload
+    output_json["monitor_snapshot"] = compact_payload
     output_json["monitor_key"] = key
+    output_json["monitor_raw_chars"] = len(raw)
     await update_run(
         metabolic or task_store,
         run.id,
         status=status,
         output_json=output_json,
-        log_text=(progress or str(payload or raw)),
-        error_text=(str(payload.get("error") or "") if isinstance(payload, dict) else (raw if status == "failed" else "")),
-        progress=progress,
+        log_text=(progress_preview or _refresh_text_preview(payload or raw)),
+        error_text=(
+            _refresh_text_preview(payload.get("error") or "", marker_label="run monitor error")
+            if isinstance(payload, dict)
+            else (_refresh_text_preview(raw, marker_label="run monitor error") if status == "failed" else "")
+        ),
+        progress=progress_preview,
         source="loop/runs/refresh/monitor_fact",
         proposal_run_id=run.id,
         decision_basis="run_monitor_fact_snapshot",
@@ -214,14 +285,20 @@ async def _refresh_run_via_fact_monitor(
         source="run_refresh/monitor",
     )
     if status in {"succeeded", "failed", "cancelled"}:
-        summary = progress or (str(payload.get("summary") or "") if isinstance(payload, dict) else raw) or f"run {status}"
-        error = str(payload.get("error") or "") if isinstance(payload, dict) else (raw if status == "failed" else "")
+        summary_raw = progress or (str(payload.get("summary") or "") if isinstance(payload, dict) else raw) or f"run {status}"
+        error_raw = str(payload.get("error") or "") if isinstance(payload, dict) else (raw if status == "failed" else "")
+        summary = _refresh_text_preview(summary_raw, marker_label="run monitor summary")
+        error = _refresh_text_preview(error_raw, marker_label="run monitor error")
+        evidence = _refresh_text_preview(
+            payload if isinstance(payload, dict) else raw,
+            marker_label="run monitor evidence",
+        )
         _log.info(
             "[run-monitor] fact key=%s run=%s status=%s progress=%s error=%s",
             key,
             run.id,
             status,
-            (progress or "-"),
+            (progress_preview or "-"),
             (error or "-"),
         )
         if run.task_id:
@@ -242,9 +319,9 @@ async def _refresh_run_via_fact_monitor(
                 status=status,
                 summary=summary,
                 error=error or None,
-                evidence=str(payload if isinstance(payload, dict) else raw),
-                progress=progress,
-                state_delta=payload if isinstance(payload, dict) else {},
+                evidence=evidence,
+                progress=progress_preview,
+                state_delta=compact_payload if isinstance(compact_payload, dict) else {},
                 artifact_paths=[],
             ))
             await update_task_result(
@@ -262,7 +339,7 @@ async def _refresh_run_via_fact_monitor(
             tool_name=run.tool_name,
             worker_type=run.worker_type,
             status=status,
-            progress=progress,
+            progress=progress_preview,
             summary=summary,
             error=error,
             task_store=task_store,
@@ -274,7 +351,7 @@ async def _refresh_run_via_fact_monitor(
             status=status,
             summary=summary,
             error=error,
-            evidence=str(payload if isinstance(payload, dict) else raw),
+            evidence=evidence,
             episodic=episodic,
             semantic=semantic,
             metabolic=metabolic,
@@ -303,6 +380,7 @@ async def _refresh_run_via_process_monitor(
     if not info.finished:
         _log.debug("[run-monitor] process session=%s run=%s still running", session_id, run.id)
         stdout_text = info.stdout or ""
+        stdout_preview = _refresh_text_preview(stdout_text, marker_label="run monitor stdout")
         last_crystal_chars = int(run.extras.get("last_crystal_chars", 0) or 0)
         crystal_excerpt = ""
         if len(stdout_text) - last_crystal_chars >= _RUN_PROGRESS_CRYSTAL_CHARS:
@@ -311,8 +389,13 @@ async def _refresh_run_via_process_monitor(
                 metabolic or task_store,
                 run.id,
                 status="running",
-                output_json={**run.output_json, "progress_excerpt": crystal_excerpt},
-                log_text=stdout_text,
+                output_json={
+                    **run.output_json,
+                    "progress_excerpt": crystal_excerpt,
+                    "stdout_preview": stdout_preview,
+                    "stdout_chars": len(stdout_text),
+                },
+                log_text=stdout_preview,
                 session_id=session_id,
                 progress=crystal_excerpt,
                 extras={**run.extras, "last_crystal_chars": len(stdout_text), "run_monitor": monitor},
@@ -330,24 +413,42 @@ async def _refresh_run_via_process_monitor(
 
     status = "succeeded" if (info.return_code in (0, None) and not info.timed_out and not info.error) else "failed"
     _log.info("[run-monitor] process session=%s run=%s finished status=%s", session_id, run.id, status)
+    stdout_preview = _refresh_text_preview(info.stdout or "", marker_label="run monitor stdout")
+    stderr_preview = _refresh_text_preview(info.stderr or "", marker_label="run monitor stderr")
+    error_preview = _refresh_text_preview(info.error or "", marker_label="run monitor error")
+    summary_preview = _first_nonempty_preview(
+        info.stdout,
+        info.stderr,
+        info.error,
+        fallback=f"process {status}",
+    )
+    progress_preview = _first_nonempty_preview(
+        info.stdout,
+        info.stderr,
+        info.error,
+        fallback=status,
+    )
     output_json = dict(run.output_json)
     output_json.update({
         "session_id": session_id,
         "return_code": info.return_code,
         "timed_out": info.timed_out,
-        "stdout": info.stdout,
-        "stderr": info.stderr,
-        "error": info.error,
+        "stdout": stdout_preview,
+        "stderr": stderr_preview,
+        "error": error_preview,
+        "stdout_chars": len(info.stdout or ""),
+        "stderr_chars": len(info.stderr or ""),
+        "error_chars": len(info.error or ""),
     })
     await update_run(
         metabolic or task_store,
         run.id,
         status=status,
         output_json=output_json,
-        log_text=info.stdout,
-        error_text=info.error or ("timed_out" if info.timed_out else (f"exit_code={info.return_code}" if status == "failed" else "")),
+        log_text=stdout_preview,
+        error_text=error_preview or ("timed_out" if info.timed_out else (f"exit_code={info.return_code}" if status == "failed" else "")),
         session_id=session_id,
-        progress=(info.stdout or info.stderr or info.error or status).strip(),
+        progress=progress_preview,
         extras={
             **run.extras,
             "return_code": info.return_code,
@@ -366,8 +467,8 @@ async def _refresh_run_via_process_monitor(
             worker_type=run.worker_type,
             tool_name=run.tool_name,
             session_id=session_id,
-            summary=output_json.get("stdout", "") or f"process {status}",
-            error=output_json.get("error"),
+            summary=summary_preview,
+            error=error_preview or None,
         )
         task_result_patch.update(await build_auto_cortex_result_patch(
             task_store=task_store,
@@ -375,10 +476,10 @@ async def _refresh_run_via_process_monitor(
             run_id=run.id,
             tool_name=run.tool_name,
             status=status,
-            summary=output_json.get("stdout", "") or f"process {status}",
-            error=str(output_json.get("error") or ""),
-            evidence=((info.stderr or "") + "\n" + (info.error or "")).strip(),
-            progress=(info.stdout or info.stderr or info.error or status).strip(),
+            summary=summary_preview,
+            error=error_preview,
+            evidence="\n".join(part for part in [stderr_preview, error_preview] if part).strip(),
+            progress=progress_preview,
             state_delta=output_json,
             artifact_paths=[],
         ))
@@ -397,9 +498,9 @@ async def _refresh_run_via_process_monitor(
         tool_name=run.tool_name,
         worker_type=run.worker_type,
         status=status,
-        progress=(info.stdout or info.stderr or info.error or status).strip(),
-        summary=output_json.get("stdout", "") or f"process {status}",
-        error=str(output_json.get("error") or ""),
+        progress=progress_preview,
+        summary=summary_preview,
+        error=error_preview,
         task_store=task_store,
         metabolic=metabolic,
     )
@@ -407,9 +508,9 @@ async def _refresh_run_via_process_monitor(
         task_store,
         run=run,
         status=status,
-        summary=output_json.get("stdout", "") or f"process {status}",
-        error=str(output_json.get("error") or ""),
-        evidence=((info.stderr or "") + "\n" + (info.error or "")).strip(),
+        summary=summary_preview,
+        error=error_preview,
+        evidence="\n".join(part for part in [stderr_preview, error_preview] if part).strip(),
         episodic=episodic,
         semantic=semantic,
         metabolic=metabolic,

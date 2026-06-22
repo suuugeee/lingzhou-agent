@@ -135,3 +135,30 @@ def test_workspace_dir_from_ctx_uses_loop_fallback() -> None:
     )
     assert workspace_dir_from_ctx(ctx) == Path("/tmp/ws-test")
     assert skills_dir_from_ctx(ctx) == Path("/tmp/ws-test/skills")
+
+
+def test_recovery_fallback_does_not_repeat_negated_memory_search() -> None:
+    from core.judgment.boundary.pipeline import _build_recovery_fallback_action
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "memory.search" else None
+
+    fallback = _build_recovery_fallback_action(
+        "不要重复同一 query 的 memory.search；改为读取命中语义 ID 或切换到 shell.run/file.read。",
+        _Registry(),
+    )
+
+    assert fallback is None
+
+
+def test_recovery_fallback_still_uses_positive_memory_search_request() -> None:
+    from core.judgment.boundary.pipeline import _build_recovery_fallback_action
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name == "memory.search" else None
+
+    fallback = _build_recovery_fallback_action("搜索历史记录里是否有同类失败。", _Registry())
+
+    assert fallback == ("memory.search", {"query": "搜索历史记录里是否有同类失败。", "top_k": 5})

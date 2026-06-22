@@ -27,22 +27,22 @@ def test_retry_fallback_tier_excludes_reader_on_initial_like_phases():
         current_tier=READER_TIER,
         phase=PHASE_INITIAL,
         fallback_prefer_tier=None,
-    ) == REPAIR_TIER
+    ) == REASONER_TIER
     assert retry_fallback_tier(
         current_tier=READER_TIER,
         phase="reply",
         fallback_prefer_tier=None,
-    ) == REPAIR_TIER
+    ) == REASONER_TIER
     assert retry_fallback_tier(
         current_tier=READER_TIER,
         phase="continue",
         fallback_prefer_tier=None,
-    ) == REPAIR_TIER
+    ) == REASONER_TIER
     assert retry_fallback_tier(
         current_tier=READER_TIER,
         phase="final",
         fallback_prefer_tier=None,
-    ) == REPAIR_TIER
+    ) == REASONER_TIER
 
 
 def test_retry_fallback_tier_uses_default_phase_fallback_order():

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
@@ -9,6 +10,7 @@ import uuid
 from typing import Any
 
 from core.metabolic import add_semantic_memory, submit_fact
+from memory.consolidation import is_low_value_semantic_text
 from memory.quality_checker import evaluate_retrieval_quality
 from memory.working import TASK_SWITCH_PRESERVE_KINDS, WMItem
 from core.judgment.decision.helpers import _decision_basis_from_parts as _decision_basis
@@ -24,7 +26,37 @@ from tools.registry import (
 
 _log = logging.getLogger("lingzhou.tools")
 
+_OPERATIONAL_MEMORY_KINDS = frozenset({
+    "run_result",
+    "task_progress",
+    "meta_reflection",
+    "working_trace",
+    "execute_result",
+    "run_monitor",
+})
 _PRIORITY_ALIASES = {"high": 0.9, "medium": 0.6, "mid": 0.6, "low": 0.3, "critical": 1.0}
+_WM_OPERATIONAL_SOURCE_KINDS = frozenset({
+    "execute_result",
+    "run_monitor",
+    "run_result",
+    "working_trace",
+})
+_RAW_OPERATIONAL_TEXT_MARKERS = (
+    "stdout",
+    "stderr",
+    "traceback",
+    "process exited with code",
+    "exit code",
+    "wall time",
+    "run_id",
+    "tool=",
+    "status=",
+    "[execute_result]",
+    "[run 监控]",
+    "command:",
+)
+_DIRECT_MEMORY_TEXT_MAX_CHARS = 8000
+_TOOL_RESULT_PREVIEW_CHARS = 800
 
 
 def _coerce_optional_text(value: Any) -> str:
@@ -35,6 +67,61 @@ def _coerce_optional_text(value: Any) -> str:
     if isinstance(value, (int, float, bool)):
         return str(value).strip()
     return json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list, tuple)) else str(value).strip()
+
+
+def _count_wm_kinds(items: Any) -> str:
+    counts: dict[str, int] = {}
+    for item in items:
+        kind = str(item.get("kind") or "unknown") if isinstance(item, dict) else "unknown"
+        counts[kind] = counts.get(kind, 0) + 1
+    return ", ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
+
+
+def _semantic_body_rejection_reason(title: str, body: str) -> str:
+    if _looks_like_raw_operational_text(title, body):
+        return "raw_operational_text"
+    if _looks_like_large_raw_text(body):
+        return "large_raw_text"
+    return ""
+
+
+def _looks_like_raw_operational_text(title: str, body: str) -> bool:
+    text = f"{title}\n{body}".lower()
+    body_text = str(body or "")
+    marker_hits = sum(1 for marker in _RAW_OPERATIONAL_TEXT_MARKERS if marker in text)
+    if marker_hits <= 0:
+        return False
+
+    lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+    line_count = len(lines)
+    long_lines = sum(1 for line in lines if len(line) > 240)
+    jsonish_lines = sum(1 for line in lines if line.startswith(("{", "[")) and line.endswith(("}", "]")))
+    if marker_hits >= 2 and len(body_text) > 200:
+        return True
+    if len(body_text) > 1200 and (line_count >= 8 or long_lines >= 3):
+        return True
+    return line_count >= 40 and jsonish_lines >= 8
+
+
+def _looks_like_large_raw_text(body: str) -> bool:
+    body_text = str(body or "")
+    if len(body_text) <= _DIRECT_MEMORY_TEXT_MAX_CHARS:
+        return False
+    lines = [line.strip() for line in body_text.splitlines() if line.strip()]
+    long_lines = sum(1 for line in lines if len(line) > 240)
+    return len(lines) >= 40 or long_lines >= 5
+
+
+def _clip_tool_preview(text: str, *, limit: int = _TOOL_RESULT_PREVIEW_CHARS) -> str:
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+    marker = f"\n...[tool result preview truncated chars={len(value)} sha256={digest}]...\n"
+    budget = max(0, limit - len(marker))
+    head = max(80, budget // 2)
+    tail = max(0, budget - head)
+    return value[:head] + marker + (value[-tail:] if tail else "")
 
 
 def _coerce_fact_value(value: Any) -> str:
@@ -132,10 +219,16 @@ async def memory_add_wm(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     content = (params.get("content") or "").strip()
     if not content:
         return ToolResult(summary="内容不能为空", skipped=True)
+    if _looks_like_raw_operational_text("", content) or _looks_like_large_raw_text(content):
+        return ToolResult(
+            summary="拒绝写入疑似原始文件/命令输出到工作记忆；请先提炼成观察、结论、风险或下一步。",
+            skipped=True,
+            error="RawWorkingMemoryRejected",
+        )
     kind = params.get("kind") or "observation"
     priority = _parse_float(params.get("priority"), 0.8)
     ctx.wm.add(WMItem(kind=kind, content=content, priority=priority))
-    return ToolResult(summary=f"已写入工作记忆: {content}", evidence=f"kind={kind}")
+    return ToolResult(summary=f"已写入工作记忆: {_clip_tool_preview(content)}", evidence=f"kind={kind}")
 
 
 @tool(ToolManifest(
@@ -176,6 +269,25 @@ async def memory_add_semantic(params: dict[str, Any], ctx: ToolContext) -> ToolR
         return ToolResult(summary="title 和 body 不能为空", skipped=True)
     node_id = f"node-{uuid.uuid4().hex[:12]}"
     kind = str(params.get("kind") or "observation")
+    if kind in _OPERATIONAL_MEMORY_KINDS:
+        return ToolResult(
+            summary=f"拒绝写入操作型语义记忆 kind={kind!r}；请提炼为 fact/learned_skill/consolidated_insight 后再保存。",
+            skipped=True,
+            error="OperationalSemanticMemoryRejected",
+        )
+    body_rejection = _semantic_body_rejection_reason(title, body)
+    if body_rejection:
+        return ToolResult(
+            summary="拒绝写入疑似原始运行流水的语义记忆；请先提炼为稳定事实、经验规则或可复用技能。",
+            skipped=True,
+            error="OperationalSemanticBodyRejected",
+        )
+    if is_low_value_semantic_text(kind, title, body):
+        return ToolResult(
+            summary="拒绝写入低信息过程性语义记忆；请保存结论、根因、规则、用户偏好或可复验证据。",
+            skipped=True,
+            error="LowValueSemanticMemoryRejected",
+        )
     resolved_title = _disambiguate_semantic_title(ctx, title, kind, node_id)
     await add_semantic_memory(
         ctx,
@@ -217,7 +329,10 @@ async def memory_set_fact(params: dict[str, Any], ctx: ToolContext) -> ToolResul
         source="tools/memory.set_fact",
         decision_basis=_decision_basis("memory.set_fact requested", "key", key, "scope", scope),
     )
-    return ToolResult(summary=f"已设置事实: {key}={value}", evidence=f"key={key}")
+    return ToolResult(
+        summary=f"已设置事实: {key}={_clip_tool_preview(value)}",
+        evidence=f"key={key} value_chars={len(value)}",
+    )
 
 
 @tool(ToolManifest(
@@ -240,15 +355,36 @@ async def memory_search(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if not query:
         return ToolResult(summary="query 不能为空", skipped=True)
     top_k = int(params.get("top_k") or 5)
+    explicit_operational_filter = any(
+        _coerce_optional_text(params.get(key))
+        for key in ("kind", "tag", "id_prefix")
+    )
     hits = ctx.semantic.retrieve(
         query,
-        top_k=top_k,
+        top_k=max(top_k, top_k * 4) if not explicit_operational_filter else top_k,
         kind=_coerce_optional_text(params.get("kind")) or None,
         tag=_coerce_optional_text(params.get("tag")) or None,
         task_id=_coerce_optional_text(params.get("task_id")) or None,
         path_prefix=_coerce_optional_text(params.get("path_prefix")) or None,
         id_prefix=_coerce_optional_text(params.get("id_prefix")) or None,
     )
+    if hits and not explicit_operational_filter:
+        filtered_hits = [
+            hit for hit in hits
+            if str(hit.get("kind") or "") not in _OPERATIONAL_MEMORY_KINDS
+        ]
+        if not filtered_hits:
+            _log.info("[memory.search] query=%r hits=%d operational_only=true", query, len(hits))
+            return ToolResult(
+                summary=(
+                    f"没有找到与 {query!r} 相关的长期语义记忆；"
+                    "默认已忽略 run_result/task_progress/meta_reflection/working_trace。"
+                    "如需操作痕迹，请显式指定 kind 或 id_prefix。"
+                ),
+                skipped=True,
+                state_delta={"memory_hits": 0, "memory_operational_hits_ignored": len(hits)},
+            )
+        hits = filtered_hits[:top_k]
     if not hits:
         _log.info("[memory.search] query=%r hits=0", query)
         return ToolResult(summary=f"没有找到与 {query!r} 相关的语义记忆", skipped=True)
@@ -266,7 +402,7 @@ async def memory_search(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         prefix = f"[{i}] {title}{score_part}"
         if node_id:
             prefix += f" [{node_id}]"
-        lines.append(f"{prefix}\n{body}")
+        lines.append(f"{prefix}\n{_clip_tool_preview(body, limit=1600)}")
     overall = float(quality.get("overall_score") or 0.0)
     lines.append(f"\n检索质量: overall={overall:.3f}")
     return ToolResult(
@@ -436,7 +572,10 @@ async def memory_get_fact(params: dict[str, Any], ctx: ToolContext) -> ToolResul
     value, found = await ctx.task_store.get_fact(key)
     if not found:
         return ToolResult(summary=f"事实不存在: {key}", skipped=True)
-    return ToolResult(summary=f"{key} = {value}", evidence=f"key={key}")
+    return ToolResult(
+        summary=f"{key} = {_clip_tool_preview(value)}",
+        evidence=f"key={key} value_chars={len(value)}",
+    )
 
 
 @tool(ToolManifest(
@@ -460,10 +599,10 @@ async def memory_list_facts(params: dict[str, Any], ctx: ToolContext) -> ToolRes
     rows = await ctx.task_store.list_facts(prefix=prefix, limit=limit)
     if not rows:
         return ToolResult(summary=f"前缀 {prefix!r} 下无 facts", skipped=True)
-    lines = [f"{k}: {v}" for k, v in rows]
+    lines = [f"{k}: {_clip_tool_preview(v)}" for k, v in rows]
     return ToolResult(
         summary=f"找到 {len(rows)} 条 facts（前缀 {prefix!r}）",
-        evidence="\n".join(lines),
+        evidence=_clip_tool_preview("\n".join(lines), limit=2000),
     )
 
 
@@ -499,11 +638,18 @@ async def reflect_structural(params: dict[str, Any], ctx: ToolContext) -> ToolRe
     insight = (params.get("insight") or "").strip()
     if not insight:
         return ToolResult(summary="洞察内容不能为空", skipped=True)
+    if is_low_value_semantic_text("structural", str(params.get("title") or ""), insight):
+        return ToolResult(
+            summary="拒绝写入低信息结构性洞察；请保存结论、根因、规则、用户偏好或可复验证据。",
+            skipped=True,
+            error="LowValueStructuralReflectionRejected",
+        )
 
     title = (params.get("title") or "").strip() or insight[:50]
     wm_summary = "\n".join(
         f"  [{i['kind']}] {i['content']}"
         for i in ctx.wm.get_top(8)
+        if str(i.get("kind") or "") not in _WM_OPERATIONAL_SOURCE_KINDS
     )
     body = f"{insight}\n\n来源（工作记忆摘要）:\n{wm_summary}" if wm_summary else insight
     node_id = f"reflect-{uuid.uuid4().hex[:12]}"
@@ -556,13 +702,23 @@ async def memory_snapshot(params: dict[str, Any], ctx: ToolContext) -> ToolResul
         "",
         "工作记忆前 5 条:",
     ]
-    lines.extend(f"  [{item['kind']}] {item['content']}" for item in wm_items[:5])
+    visible_items = [
+        item for item in wm_items
+        if str(item.get("kind") or "") not in _WM_OPERATIONAL_SOURCE_KINDS
+    ]
+    lines.extend(f"  [{item['kind']}] {item['content']}" for item in visible_items[:5])
+    operational_counts = _count_wm_kinds(
+        item for item in wm_items
+        if str(item.get("kind") or "") in _WM_OPERATIONAL_SOURCE_KINDS
+    )
+    if operational_counts:
+        lines.append(f"  [operational_summary] 已省略操作型 WM 原文: {operational_counts}")
 
     snapshot_text = "\n".join(lines)
     ctx.episodic.record(
         role="snapshot",
         content=snapshot_text,
-        task_id=str(task.id) if task else None,
+        task_id=str(getattr(task, "id", "")) if getattr(task, "id", None) else None,
     )
 
     # 快照后清空 WM，保留任务切换所需的关键上下文锚点

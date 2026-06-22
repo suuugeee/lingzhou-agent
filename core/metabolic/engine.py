@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 _log = logging.getLogger("lingzhou.metabolic")
 
 _FACT_IMMUNE_OPS = {"set_fact", "delete_fact"}
+_LEDGER_VALUE_MAX_CHARS = 16000
 
 
 class MetabolicEngine:
@@ -139,17 +140,30 @@ def _ledger_value(value: object) -> str:
         return ""
     if isinstance(value, (dict, list, tuple)):
         try:
-            return json.dumps(value, ensure_ascii=False, default=str)
+            text = json.dumps(value, ensure_ascii=False, default=str)
         except Exception:
-            return str(value)
-    return str(value)
+            text = str(value)
+    else:
+        text = str(value)
+    return _clip_ledger_text(text)
+
+
+def _clip_ledger_text(text: str, *, limit: int = _LEDGER_VALUE_MAX_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    marker = f"\n...[life_ledger value truncated chars={len(text)} sha256={digest}]...\n"
+    budget = max(0, limit - len(marker))
+    head = max(200, budget // 2)
+    tail = max(0, budget - head)
+    return text[:head] + marker + (text[-tail:] if tail else "")
 
 
 def _proposal_hash(proposal: StateProposal) -> str:
     payload = {
         "op": proposal.op,
         "key": proposal.key,
-        "value": proposal.value,
+        "value": _proposal_hash_value(proposal.value),
         "scope": proposal.scope,
         "source": proposal.source,
         "run_id": proposal.run_id,
@@ -157,6 +171,22 @@ def _proposal_hash(proposal: StateProposal) -> str:
     }
     encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _proposal_hash_value(value: Any) -> Any:
+    if isinstance(value, str) and len(value) > _LEDGER_VALUE_MAX_CHARS:
+        return {
+            "storage": "sha256",
+            "chars": len(value),
+            "sha256": hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest(),
+        }
+    if isinstance(value, dict):
+        return {str(key): _proposal_hash_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_proposal_hash_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_proposal_hash_value(item) for item in value)
+    return value
 
 
 def _write_error_reason(exc: Exception) -> str:

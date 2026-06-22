@@ -5,6 +5,7 @@ import logging
 from typing import Any
 
 from .base import BaseAsyncStore
+from .compact import compact_runtime_mapping, compact_runtime_text
 from .models import Task
 
 logger = logging.getLogger(__name__)
@@ -57,10 +58,10 @@ def build_task_insert(
     data: dict[str, Any],
 ) -> tuple[str, str, str, str]:
     return (
-        title.strip(),
+        compact_runtime_text(title.strip(), limit=1000, marker_label="task title"),
         str(status or "pending"),
         str(priority or "normal"),
-        json.dumps(data, ensure_ascii=False),
+        json.dumps(compact_runtime_mapping(data), ensure_ascii=False),
     )
 
 
@@ -76,7 +77,7 @@ class TaskStateStore(BaseAsyncStore):
     async def _save_task_title(self, task_id: int, title: str) -> None:
         await self._db.execute(
             "UPDATE tasks SET title=? WHERE id=?",
-            (title.strip(), task_id),
+            (compact_runtime_text(title.strip(), limit=1000, marker_label="task title"), task_id),
         )
         await self._db.commit()
 

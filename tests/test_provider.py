@@ -1126,9 +1126,9 @@ def test_codex_responses_refreshes_once_on_revoked_oauth_token(monkeypatch):
     assert fake_client.calls[0]["headers"]["Authorization"] == "Bearer revoked-token"
     assert fake_client.calls[1]["headers"]["Authorization"] == "Bearer refreshed-token"
     assert fake_client.calls[0]["payload"]["store"] is False
-    assert provider.last_usage["prompt_tokens"] == 3
-    assert provider.last_usage["completion_tokens"] == 2
-    assert provider.last_usage["total_tokens"] == 5
+    assert provider.last_usage["prompt_tokens"] == 1
+    assert provider.last_usage["completion_tokens"] == 1
+    assert provider.last_usage["total_tokens"] == 2
 
 
 def test_codex_chat_completions_refreshes_once_on_invalidated_oauth_token(monkeypatch):

@@ -4,22 +4,25 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from store.compact import compact_runtime_mapping
+
 
 def record_event(memory, event_type: str, data: dict[str, Any]) -> None:
     """追加一条结构化事件（perception / emotion 快照）。"""
     ts = datetime.now(UTC).isoformat()
+    compacted_data = compact_runtime_mapping(data)
     try:
         with memory._db_session():
             memory._conn.execute(
                 "INSERT INTO events(event_type, ts, data) VALUES (?, ?, ?)",
-                (event_type, ts, json.dumps(data, ensure_ascii=False)),
+                (event_type, ts, json.dumps(compacted_data, ensure_ascii=False)),
             )
             memory._conn.commit()
             if memory._max_events > 0:
                 rotate_events_db(memory, event_type)
     except Exception:
         path = memory._dir / "events.jsonl"
-        entry: dict[str, Any] = {"t": event_type, "ts": ts, **data}
+        entry: dict[str, Any] = {"t": event_type, "ts": ts, **compacted_data}
         try:
             with path.open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(entry, ensure_ascii=False) + "\n")

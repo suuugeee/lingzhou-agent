@@ -4,6 +4,7 @@ import re
 from typing import Any
 
 from .base import BaseAsyncStore
+from .compact import compact_runtime_text
 
 _ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _CHAT_ZERO_WIDTH_CHARS = {"\ufeff", "\u200b", "\u200c", "\u200d", "\u2060"}
@@ -38,6 +39,7 @@ def build_chat_message_insert(
     status: str = "pending",
 ) -> tuple[str, str, str, str]:
     cleaned = sanitize_chat_content(content)
+    cleaned = compact_runtime_text(cleaned, limit=32_000, marker_label="chat message")
     resolved_chat_id = str(chat_id or "")
     return str(role), cleaned, resolved_chat_id, str(status or "pending")
 

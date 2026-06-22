@@ -90,6 +90,8 @@ def _action_made_progress(
         return False, f"decision={action.decision} error={bool(result.error)} skipped={result.skipped}"
 
     tool = action.chosen_action_id or ""
+    if tool == "task.workbench":
+        return False, "task.workbench 仅记录任务皮层状态,不视为外部推进"
     if tool == "shell.run":
         return _shell_run_made_progress(action, result, prev_sig=prev_sig, prev_fp=prev_fp)
 

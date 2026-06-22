@@ -10,6 +10,14 @@ from .models import ExtractedSignals
 _SPEAKER_CONTINUITY_MAX_QUERIES = 4
 _SPEAKER_CONTINUITY_MAX_CHARS = 96
 _SPEAKER_LOG_QUERY_PREVIEW_CHARS = 48
+_REFERENCE_OPERATIONAL_MEMORY_KINDS = frozenset({
+    "execute_result",
+    "meta_reflection",
+    "run_monitor",
+    "run_result",
+    "task_progress",
+    "working_trace",
+})
 
 
 def _speaker_identity_queries_from_cues(cues: dict[str, list[str]], *, max_queries: int = _SPEAKER_CONTINUITY_MAX_QUERIES) -> list[str]:
@@ -124,6 +132,8 @@ def retrieve_candidates(
 
     def _add(nodes: list[dict[str, Any]], sig: str) -> None:
         for nd in nodes:
+            if str(nd.get("kind") or "").strip() in _REFERENCE_OPERATIONAL_MEMORY_KINDS:
+                continue
             nid = nd.get("id", "")
             if nid and nid not in seen:
                 seen.add(nid)

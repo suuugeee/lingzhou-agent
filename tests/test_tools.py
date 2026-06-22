@@ -102,6 +102,56 @@ def test_memory_snapshot_preserves_task_switch_kinds():
     asyncio.run(_memory_snapshot_preserves_task_switch_kinds())
 
 
+def test_memory_add_wm_rejects_raw_operational_trace():
+    asyncio.run(_memory_add_wm_rejects_raw_operational_trace())
+
+
+async def _memory_add_wm_rejects_raw_operational_trace():
+    from memory.working import WorkingMemory
+    from tools import memory as memory_tools
+
+    wm = WorkingMemory(capacity=10)
+    ctx = _tool_ctx(wm=wm)
+    raw_stdout = "\n".join(
+        f"stdout line {idx} status=running run_id=demo command: pytest {'x' * 260}"
+        for idx in range(12)
+    )
+
+    result = await memory_tools.memory_add_wm(
+        {"content": raw_stdout, "kind": "observation"},
+        ctx,
+    )
+
+    assert result.skipped is True
+    assert result.error == "RawWorkingMemoryRejected"
+    assert wm.get_top() == []
+
+
+def test_memory_add_wm_accepts_refined_observation():
+    asyncio.run(_memory_add_wm_accepts_refined_observation())
+
+
+async def _memory_add_wm_accepts_refined_observation():
+    from memory.working import WorkingMemory
+    from tools import memory as memory_tools
+
+    wm = WorkingMemory(capacity=10)
+    ctx = _tool_ctx(wm=wm)
+    result = await memory_tools.memory_add_wm(
+        {
+            "content": "观察：runtime.db 膨胀主要来自运行流水，应保存摘要和哈希而不是原始 stdout。",
+            "kind": "observation",
+        },
+        ctx,
+    )
+
+    assert result.error is None
+    assert result.skipped is False
+    items = wm.get_top()
+    assert len(items) == 1
+    assert items[0]["kind"] == "observation"
+
+
 async def _memory_snapshot_preserves_task_switch_kinds():
     from memory.working import TASK_SWITCH_PRESERVE_KINDS, WMItem, WorkingMemory
     from tools import memory as memory_tools
@@ -122,6 +172,7 @@ async def _memory_snapshot_preserves_task_switch_kinds():
     for kind in TASK_SWITCH_PRESERVE_KINDS:
         wm.add(WMItem(kind=kind, content=f"{kind} 上下文", priority=0.1))
     wm.add(WMItem(kind="noise", content="不应保留", priority=0.1))
+    wm.add(WMItem(kind="execute_result", content="RAW_TOOL_STDOUT_SHOULD_NOT_SNAPSHOT", priority=0.95))
 
     episodic = _FakeEpisodic()
     ctx = ToolContext(
@@ -142,6 +193,9 @@ async def _memory_snapshot_preserves_task_switch_kinds():
     assert "noise" not in kinds
     assert episodic.records
     assert any("WM 条目" in (str(record[1].get("content", "")) if record[1] else "") for record in episodic.records)
+    snapshot_content = "\n".join(str(record[1].get("content", "")) for record in episodic.records if record[1])
+    assert "RAW_TOOL_STDOUT_SHOULD_NOT_SNAPSHOT" not in snapshot_content
+    assert "operational_summary" in snapshot_content
 
 
 async def _worker_rewrites_task_workbench_flat_fields_into_workbench_arg():
@@ -331,6 +385,14 @@ def test_task_complete_allows_completion_when_workbench_verification_state_resol
     asyncio.run(_task_complete_allows_completion_when_workbench_verification_state_resolved())
 
 
+def test_task_complete_blocks_older_unverified_workbench_after_plain_resolved_text():
+    asyncio.run(_task_complete_blocks_older_unverified_workbench_after_plain_resolved_text())
+
+
+def test_task_complete_allows_older_workbench_when_newer_state_resolves_it():
+    asyncio.run(_task_complete_allows_older_workbench_when_newer_state_resolves_it())
+
+
 def test_task_complete_blocks_external_workbench_next_verification():
     asyncio.run(_task_complete_blocks_external_workbench_next_verification())
 
@@ -423,7 +485,7 @@ async def _task_complete_blocks_unresolved_workbench_next_verification():
             cortex = {
                 "intent": "self_drive_growth",
                 "domain": "self_evolution",
-                "evidence": ["recent logs show route drift probe returns too much context"],
+                "evidence": ["daemon-stdout.log run#31 shows route drift probe returns too much context"],
                 "next_verification": "优先定位 reasoner_route_drift_watch 探针定义，确认是否能压缩正常路径输出。",
                 "completion_checks": [
                     "已形成一个明确的一行级改进候选。",
@@ -598,6 +660,117 @@ async def _task_complete_allows_completion_when_workbench_verification_state_res
             )
 
             completed = await task_complete({"task_id": task_id}, ctx)
+            assert completed.error is None
+            assert completed.skipped is False
+            assert completed.state_delta["task_status"] == "done"
+        finally:
+            await store.close()
+
+
+async def _task_complete_blocks_older_unverified_workbench_after_plain_resolved_text():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-older-unverified-after-plain-resolved.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "防止普通 resolved 文案覆盖旧验证",
+                goal="旧 workbench 的可执行 next_verification 必须被执行或结构化关闭",
+                source="external",
+                status="in_progress",
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={
+                    "cortex": {
+                        "next_verification": "运行 pytest 验证完成门不会被后续普通 resolved 文案绕过。"
+                    }
+                },
+                log_text="older pending workbench",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={
+                    "cortex": {
+                        "next_verification": "none：当前看起来已经足够完成。"
+                    }
+                },
+                log_text="newer plain resolved workbench",
+            )
+
+            blocked = await task_complete({"task_id": task_id}, ctx)
+
+            assert blocked.skipped is True
+            assert blocked.error == "WorkbenchVerificationPending"
+            assert "pytest" in blocked.state_delta["next_verification"]
+        finally:
+            await store.close()
+
+
+async def _task_complete_allows_older_workbench_when_newer_state_resolves_it():
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-older-unverified-explicit-resolved.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "允许结构化 resolved 关闭旧验证",
+                goal="明确 verification_state resolved 应可关闭旧 workbench 验证要求",
+                source="external",
+                status="in_progress",
+            )
+            ctx = _task_tool_ctx(store)
+
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={
+                    "cortex": {
+                        "next_verification": "运行 pytest 验证完成门可拦截旧验证。"
+                    }
+                },
+                log_text="older pending workbench",
+            )
+            await store.add_run(
+                task_id=task_id,
+                run_type="tool_chain",
+                worker_type="reasoner",
+                status="succeeded",
+                tool_name="task.workbench",
+                output_json={
+                    "state_delta": {
+                        "cortex": {
+                            "verification_state": {
+                                "status": "resolved",
+                                "goal": "已人工确认旧验证不再需要执行。",
+                            }
+                        }
+                    }
+                },
+                log_text="newer explicit resolved workbench",
+            )
+
+            completed = await task_complete({"task_id": task_id}, ctx)
+
             assert completed.error is None
             assert completed.skipped is False
             assert completed.state_delta["task_status"] == "done"
@@ -844,7 +1017,7 @@ async def _task_complete_blocks_semantic_memory_next_verification_until_memory_w
             cortex = {
                 "intent": "self_drive_growth",
                 "domain": "self_evolution",
-                "evidence": ["已完成一次日志取证并形成可复用经验。"],
+                "evidence": ["daemon-stdout.log run#18 已完成一次日志取证并形成可复用经验。"],
                 "next_verification": "沉淀一条语义记忆：自驱取证任务不应 wait；随后完成本次轻量探索任务。",
                 "completion_checks": ["经验已进入长期语义记忆。"],
             }
@@ -910,7 +1083,7 @@ async def _task_complete_blocks_self_drive_deferred_implementation_candidate():
                 "intent": "self_drive_growth",
                 "domain": "self_evolution",
                 "evidence": [
-                    "日志统计发现 wait_no_progress=7。",
+                    "daemon-stdout.log 统计发现 wait_no_progress=7。",
                     "脚本给出的改进候选：加强守卫，当 self_drive 任务 next_step 要求取证时优先低成本取证而不是 wait。",
                 ],
                 "hypothesis": "最低成本的一行级改进方向是强化守卫。",
@@ -1030,6 +1203,22 @@ async def _task_complete_blocks_self_drive_growth_without_evidence():
                     }
                 },
             )
+            vague_evidence = await task_complete({"task_id": task_id}, ctx)
+            assert vague_evidence.skipped is True
+            assert vague_evidence.error == "SelfDriveGrowthIncomplete"
+            assert "具体锚点" in vague_evidence.summary
+
+            await store.update_status(
+                task_id,
+                "in_progress",
+                result_json={
+                    "cortex": {
+                        "intent": "self_drive_growth",
+                        "domain": "self_evolution",
+                        "evidence": ["runtime.db run#12 shows memory.search repeated wait pattern count=3"],
+                    }
+                },
+            )
             completed = await task_complete({"task_id": task_id}, ctx)
             assert completed.error is None
             assert completed.skipped is False
@@ -1065,7 +1254,7 @@ async def _task_complete_refreshes_active_task_before_growth_guard():
             ctx = _task_tool_ctx(store)
             ctx.active_task = stale_task
 
-            await store.add_run(
+            run_id = await store.add_run(
                 task_id=task_id,
                 run_type="tool_chain",
                 worker_type="reasoner",
@@ -1079,7 +1268,7 @@ async def _task_complete_refreshes_active_task_before_growth_guard():
                     "cortex": {
                         "intent": "self_drive_growth",
                         "domain": "self_evolution",
-                        "evidence": ["shell.run verified ok"],
+                        "evidence": [f"shell.run verified ok in run#{run_id}"],
                     }
                 },
             )
@@ -1138,6 +1327,10 @@ def test_memory_set_fact_goes_through_metabolic_ledger():
     asyncio.run(_memory_set_fact_goes_through_metabolic_ledger())
 
 
+def test_memory_fact_tools_preview_large_values():
+    asyncio.run(_memory_fact_tools_preview_large_values())
+
+
 async def _memory_set_fact_goes_through_metabolic_ledger():
     from store.task import TaskStore
     from tools.memory import memory_get_fact, memory_set_fact
@@ -1170,6 +1363,48 @@ async def _memory_set_fact_goes_through_metabolic_ledger():
             await store.close()
 
 
+async def _memory_fact_tools_preview_large_values():
+    from store.task import TaskStore
+    from tools.memory import memory_get_fact, memory_list_facts, memory_set_fact
+
+    huge = "F" * 18_000 + "TAIL"
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "memory-tool-preview.db")
+        await store.open()
+        try:
+            ctx = _tool_ctx(task_store=store)
+            set_result = await memory_set_fact(
+                {"key": "preview:large", "value": huge, "scope": "system"},
+                ctx,
+            )
+            assert set_result.skipped is False
+            assert len(set_result.summary) < 1200
+            assert "tool result preview truncated chars=" in set_result.summary
+            assert set_result.summary.endswith("TAIL")
+            assert set_result.evidence == f"key=preview:large value_chars={len(huge)}"
+
+            stored, found = await store.get_fact("preview:large")
+            assert found
+            assert "fact value truncated chars=" in stored
+            assert stored.endswith("TAIL")
+
+            get_result = await memory_get_fact({"key": "preview:large"}, ctx)
+            assert get_result.skipped is False
+            assert len(get_result.summary) < 1200
+            assert "tool result preview truncated chars=" in get_result.summary
+            assert get_result.summary.endswith("TAIL")
+
+            list_result = await memory_list_facts({"prefix": "preview:", "limit": 5}, ctx)
+            assert list_result.skipped is False
+            assert list_result.evidence is not None
+            assert len(list_result.evidence) < 2200
+            assert "tool result preview truncated chars=" in list_result.evidence
+            assert list_result.evidence.endswith("TAIL")
+        finally:
+            await store.close()
+
+
 def test_task_plan_goes_through_metabolic_ledger():
     asyncio.run(_task_plan_goes_through_metabolic_ledger())
 
@@ -1178,8 +1413,24 @@ def test_memory_add_semantic_goes_through_metabolic_ledger():
     asyncio.run(_memory_add_semantic_goes_through_metabolic_ledger())
 
 
+def test_memory_add_semantic_rejects_operational_noise():
+    asyncio.run(_memory_add_semantic_rejects_operational_noise())
+
+
+def test_memory_add_semantic_rejects_raw_operational_body():
+    asyncio.run(_memory_add_semantic_rejects_raw_operational_body())
+
+
+def test_memory_add_semantic_rejects_low_value_process_note():
+    asyncio.run(_memory_add_semantic_rejects_low_value_process_note())
+
+
 def test_task_complete_compiles_skill_through_metabolic_ledger():
     asyncio.run(_task_complete_compiles_skill_through_metabolic_ledger())
+
+
+def test_task_complete_skips_low_value_narrative_skill_compile():
+    asyncio.run(_task_complete_skips_low_value_narrative_skill_compile())
 
 
 async def _task_complete_compiles_skill_through_metabolic_ledger():
@@ -1197,7 +1448,11 @@ async def _task_complete_compiles_skill_through_metabolic_ledger():
             episodic = cast(
                 "Any",
                 SimpleNamespace(
-                    load_for_context=lambda task_id, n_recent=5: "user did x\nassistant did y"
+                    load_for_context=lambda task_id, n_recent=5: (
+                        "user asked to fix task completion\n"
+                        "结论：tests/test_tools.py::test_task_complete_compiles_skill_through_metabolic_ledger passed\n"
+                        "stdout line status=running run_id=raw command: pytest " + "x" * 400
+                    )
                 ),
             )
             ctx = _tool_ctx(task_store=store, semantic=semantic, episodic=episodic)
@@ -1210,12 +1465,47 @@ async def _task_complete_compiles_skill_through_metabolic_ledger():
             assert node is not None
             assert node.kind == "learned_skill"
             assert node.source == "tools/task.complete"
+            assert "tests/test_tools.py" in node.body
+            assert "stdout line status=running" not in node.body
 
             recent = await store.ledger_recent(limit=5)
             semantic_rows = [row for row in recent if row["op"] == "add_semantic_memory"]
             assert semantic_rows
             assert semantic_rows[0]["key"] == f"semantic:{skill_id}"
             assert semantic_rows[0]["source"] == "tools/task.complete"
+        finally:
+            await store.close()
+
+
+async def _task_complete_skips_low_value_narrative_skill_compile():
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+    from tools.task import task_complete
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "task-complete-low-value-semantic.db")
+        await store.open()
+        try:
+            task_id = await store.add_task("low value narrative task", goal="skip vague narrative")
+            semantic = cast("Any", SemanticMemory(root / "semantic"))
+            episodic = cast(
+                "Any",
+                SimpleNamespace(
+                    load_for_context=lambda task_id, n_recent=5: (
+                        "user said continue\nassistant said I will keep observing\n下一步继续分析，后续观察是否改善"
+                    )
+                ),
+            )
+            ctx = _tool_ctx(task_store=store, semantic=semantic, episodic=episodic)
+
+            result = await task_complete({"task_id": task_id, "force": True}, ctx)
+
+            assert result.skipped is False
+            assert result.state_delta["task_status"] == "done"
+            assert "compiled_skill" not in result.state_delta
+            recent = await store.ledger_recent(limit=5)
+            assert not [row for row in recent if row["op"] == "add_semantic_memory"]
         finally:
             await store.close()
 
@@ -1251,6 +1541,107 @@ async def _memory_add_semantic_goes_through_metabolic_ledger():
             assert top["source"] == "tools/memory.add_semantic"
             assert top["accepted"] is True
             assert top["decision_basis"].startswith("memory.add_semantic")
+        finally:
+            await store.close()
+
+
+async def _memory_add_semantic_rejects_operational_noise():
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+    from tools.memory import memory_add_semantic
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "semantic-tool-noise.db")
+        await store.open()
+        try:
+            semantic = cast("Any", SemanticMemory(root / "semantic"))
+            ctx = _tool_ctx(task_store=store, semantic=semantic)
+
+            result = await memory_add_semantic(
+                {
+                    "title": "run trace",
+                    "body": "tool output and retry transcript",
+                    "kind": "run_result",
+                },
+                ctx,
+            )
+
+            assert result.skipped is True
+            assert result.error == "OperationalSemanticMemoryRejected"
+            assert "请提炼为 fact/learned_skill/consolidated_insight" in result.summary
+            assert semantic.find_by_title("run trace") == []
+            assert await store.ledger_recent(limit=3) == []
+        finally:
+            await store.close()
+
+
+async def _memory_add_semantic_rejects_raw_operational_body():
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+    from tools.memory import memory_add_semantic
+
+    raw_body = "\n".join([
+        "command: python script.py",
+        "stdout:",
+        "line " + "x" * 80,
+        "stderr:",
+        "Traceback (most recent call last):",
+        "Process exited with code 1",
+    ]) + "\n" + ("log line\n" * 30)
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "semantic-tool-raw-body.db")
+        await store.open()
+        try:
+            semantic = cast("Any", SemanticMemory(root / "semantic"))
+            ctx = _tool_ctx(task_store=store, semantic=semantic)
+
+            result = await memory_add_semantic(
+                {
+                    "title": "debug fact",
+                    "body": raw_body,
+                    "kind": "fact",
+                },
+                ctx,
+            )
+
+            assert result.skipped is True
+            assert result.error == "OperationalSemanticBodyRejected"
+            assert "请先提炼" in result.summary
+            assert semantic.find_by_title("debug fact") == []
+            assert await store.ledger_recent(limit=3) == []
+        finally:
+            await store.close()
+
+
+async def _memory_add_semantic_rejects_low_value_process_note():
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+    from tools.memory import memory_add_semantic
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "semantic-tool-low-value.db")
+        await store.open()
+        try:
+            semantic = cast("Any", SemanticMemory(root / "semantic"))
+            ctx = _tool_ctx(task_store=store, semantic=semantic)
+
+            result = await memory_add_semantic(
+                {
+                    "title": "继续分析",
+                    "body": "继续分析近期失败模式，下一步沉淀失败经验并观察是否改善。",
+                    "kind": "observation",
+                },
+                ctx,
+            )
+
+            assert result.skipped is True
+            assert result.error == "LowValueSemanticMemoryRejected"
+            assert semantic.find_by_title("继续分析") == []
+            assert await store.ledger_recent(limit=3) == []
         finally:
             await store.close()
 
@@ -2780,8 +3171,14 @@ def test_subagent_episodic_view_accepts_parent_memory_signatures():
         def __init__(self) -> None:
             self.calls: list[tuple[Any, ...]] = []
 
-        def load_for_context(self, task_id: str | None, n_recent: int = 20) -> str:
-            self.calls.append(("load_for_context", task_id, n_recent))
+        def load_for_context(
+            self,
+            task_id: str | None,
+            n_recent: int = 20,
+            *,
+            max_chars: int | None = None,
+        ) -> str:
+            self.calls.append(("load_for_context", task_id, n_recent, max_chars))
             return "task narrative"
 
         def load_for_chat_context(
@@ -2819,13 +3216,13 @@ def test_subagent_episodic_view_accepts_parent_memory_signatures():
     parent = _Parent()
     view = _SubagentEpisodicView(parent)
 
-    assert view.load_for_context("task-1", 6) == "task narrative"
+    assert view.load_for_context("task-1", 6, max_chars=700) == "task narrative"
     assert view.load_for_chat_context("chat-1", 7, max_chars=800) == "chat narrative"
     assert view.load_for_interlocutor_context("speaker-1", 8, max_chars=900) == "speaker narrative"
     assert view.load_for_task_narrative("task-2", 9) == "task-only narrative"
     assert view.load_recent_daily_context(3, 1000) == "daily narrative"
     assert parent.calls == [
-        ("load_for_context", "task-1", 6),
+        ("load_for_context", "task-1", 6, 700),
         ("load_for_chat_context", "chat-1", 7, 800),
         ("load_for_interlocutor_context", "speaker-1", 8, 900),
         ("load_for_task_narrative", "task-2", 9),
@@ -2918,6 +3315,14 @@ async def _subagent_runner_shared_memory_does_not_write_parent_episodic():
 
 def test_subagent_absorb_persists_parent_semantic_node_with_provenance():
     asyncio.run(_subagent_absorb_persists_parent_semantic_node_with_provenance())
+
+
+def test_subagent_absorb_rejects_operational_noise():
+    asyncio.run(_subagent_absorb_rejects_operational_noise())
+
+
+def test_subagent_absorb_rejects_raw_operational_body():
+    asyncio.run(_subagent_absorb_rejects_raw_operational_body())
 
 
 async def _subagent_absorb_persists_parent_semantic_node_with_provenance():
@@ -3121,6 +3526,89 @@ async def _subagent_run_isolated_memory_returns_absorbable_memories_without_pare
             await store.close()
 
 
+async def _subagent_absorb_rejects_operational_noise():
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+    from tools.subagent import subagent_absorb
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "subagent-absorb-noise.db")
+        await store.open()
+        try:
+            semantic = SemanticMemory(root / "semantic")
+            ctx = _tool_ctx(task_store=store, semantic=semantic)
+
+            res = await subagent_absorb(
+                {
+                    "subagent_id": "sub-noise",
+                    "memories_json": json.dumps([
+                        {
+                            "id": "run-1",
+                            "kind": "run_result",
+                            "title": "shell run transcript",
+                            "body": "stdout and retry output",
+                        }
+                    ], ensure_ascii=False),
+                },
+                ctx,
+            )
+
+            assert res.error is None
+            assert res.metadata["absorbed"] == 0
+            assert res.metadata["requested_total"] == 1
+            assert len(res.metadata["errors"]) == 1
+            assert "semantic memory write rejected" in res.metadata["errors"][0]
+            assert semantic.get("absorbed-sub-noise-run-1") is None
+        finally:
+            await store.close()
+
+
+async def _subagent_absorb_rejects_raw_operational_body():
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+    from tools.subagent import subagent_absorb
+
+    raw_body = "\n".join([
+        "command: pytest",
+        "stdout:",
+        "stderr:",
+        "Traceback (most recent call last):",
+        "Process exited with code 1",
+    ]) + "\n" + ("log line\n" * 30)
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "subagent-absorb-raw-body.db")
+        await store.open()
+        try:
+            semantic = SemanticMemory(root / "semantic")
+            ctx = _tool_ctx(task_store=store, semantic=semantic)
+
+            res = await subagent_absorb(
+                {
+                    "subagent_id": "sub-raw",
+                    "memories_json": json.dumps([
+                        {
+                            "id": "fact-1",
+                            "kind": "fact",
+                            "title": "raw debug fact",
+                            "body": raw_body,
+                        }
+                    ], ensure_ascii=False),
+                },
+                ctx,
+            )
+
+            assert res.error is None
+            assert res.metadata["absorbed"] == 0
+            assert len(res.metadata["errors"]) == 1
+            assert "semantic memory write rejected" in res.metadata["errors"][0]
+            assert semantic.get("absorbed-sub-raw-fact-1") is None
+        finally:
+            await store.close()
+
+
 def test_subagent_absorb_surfaces_truncation_and_invalid_nodes():
     asyncio.run(_subagent_absorb_surfaces_truncation_and_invalid_nodes())
 
@@ -3249,6 +3737,10 @@ def test_browser_navigate_blank_page_classified(monkeypatch):
     asyncio.run(_browser_navigate_blank_page_classified(monkeypatch))
 
 
+def test_browser_snapshot_evidence_is_compacted(monkeypatch):
+    asyncio.run(_browser_snapshot_evidence_is_compacted(monkeypatch))
+
+
 async def _browser_navigate_blank_page_classified(monkeypatch):
     import tools.browser as browser_mod
 
@@ -3262,6 +3754,24 @@ async def _browser_navigate_blank_page_classified(monkeypatch):
 
     assert res.error == "NavigateBlankPage"
     assert "页面空白" in res.summary
+
+
+async def _browser_snapshot_evidence_is_compacted(monkeypatch):
+    import tools.browser as browser_mod
+
+    large_snapshot = "\n".join(f"button item {i} " + ("B" * 200) for i in range(120))
+
+    async def _fake_browser_run(*args: str, timeout: int = 30):
+        return 0, large_snapshot, ""
+
+    monkeypatch.setattr(browser_mod, "_browser_run", _fake_browser_run)
+    res = await browser_mod.browser_snapshot({}, _tool_ctx())
+
+    assert res.error is None
+    assert res.evidence is not None
+    assert len(res.evidence) <= 12_000
+    assert "browser snapshot truncated chars=" in res.evidence
+    assert res.metadata["snapshot_chars"] == len(large_snapshot)
 
 
 def test_web_fetch_recreates_closed_shared_client(monkeypatch):
@@ -3306,6 +3816,41 @@ async def _web_fetch_recreates_closed_shared_client(monkeypatch):
     assert res.error is None
     assert res.skipped is False
     assert "获取成功" in res.summary
+
+
+def test_web_fetch_defaults_to_compact_payload(monkeypatch):
+    asyncio.run(_web_fetch_defaults_to_compact_payload(monkeypatch))
+
+
+async def _web_fetch_defaults_to_compact_payload(monkeypatch):
+    import tools.web as web_mod
+
+    large_body = "W" * 20_000
+
+    class _FakeResponse:
+        status_code = 200
+        text = large_body
+        headers = {"content-type": "text/plain; charset=utf-8"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class _FreshClient:
+        is_closed = False
+
+        async def request(self, method: str, url: str, **kwargs):
+            return _FakeResponse()
+
+    monkeypatch.setattr(web_mod.httpx, "AsyncClient", lambda **kwargs: _FreshClient())
+    monkeypatch.setattr(web_mod, "_http_client", None)
+
+    res = await web_mod.web_fetch({"url": "https://example.com/large.txt"}, _tool_ctx())
+
+    assert res.error is None
+    assert res.evidence is not None
+    assert len(res.evidence) < 13_000
+    assert "截断，原文共 20000 字符" in res.evidence
+    assert res.metadata["chars"] == len(res.evidence)
 
 
 def test_exec_empty_command():
@@ -3613,6 +4158,10 @@ def test_exec_foreground_success_summary_is_exit_code_neutral():
     asyncio.run(_exec_foreground_success_summary_is_exit_code_neutral())
 
 
+def test_exec_foreground_large_output_returns_preview_with_artifact():
+    asyncio.run(_exec_foreground_large_output_returns_preview_with_artifact())
+
+
 async def _exec_foreground_success_summary_is_exit_code_neutral():
     from tools.exec import exec_run
 
@@ -3623,6 +4172,43 @@ async def _exec_foreground_success_summary_is_exit_code_neutral():
     assert res.skipped is False
     assert res.summary.startswith("命令完成 (exit=0):")
     assert "payload-with-error-word" in res.summary
+
+
+async def _exec_foreground_large_output_returns_preview_with_artifact():
+    import json
+
+    from tools.exec import _MANAGER, exec_run, process_log
+
+    _MANAGER.clear()
+    ctx = _tool_ctx()
+    try:
+        res = await exec_run(
+            {"command": "python3 -c \"print('X' * 16000 + 'TAIL')\""},
+            ctx,
+        )
+
+        assert res.error is None
+        assert res.skipped is False
+        assert len(res.summary) < 4500
+        assert "exec output preview truncated chars=" in res.summary
+        assert res.summary.rstrip().endswith("TAIL")
+
+        payload = json.loads(res.evidence)
+        assert payload["output_chars"] > payload["preview_chars"]
+        assert res.artifact_paths
+        log_path = Path(res.artifact_paths[-1])
+        full_output = log_path.read_text(encoding="utf-8")
+        assert len(full_output) > 16000
+        assert full_output.rstrip().endswith("TAIL")
+
+        log = await process_log(
+            {"process_id": payload["process_id"], "offset": 0, "limit": 50_000},
+            ctx,
+        )
+        assert log.error is None
+        assert len(log.summary) == 12_000
+    finally:
+        _MANAGER.clear()
 
 
 def test_process_poll_exposes_handle_lost_interaction_state():
@@ -3804,6 +4390,17 @@ async def _file_read_max_chars():
         assert "继续读取同一文件剩余内容" in r.state_delta["recovery_next_step"]
         assert r.metadata["truncated"] is True
         assert r.metadata["next_params"] == {"path": str(fpath), "start": 20, "max_chars": 20}
+
+        default_big = root / "default-big.txt"
+        await file_write({"path": str(default_big), "content": "z" * 20_000}, ctx)
+        default_read = await file_read({"path": str(default_big)}, ctx)
+        assert len(default_read.summary) == 12_000
+        assert default_read.state_delta["has_more"] is True
+        assert default_read.state_delta["next_params"] == {
+            "path": str(default_big),
+            "start": 12_000,
+            "max_chars": 12_000,
+        }
 
         ranged = await file_read({"path": str(fpath), "start": 10, "end": 80, "max_chars": 15}, ctx)
         assert len(ranged.summary) == 15

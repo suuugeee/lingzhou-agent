@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from .base import BaseAsyncStore
+from .compact import compact_runtime_mapping, compact_runtime_text
 from .models import MetaReflection
 
 
@@ -31,7 +32,7 @@ class MetaReflectionStore(BaseAsyncStore):
             "tool_name": tool_name,
         }
         if extras:
-            data.update(extras)
+            data.update(compact_runtime_mapping(extras))
         await self._db.execute(
             "INSERT OR REPLACE INTO meta_reflections (id, target_kind, trigger, loop_level, diagnosis, proposal, verification_plan, decision, data) VALUES (?,?,?,?,?,?,?,?,?)",
             (
@@ -39,11 +40,11 @@ class MetaReflectionStore(BaseAsyncStore):
                 target_kind,
                 trigger,
                 loop_level,
-                diagnosis,
-                proposal,
-                verification_plan,
-                decision,
-                json.dumps(data, ensure_ascii=False),
+                compact_runtime_text(diagnosis, marker_label="meta_reflection diagnosis"),
+                compact_runtime_text(proposal, marker_label="meta_reflection proposal"),
+                compact_runtime_text(verification_plan, marker_label="meta_reflection verification_plan"),
+                compact_runtime_text(decision, marker_label="meta_reflection decision"),
+                json.dumps(compact_runtime_mapping(data), ensure_ascii=False),
             ),
         )
         await self._db.commit()

@@ -64,6 +64,32 @@ def test_working_memory_token_budget_uses_mixed_text_estimate():
     assert top[0]["kind"] == "high"
 
 
+def test_wm_context_omits_raw_operational_entries():
+    from core.judgment.context.sections import _fmt_wm
+
+    huge_reflection = "诊断：" + "A" * 3000 + "TAIL"
+    text = _fmt_wm(
+        [
+            {"kind": "execute_result", "content": "RAW_TOOL_STDOUT_SHOULD_NOT_CONTEXT", "priority": 0.99},
+            {"kind": "run_monitor", "content": "[Run 监控] running=4 finished=0", "priority": 0.9},
+            {"kind": "meta_reflection", "content": huge_reflection, "priority": 0.86},
+            {"kind": "observation", "content": "用户明确要求只保存有效信息", "priority": 0.8},
+        ],
+        wm_count=4,
+        wm_capacity=20,
+    )
+
+    assert "用户明确要求只保存有效信息" in text
+    assert "诊断：" in text
+    assert "TAIL" in text
+    assert "chars omitted" in text
+    assert len(text) < len(huge_reflection)
+    assert "RAW_TOOL_STDOUT_SHOULD_NOT_CONTEXT" not in text
+    assert "omitted raw operational WM" in text
+    assert "execute_result=1" in text
+    assert "run_monitor=1" in text
+
+
 def test_emotion_state_ema():
     from core.perception import EmotionState
     e = EmotionState(valence=0.6, arousal=0.5)
@@ -225,6 +251,38 @@ def test_reference_resolver_retrieve_candidates_uses_recent_pool_without_time_pa
     assert episodic.calls == [4]
     assert retrieve_calls == [("昨天你说过的方案A", 6, None)]
     assert candidates["node-1"]["_sig"] == ["recent"]
+
+
+def test_reference_resolver_retrieve_candidates_filters_operational_memory():
+    from core.reference import ReferenceResolver
+
+    class SemanticStub:
+        def retrieve_multi_anchor(self, anchors, top_k, source=None):
+            return [
+                {"id": "run-1", "kind": "run_result", "title": "raw pytest", "body": "stdout", "created_at": ""},
+                {"id": "fact-1", "kind": "fact", "title": "方案A", "body": "保留可复用结论", "created_at": ""},
+            ]
+
+        def retrieve(self, query, top_k, source=None):
+            return [
+                {"id": "meta-1", "kind": "meta_reflection", "title": "继续观察", "body": "下一步继续看", "created_at": ""},
+                {"id": "skill-1", "kind": "learned_skill", "title": "排障路径", "body": "先核对真实证据", "created_at": ""},
+            ]
+
+    class EpisodicStub:
+        def list_recent_narrative(self, limit=10):
+            return [{"content": "继续方案A", "ts": "2026-05-22 08:00:00 UTC"}]
+
+    resolver = ReferenceResolver()
+    sigs = resolver.extract_signals("继续方案A")
+    candidates = resolver._retrieve_candidates(
+        "继续方案A",
+        sigs,
+        cast("Any", SemanticStub()),
+        cast("Any", EpisodicStub()),
+    )
+
+    assert set(candidates) == {"fact-1", "skill-1"}
 
 
 @pytest.mark.asyncio
@@ -2773,6 +2831,21 @@ async def _task_store_signal_lifecycle():
         pending = await store.list_signals(limit=10)
         assert [sig["id"] for sig in pending] == [repeat_id]
 
+        huge = "S" * 18_000 + "TAIL"
+        large_id = await store.add_signal(
+            "L" * 2_000,
+            "2000-01-01 00:00:00",
+            payload={"note": huge, "items": [{"index": idx, "raw": huge} for idx in range(90)]},
+        )
+        large_signal = await store.get_signal(large_id)
+        assert large_signal is not None
+        assert "signal title truncated chars=" in large_signal["title"]
+        assert "runtime store truncated chars=" in large_signal["payload"]["note"]
+        assert large_signal["payload"]["note"].endswith("TAIL")
+        assert "runtime store truncated chars=" in large_signal["payload"]["items"][0]["raw"]
+        assert large_signal["payload"]["items"][39]["_persistent_omitted_items"] == 11
+        assert large_signal["payload"]["items"][-1]["index"] == 89
+
         await store.cancel_signal(repeat_id)
         cancelled = await store.get_signal(repeat_id)
         assert cancelled is not None
@@ -3238,6 +3311,79 @@ def test_competitive_evolve_routes_based_on_config():
     asyncio.run(_competitive_evolve_routes_based_on_config())
 
 
+def test_evolve_ethos_reads_dict_reflection_nodes(monkeypatch):
+    asyncio.run(_evolve_ethos_reads_dict_reflection_nodes(monkeypatch))
+
+
+async def _evolve_ethos_reads_dict_reflection_nodes(monkeypatch):
+    from core.evolution import soft as soft_mod
+    from core.evolution.soft import evolve_ethos
+    from core.perception.ethos import EthosValues
+
+    captured_messages: list[Any] = []
+    captured_facts: list[dict[str, Any]] = []
+
+    class _Provider:
+        async def chat(self, messages):
+            captured_messages.extend(messages)
+            return json.dumps({
+                "truth": 0.66,
+                "caution": 0.61,
+                "continuity": 0.62,
+                "curiosity": 0.46,
+                "care": 0.56,
+            })
+
+    class _TaskStore:
+        async def get_fact(self, key):
+            return "", False
+
+    class _Semantic:
+        def retrieve(self, query, top_k=5, kind=None):
+            assert kind == "reflection"
+            return [
+                {
+                    "id": "reflection-1",
+                    "kind": "reflection",
+                    "title": "解决能力反思",
+                    "body": "需要保留可复用证据，过滤运行噪声。" + "A" * 2000,
+                },
+                {
+                    "id": "run-1",
+                    "kind": "run_result",
+                    "title": "pytest stdout",
+                    "body": "raw output",
+                },
+            ]
+
+    async def _capture_soul_fact(owner, **kwargs):
+        captured_facts.append(kwargs)
+        return True
+
+    async def _update_dreams(summary, *, ctx):
+        return None
+
+    monkeypatch.setattr(soft_mod, "set_soul_fact", _capture_soul_fact)
+    engine = SimpleNamespace(
+        _cfg=SimpleNamespace(
+            evolution=SimpleNamespace(enabled=True, ethos_max_delta=0.15),
+            soul=SimpleNamespace(ethos=SimpleNamespace(baseline=EthosValues())),
+            constitution_path=Path("/tmp/nonexistent-lingzhou-constitution.md"),
+        ),
+        _provider=_Provider(),
+        _update_dreams=_update_dreams,
+    )
+    ctx = SimpleNamespace(task_store=_TaskStore(), semantic=_Semantic())
+
+    result = await evolve_ethos(cast("Any", engine), cast("Any", ctx))
+
+    assert result.success is True
+    assert captured_facts[0]["key"] == "soul:ethos_baseline"
+    assert "解决能力反思" in captured_messages[1].content
+    assert "pytest stdout" not in captured_messages[1].content
+    assert len(captured_messages[1].content) < 6000
+
+
 async def _competitive_evolve_routes_based_on_config():
     import pathlib
     import tempfile
@@ -3358,6 +3504,64 @@ async def test_refresh_running_runs_updates_finished_exec_runs():
         task = await store.get_task_by_id(task_id)
         assert task is not None
         assert task.result_json["last_run_status"] == "succeeded"
+
+        await store.close()
+
+
+async def test_refresh_running_runs_compacts_large_finished_exec_output():
+    import os
+    import time
+
+    from core.loop.runs.refresh import refresh_running_runs
+    from store.task import TaskStore
+    from tools.exec import _MANAGER, ProcessInfo
+
+    huge = "O" * 18_000 + "TAIL"
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["LINGZHOU_PROCESS_STATE_DIR"] = str(Path(d) / "proc-state")
+        _MANAGER.clear()
+        store = TaskStore(Path(d) / "runtime.db")
+        await store.open()
+        task_id = await store.add_task("后台大输出任务", goal="避免 stdout 污染任务上下文")
+        run_id = await store.add_run(
+            task_id=task_id,
+            run_type="exec",
+            worker_type="exec-worker",
+            status="running",
+            tool_name="exec",
+            session_id="exec-large-output-1",
+        )
+        info = ProcessInfo(
+            session_id="exec-large-output-1",
+            command="python large.py",
+            started_at=time.time(),
+            finished=True,
+            return_code=0,
+            stdout=huge,
+            background=True,
+        )
+        _MANAGER.register(info)
+        _MANAGER.mark_finished("exec-large-output-1", 0)
+
+        updates = await refresh_running_runs(store)
+        assert updates and updates[0]["status"] == "succeeded"
+
+        run = await store.get_run_by_id(run_id)
+        assert run is not None
+        assert run.output_json["stdout_chars"] == len(huge)
+        assert len(run.output_json["stdout"]) < len(huge)
+        assert "run monitor stdout truncated chars=" in run.output_json["stdout"]
+        assert run.output_json["stdout"].endswith("TAIL")
+        assert len(run.progress) < len(huge)
+        assert "run monitor output truncated chars=" in run.progress
+
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+        assert len(task.result_json["summary"]) < len(huge)
+        assert "run monitor output truncated chars=" in task.result_json["summary"]
+        cortex = task.result_json["cortex"]
+        assert len(cortex["experiments"][0]["summary"]) <= 223
+        assert "OOOO" in cortex["experiments"][0]["summary"]
 
         await store.close()
 
@@ -3537,8 +3741,78 @@ async def test_refresh_running_runs_updates_fact_monitored_non_exec_runs():
         assert completed and completed[-1]["run_id"] == run_id
 
         node = semantic.get(f"run-result-{run_id}")
-        assert node is not None
-        assert node.kind == "run_result"
+        assert node is None
+
+        await store.close()
+
+
+async def test_refresh_running_runs_compacts_large_fact_monitor_snapshot():
+    from core.loop.runs.refresh import refresh_running_runs
+    from store.task import TaskStore
+
+    huge = "P" * 18_000 + "TAIL"
+    items = [{"index": idx, "raw": huge} for idx in range(90)]
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "runtime.db")
+        await store.open()
+        task_id = await store.add_task("外部大状态任务", goal="等待外部 fact monitor")
+        await store.set_fact(
+            "run:large-fact",
+            json.dumps(
+                {"status": "succeeded", "progress": huge, "summary": huge, "items": items},
+                ensure_ascii=False,
+            ),
+            scope="task",
+        )
+        run_id = await store.add_run(
+            task_id=task_id,
+            run_type="llm",
+            worker_type="llm-worker",
+            status="running",
+            tool_name="llm.large",
+            output_json={
+                "state_delta": {
+                    "run_monitor": {
+                        "kind": "fact",
+                        "key": "run:large-fact",
+                        "status_field": "status",
+                        "progress_field": "progress",
+                        "success_values": ["succeeded"],
+                    }
+                }
+            },
+        )
+
+        updates = await refresh_running_runs(store)
+        assert updates
+        assert updates[0]["status"] == "succeeded"
+        assert len(updates[0]["crystal"]) < len(huge)
+
+        finished = await store.get_run_by_id(run_id)
+        assert finished is not None
+        assert finished.status == "succeeded"
+        assert len(finished.progress) < len(huge)
+        assert "run monitor progress truncated chars=" in finished.progress
+        snapshot = finished.output_json["monitor_snapshot"]
+        assert "run monitor progress truncated chars=" in snapshot["progress"]
+        assert snapshot["progress_chars"] > 4000
+        assert snapshot["items"][39]["_persistent_omitted_items"] == 11
+        assert snapshot["items"][-1]["index"] == 89
+        assert finished.output_json["monitor_raw_chars"] > 4000
+
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+        assert len(task.result_json["summary"]) < len(huge)
+        assert "run monitor summary truncated chars=" in task.result_json["summary"]
+        cortex = task.result_json["cortex"]
+        assert len(cortex["experiments"][0]["summary"]) <= 223
+        assert cortex["experiments"][0]["tool"] == "llm.large"
+
+        progress, found = await store.get_fact(f"task:{task_id}:progress")
+        assert found
+        assert len(progress) < len(huge)
+        assert "run monitor progress truncated chars=" in progress
 
         await store.close()
 
@@ -3933,6 +4207,20 @@ async def _file_list_and_memory_search():
             found = await memory_search({'query': 'bug'}, ctx)
             assert 'bug fix note' in found.summary
 
+            semantic.upsert(MemoryNode(
+                id='run-result-noise',
+                kind='run_result',
+                title='zzoptrace noisy run result',
+                body='zzoptrace noisy operational trace',
+            ))
+            operational_default = await memory_search({'query': 'zzoptrace'}, ctx)
+            assert operational_default.skipped is True
+            assert '默认已忽略 run_result' in operational_default.summary
+
+            operational_explicit = await memory_search({'query': 'zzoptrace', 'kind': 'run_result'}, ctx)
+            assert operational_explicit.skipped is False
+            assert 'zzoptrace noisy run result' in operational_explicit.summary
+
             filtered = await memory_search({'query': 'legacy runtime', 'task_id': '33', 'path_prefix': '/root/.legacy-runtime/memory'}, ctx)
             assert 'legacy runtime primary carrier' in filtered.summary
 
@@ -3988,6 +4276,10 @@ def test_reflect_structural_disambiguates_duplicate_titles():
     asyncio.run(_reflect_structural_disambiguates_duplicate_titles())
 
 
+def test_reflect_structural_rejects_low_value_process_note():
+    asyncio.run(_reflect_structural_rejects_low_value_process_note())
+
+
 async def _reflect_structural_disambiguates_duplicate_titles():
     from memory.working import WMItem, WorkingMemory
     from store.episodic import EpisodicMemory
@@ -4005,6 +4297,7 @@ async def _reflect_structural_disambiguates_duplicate_titles():
             episodic = EpisodicMemory(root / 'episodic')
             wm = WorkingMemory(capacity=8)
             wm.add(WMItem(kind='observation', content='重复结构洞察来源', priority=0.8))
+            wm.add(WMItem(kind='execute_result', content='RAW_REFLECT_TOOL_OUTPUT_SHOULD_NOT_SAVE', priority=0.9))
             ctx = _tool_ctx(task_store=store, episodic=episodic, semantic=semantic, wm=wm)
 
             first = await reflect_structural({'title': 'memory检索质量基线', 'insight': '洞察A'}, ctx)
@@ -4019,6 +4312,45 @@ async def _reflect_structural_disambiguates_duplicate_titles():
             assert second_node is not None
             assert first_node.title == 'memory检索质量基线'
             assert second_node.title.startswith('memory检索质量基线 [structural:')
+            assert '重复结构洞察来源' in first_node.body
+            assert 'RAW_REFLECT_TOOL_OUTPUT_SHOULD_NOT_SAVE' not in first_node.body
+        finally:
+            await store.close()
+
+
+async def _reflect_structural_rejects_low_value_process_note():
+    from memory.working import WorkingMemory
+    from store.episodic import EpisodicMemory
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+    from tools.memory import reflect_structural
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / 'runtime.db')
+        await store.open()
+        try:
+            semantic = cast("Any", SemanticMemory(root / 'semantic'))
+            episodic = EpisodicMemory(root / 'episodic')
+            ctx = _tool_ctx(
+                task_store=store,
+                episodic=episodic,
+                semantic=semantic,
+                wm=WorkingMemory(capacity=8),
+            )
+
+            result = await reflect_structural(
+                {
+                    'title': '继续分析',
+                    'insight': '继续分析近期失败模式，下一步沉淀失败经验并观察是否改善。',
+                },
+                ctx,
+            )
+
+            assert result.skipped is True
+            assert result.error == "LowValueStructuralReflectionRejected"
+            assert semantic.find_by_title('继续分析') == []
+            assert episodic.load_for_context(None) == ""
         finally:
             await store.close()
 
@@ -4313,6 +4645,62 @@ async def _execution_dispatch_normalizes_non_string_tool_result_fields():
     assert "No such file or directory" in result.evidence
 
 
+def test_execution_compacts_large_result_only_for_persistence():
+    asyncio.run(_execution_compacts_large_result_only_for_persistence())
+
+
+async def _execution_compacts_large_result_only_for_persistence():
+    from tempfile import TemporaryDirectory
+
+    from store.task import TaskStore
+    from tools.registry import ToolManifest, ToolParam, ToolRegistry, ToolResult, tool
+
+    tool_name = "probe.large_result_persistence"
+    huge = "A" * 20000 + "TAIL"
+
+    @tool(ToolManifest(
+        name=tool_name,
+        description="return large result for persistence compaction",
+        params=[ToolParam("value", "string", "dummy", required=False)],
+    ))
+    async def _large_result(params, ctx):
+        return ToolResult(
+            summary=huge,
+            evidence=huge,
+            state_delta={"payload": huge},
+            metadata={"log_summary": huge},
+        )
+
+    with TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "runtime.db")
+        await store.open()
+        try:
+            reg = ToolRegistry()
+            layer = _execution_layer(reg)
+            ctx = _tool_ctx(debug=False, task_store=store)
+            action = _judgment_output(decision="act", chosen_action_id=tool_name, params={})
+
+            result = await layer.dispatch(action, ctx)
+
+            assert result.summary == huge
+            runs = await store.list_runs(limit=5)
+            assert runs
+            stored_summary = runs[0].output_json["summary"]
+            assert len(stored_summary) < len(huge)
+            assert "persistent storage truncated" in stored_summary
+            assert "TAIL" in stored_summary
+
+            facts = await store.list_facts(prefix="durable_failure:", limit=5)
+            assert len(facts) == 1
+            payload = json.loads(facts[0][1])
+            assert "last_summary" not in payload
+            assert payload["last_summary_chars"] == len(huge)
+            assert len(payload["last_summary_preview"]) <= 1200
+            assert "durable failure summary truncated" in payload["last_summary_preview"]
+        finally:
+            await store.close()
+
+
 def test_execution_dispatch_accepts_dict_result_on_llm_worker():
     asyncio.run(_execution_dispatch_accepts_dict_result_on_llm_worker())
 
@@ -4453,10 +4841,10 @@ async def _record_run_outcome_memory_clips_large_semantic_body():
             task_id=12,
             tool_name="shell.run",
             worker_type="tool-chain-worker",
-            status="succeeded",
+            status="failed",
             progress="ok",
             summary=huge_summary,
-            error="",
+            error="CommandFailed",
         )
 
         node = semantic.get("run-result-991")
@@ -4464,6 +4852,35 @@ async def _record_run_outcome_memory_clips_large_semantic_body():
         assert len(node.body) < len(huge_summary)
         assert "run_result memory truncated" in node.body
         assert "TAIL" in node.body
+        assert node.source == "execution/run_result"
+
+
+def test_record_meta_reflection_fallback_skips_low_value_process_note():
+    asyncio.run(_record_meta_reflection_fallback_skips_low_value_process_note())
+
+
+async def _record_meta_reflection_fallback_skips_low_value_process_note():
+    from core.execution.helpers import record_meta_reflection_memory
+    from store.semantic import SemanticMemory
+
+    with tempfile.TemporaryDirectory() as d:
+        semantic = SemanticMemory(Path(d) / "memory")
+
+        await record_meta_reflection_memory(
+            episodic=None,
+            semantic=semantic,
+            meta={
+                "reflection_id": "low-1",
+                "target_kind": "tool",
+                "loop_level": "single",
+                "decision": "defer",
+                "diagnosis": "继续分析近期失败模式。",
+                "proposal": "下一步继续观察。",
+                "verification_plan": "后续观察是否还有类似现象。",
+            },
+        )
+
+        assert semantic.get("meta-reflection-low-1") is None
 
 
 def test_execution_logs_worker_metadata(caplog):

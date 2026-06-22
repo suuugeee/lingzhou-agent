@@ -31,6 +31,7 @@ from tools.registry import (
 )
 
 _log = logging.getLogger("lingzhou.tools.file")
+DEFAULT_READ_MAX_CHARS = 12_000
 
 
 def _nearest_existing_parent(path: Path) -> Path | None:
@@ -240,7 +241,7 @@ async def file_list(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     name="file.read",
     description=(
         "读取文件内容。支持三种方式：\n"
-        "1. 不传参数 → 读全文\n"
+        "1. 不传 max_chars → 默认返回最多 12000 字符，并给出 next_params\n"
         "2. offset + limit → 从第 offset 行开始读 limit 行（推荐，直觉友好）\n"
         "3. start + end → 按字符下标区间读（精确控制）\n"
         "⚠️ 修改文件前先用 offset/limit 读完整函数（≥20行），避免碎片化。"
@@ -264,7 +265,7 @@ async def file_read(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
 
     path = resolve_read_path(Path(os.path.expanduser(raw_path)), ctx)  # noqa: ASYNC240
     max_chars_raw = params.get("max_chars")
-    max_chars: int | None = int(max_chars_raw) if max_chars_raw is not None else None
+    max_chars: int | None = int(max_chars_raw) if max_chars_raw is not None else DEFAULT_READ_MAX_CHARS
     has_range = ("start" in params) or ("end" in params)
     has_line_range = ("offset" in params) or ("limit" in params)
 

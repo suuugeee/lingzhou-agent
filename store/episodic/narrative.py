@@ -15,6 +15,7 @@ _log = logging.getLogger("lingzhou.episodic")
 
 _DAILY_SEARCH_MAX_HITS = 5
 _DAILY_SEARCH_EXCERPT_CHARS = 480
+_EPISODIC_RECORD_CONTENT_MAX_CHARS = 12000
 
 
 def narrative_filename(task_id: str | None) -> str:
@@ -130,6 +131,34 @@ def day_stamp_from_ts(ts: str) -> str:
     return (ts or "").strip()[:10]
 
 
+def _clip_record_content(content: str, *, limit: int = _EPISODIC_RECORD_CONTENT_MAX_CHARS) -> str:
+    text = str(content or "")
+    if len(text) <= limit:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    marker = f"\n...[episodic record truncated chars={len(text)} sha256={digest}]...\n"
+    budget = limit - len(marker)
+    if budget <= 0:
+        return marker[:limit]
+    head = min(max(200, budget // 2), budget)
+    tail = max(0, budget - head)
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+def _clip_context_block(text: str, *, limit: int) -> str:
+    value = str(text or "")
+    if limit <= 0 or len(value) <= limit:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+    marker = f"\n...[episodic context truncated chars={len(value)} sha256={digest}]...\n"
+    budget = limit - len(marker)
+    if budget <= 0:
+        return marker[:limit]
+    head = min(max(80, budget // 2), budget)
+    tail = max(0, budget - head)
+    return value[:head] + marker + (value[-tail:] if tail else "")
+
+
 def insert_narrative_row(
     memory,
     *,
@@ -182,6 +211,7 @@ def record(
     """追加一条情节记录（Tulving 1983 四元素绑定）。"""
     ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S UTC")
     src = source_type or source_from_role(role)
+    stored_content = _clip_record_content(content)
 
     meta_parts = [f"role={role}", f"src={src}"]
     if chat_id:
@@ -195,7 +225,7 @@ def record(
             meta_parts.append(f"affect=({float(v):.2f},{float(a):.2f})")
 
     meta = " | ".join(meta_parts)
-    block = f"\n---\n**[{ts}]** `{meta}`\n\n{content.strip()}\n"
+    block = f"\n---\n**[{ts}]** `{meta}`\n\n{stored_content.strip()}\n"
 
     memory._append_markdown_block(memory._task_path(task_id), block)
     if chat_id and role in {"user", "assistant_reply"}:
@@ -214,7 +244,7 @@ def record(
                 interlocutor_id=interlocutor_id,
                 role=role,
                 source_type=src,
-                content=content,
+                content=stored_content,
                 affect_json=affect_json,
                 ts=ts,
             )
@@ -229,13 +259,13 @@ def record(
                 chat_id=chat_id,
                 interlocutor_id=interlocutor_id,
                 role=role,
-                content=content,
+                content=stored_content,
             )
         except Exception as fts_err:
             _log.warning("[episodic] FTS5 写入失败（narrative 已提交，search 将退回 .md 扫描）: %s", fts_err)
 
 
-def _load_recent_blocks(path: Path, n_recent: int) -> str:
+def _load_recent_blocks(path: Path, n_recent: int, *, max_chars: int | None = None) -> str:
     """从文件尾部逆向分页读取最近 n_recent 条完整情节块（--- 分隔），凑够即停。
 
     统一机制（Tulving 1983 episode unit）：
@@ -282,12 +312,31 @@ def _load_recent_blocks(path: Path, n_recent: int) -> str:
             if text:
                 blocks.append(text)
 
-    # blocks 从新到旧，逆转为时间升序后拼接
-    recent = list(reversed(blocks[:n_recent]))
+    # blocks 从新到旧；应用 max_chars 时保留最新完整块，只有最新单块超限才块内裁剪。
+    selected_newest_first: list[str] = []
+    total_chars = 0
+    limit = int(max_chars or 0)
+    for block in blocks[:n_recent]:
+        if limit > 0:
+            separator_chars = 5 if selected_newest_first else 0
+            if total_chars + separator_chars + len(block) > limit:
+                if not selected_newest_first:
+                    selected_newest_first.append(_clip_context_block(block, limit=limit))
+                break
+            total_chars += separator_chars + len(block)
+        selected_newest_first.append(block)
+
+    recent = list(reversed(selected_newest_first))
     return "\n---\n".join(recent)
 
 
-def load_for_speaker_recognition(memory, interlocutor_id: str | None, *, n_recent: int = 5) -> str:
+def load_for_speaker_recognition(
+    memory,
+    interlocutor_id: str | None,
+    *,
+    n_recent: int = 5,
+    max_chars: int | None = 3000,
+) -> str:
     """取最近 n_recent 条完整交互块，专用于说话人识别（recognition，非 recall）。
 
     科学依据：
@@ -298,12 +347,18 @@ def load_for_speaker_recognition(memory, interlocutor_id: str | None, *, n_recen
     """
     if not interlocutor_id:
         return ""
-    return _load_recent_blocks(memory._interlocutor_path(interlocutor_id), n_recent)
+    return _load_recent_blocks(memory._interlocutor_path(interlocutor_id), n_recent, max_chars=max_chars)
 
 
-def load_for_context(memory, task_id: str | None, n_recent: int = 20) -> str:
+def load_for_context(
+    memory,
+    task_id: str | None,
+    n_recent: int = 20,
+    *,
+    max_chars: int | None = None,
+) -> str:
     """读取情节记忆，注入 LLM context；取最近 n_recent 条完整事件块。"""
-    return _load_recent_blocks(memory._resolve_task_path(task_id), n_recent)
+    return _load_recent_blocks(memory._resolve_task_path(task_id), n_recent, max_chars=max_chars)
 
 
 def load_for_chat_context(
@@ -316,7 +371,7 @@ def load_for_chat_context(
     """读取 chat 维度的情节连续性，跨 task 保留同一 chat 的完整对话线索。"""
     if not chat_id:
         return ""
-    return _load_recent_blocks(memory._chat_path(chat_id), n_recent)
+    return _load_recent_blocks(memory._chat_path(chat_id), n_recent, max_chars=max_chars)
 
 
 def load_for_interlocutor_context(
@@ -329,7 +384,7 @@ def load_for_interlocutor_context(
     """读取当前交互对象维度的情节连续性，跨 chat 保留同一对象的互动片段。"""
     if not interlocutor_id:
         return ""
-    return _load_recent_blocks(memory._interlocutor_path(interlocutor_id), n_recent)
+    return _load_recent_blocks(memory._interlocutor_path(interlocutor_id), n_recent, max_chars=max_chars)
 
 
 def load_for_task_narrative(memory, task_id: str | None, n_recent: int = 20) -> str:

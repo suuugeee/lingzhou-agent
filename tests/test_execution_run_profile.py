@@ -93,6 +93,7 @@ def test_resolve_execution_profile_preserves_explicit_task_tier():
         "reader",
         "demo.exec",
         run_type_routing={RUN_TYPE_EXEC: "reasoner"},
+        registry=_Registry(),
     ) == (RUN_TYPE_EXEC, WORKER_EXEC, "reader")
 
 

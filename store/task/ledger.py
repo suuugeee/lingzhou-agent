@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from .base import BaseAsyncStore
+from .compact import compact_runtime_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,14 +53,14 @@ class LedgerStore(BaseAsyncStore):
             (
                 op,
                 key,
-                str(value) if value is not None else "",
+                compact_runtime_text(value, marker_label="life_ledger value"),
                 scope,
                 source,
                 int(accepted),
                 run_id,
-                reason,
+                compact_runtime_text(reason, marker_label="life_ledger reason"),
                 proposal_hash,
-                decision_basis,
+                compact_runtime_text(decision_basis, marker_label="life_ledger decision_basis"),
             ),
         )
         await self._db.commit()

@@ -80,7 +80,8 @@ def _build_recovery_fallback_action(
     next_verification: str,
     registry: Any | None,
 ) -> tuple[str, dict[str, Any]] | None:
-    lowered = str(next_verification or "").lower()
+    text = str(next_verification or "")
+    lowered = text.lower()
     getter = getattr(registry, "get", None)
 
     def _has_tool(name: str) -> bool:
@@ -91,13 +92,24 @@ def _build_recovery_fallback_action(
         except Exception:
             return False
 
-    if "probe.run" in lowered and _has_tool("probe.run"):
+    def _mentions_blocked_tool(name: str) -> bool:
+        index = lowered.find(name)
+        if index < 0:
+            return False
+        window = lowered[max(0, index - 36): index + len(name) + 12]
+        return any(marker in window for marker in (
+            "不要", "不再", "不能", "禁止", "停止", "避免", "别",
+            "do not", "don't", "avoid", "stop",
+        ))
+
+    if "probe.run" in lowered and not _mentions_blocked_tool("probe.run") and _has_tool("probe.run"):
         return "probe.run", {}
     if (
         any(
             marker in lowered
             for marker in ("memory.search", "查找", "搜索", "检索", "记录", "历史")
         )
+        and not _mentions_blocked_tool("memory.search")
         and _has_tool("memory.search")
     ):
         return "memory.search", {"query": next_verification[:420], "top_k": 5}
@@ -355,6 +367,60 @@ def enforce_problem_solving_guard(
     )
 
 
+def _memory_search_query_is_control_text(query: str) -> bool:
+    text = str(query or "").strip()
+    if not text:
+        return False
+    lowered = text.lower()
+    if "memory.search" not in lowered:
+        return False
+    return any(marker in lowered for marker in (
+        "不要", "不再", "不能", "禁止", "停止", "避免", "别",
+        "do not", "don't", "avoid", "stop",
+    ))
+
+
+def _enforce_memory_search_query_boundary(
+    output: JudgmentOutput,
+    *,
+    registry: Any | None = None,
+) -> JudgmentOutput:
+    if output.decision != "act" or output.chosen_action_id != "memory.search":
+        return output
+    query = str((output.params or {}).get("query") or "")
+    if not _memory_search_query_is_control_text(query):
+        return output
+    if not _registry_has(registry, "task.workbench"):
+        return JudgmentOutput(
+            decision="wait",
+            rationale="memory.search 的 query 是控制/禁令文本，不应作为检索词执行；缺少 task.workbench，先暂停。",
+            **_carry_output_fields(output),
+        )
+    return build_workbench_action(
+        workbench={
+            "domain": "runtime-loop",
+            "intent": "阻止把控制约束当作 memory.search 查询重复执行",
+            "hypothesis": "当前 query 描述的是不要重复 memory.search 的恢复约束，不是可检索的信息需求。",
+            "evidence": [
+                f"memory.search query={query[:240]}",
+                "直接执行会重复低信息检索并扩大上下文。",
+            ],
+            "recovery_state": "memory_search_control_query_gated",
+            "next_verification": (
+                "先基于最近一次 memory.search 命中形成结论；若证据仍不足，"
+                "改用具体语义节点 ID、file.read 或 shell.run 执行不同证据源验证。"
+            ),
+            "completion_checks": [
+                "没有把控制/禁令文本作为 memory.search query 执行。",
+                "下一步验证指向不同证据源或明确结论收敛。",
+            ],
+        },
+        rationale="memory.search query 是控制/禁令文本，改写为 task.workbench 收敛约束。",
+        source_action=output,
+        next_step=output.next_step,
+    )
+
+
 async def normalize_judgment_output(
     executor: Any,
     output: JudgmentOutput,
@@ -376,6 +442,7 @@ async def normalize_judgment_output(
     output = normalize_reply_pseudo_tool(output)
     output = enforce_action_first_progress(output, context_text=context_text, registry=registry)
     output = enforce_problem_solving_guard(output, context_text=context_text, registry=registry)
+    output = _enforce_memory_search_query_boundary(output, registry=registry)
     output = _enforce_recovery_continuation(output, context_text=context_text, registry=registry)
     return normalize_action_shape(
         output,

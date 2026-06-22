@@ -400,8 +400,9 @@ async def resolve_focus_task(
     if current_focus is not None:
         if not normalized_chat_id or await task_matches_chat(loop, current_focus, normalized_chat_id):
             return current_focus
-        if not fallback_active:
-            return None
+        if fallback_active:
+            return current_focus
+        return None
 
     active_task = await _safe_get_active(task_store)
     if not normalized_chat_id:
@@ -418,7 +419,7 @@ async def resolve_tick_dispatch_context(
     source: str,
     chat_id: str | None = None,
     include_waiting: bool = False,
-    fallback_active: bool = False,
+    fallback_active: bool = True,
 ) -> TickDispatchContext:
     """返回可复用的 tick 分发上下文（分发周期、链路键、当前活跃任务）。"""
     normalized_chat_id = _normalize_chat_id(chat_id)
@@ -435,12 +436,20 @@ async def resolve_tick_dispatch_context(
         )
     chain_chat_id = normalized_chat_id if active_task is None else None
     chain_key = "default"
-    with contextlib.suppress(Exception):
+    try:
         chain_key = loop._resolve_tick_chain_key(
             active_task=active_task,
             chat_id=chain_chat_id,
             source=source,
         )
+    except TypeError:
+        with contextlib.suppress(Exception):
+            chain_key = loop._resolve_tick_chain_key(
+                active_task=active_task,
+                source=source,
+            )
+    except Exception:
+        pass
     return TickDispatchContext(
         dispatch_cycle=dispatch_cycle,
         chain_key=chain_key,

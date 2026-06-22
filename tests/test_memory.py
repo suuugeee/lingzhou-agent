@@ -137,6 +137,51 @@ def test_semantic_retrieve_prefers_stable_long_term_memory_over_recent_event_ech
         assert results[0]["id"] == "stable-fact"
 
 
+def test_semantic_retrieve_demotes_operational_memory_kinds():
+    from store.semantic import MemoryNode, SemanticMemory
+
+    now_ts = datetime.now(UTC).isoformat()
+    old_ts = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+
+    with tempfile.TemporaryDirectory() as d:
+        sm = SemanticMemory(Path(d), decay_lambda=0.0)
+        sm.upsert(MemoryNode(
+            id="durable-skill",
+            kind="learned_skill",
+            title="runtime db 膨胀修复",
+            body="有效做法是保留可复用结论，过滤运行噪声。",
+            activation=0.55,
+            importance=0.85,
+            source="wm_consolidation",
+            created_at=old_ts,
+        ))
+        sm.upsert(MemoryNode(
+            id="raw-monitor",
+            kind="run_monitor",
+            title="runtime db 膨胀修复",
+            body="运行监控输出 runtime db 膨胀修复 stdout stderr progress snapshot",
+            activation=1.0,
+            importance=0.0,
+            source="execution/run_monitor",
+            created_at=now_ts,
+        ))
+        sm.upsert(MemoryNode(
+            id="meta-process",
+            kind="meta_reflection",
+            title="runtime db 膨胀修复",
+            body="继续观察 runtime db 膨胀修复，下一步继续分析。",
+            activation=1.0,
+            importance=0.0,
+            source="execution/meta_reflection",
+            created_at=now_ts,
+        ))
+
+        results = sm.retrieve("runtime db 膨胀修复", top_k=3)
+
+        assert results
+        assert results[0]["id"] == "durable-skill"
+
+
 def test_semantic_migrates_legacy_person_profile_nodes_to_interlocutor_profile():
     from store.semantic import SemanticMemory
 
@@ -167,6 +212,30 @@ def test_semantic_migrates_legacy_person_profile_nodes_to_interlocutor_profile()
         assert "interlocutor_profile" in migrated.tags
         assert "interlocutor:person-bat" in migrated.tags
         assert "person_profile" not in migrated.tags
+
+
+def test_semantic_upsert_clips_oversized_node_json():
+    from store.semantic import MemoryNode, SemanticMemory
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        semantic = SemanticMemory(root, decay_lambda=0.0)
+        huge_body = "A" * (2 * 1024 * 1024 + 5000) + "TAIL"
+
+        semantic.upsert(MemoryNode(
+            id="huge-node",
+            kind="fact",
+            title="huge",
+            body=huge_body,
+        ))
+
+        raw = json.loads((root / "nodes" / "huge-node.json").read_text(encoding="utf-8"))
+        stored = semantic.get("huge-node")
+
+        assert len(raw["body"]) < len(huge_body)
+        assert raw["body"].endswith("TAIL")
+        assert stored is not None
+        assert len(stored.body) == len(raw["body"])
 
 
 def test_semantic_startup_does_not_rebuild_index_when_fts_is_unavailable(monkeypatch):
@@ -335,6 +404,30 @@ def test_episodic_no_rotation():
         assert len(events) == 20
 
 
+def test_episodic_event_compacts_oversized_payload():
+    from store.episodic import EpisodicMemory
+
+    huge = "E" * 18_000 + "TAIL"
+    with tempfile.TemporaryDirectory() as d:
+        ep = EpisodicMemory(Path(d), max_events=10)
+
+        ep.record_event(
+            "perception",
+            {
+                "summary": huge,
+                "samples": [{"index": idx, "raw": huge} for idx in range(90)],
+            },
+        )
+
+        events = ep.list_events("perception", limit=10)
+        assert len(events) == 1
+        assert "runtime store truncated chars=" in events[0]["summary"]
+        assert events[0]["summary"].endswith("TAIL")
+        assert "runtime store truncated chars=" in events[0]["samples"][0]["raw"]
+        assert events[0]["samples"][39]["_persistent_omitted_items"] == 11
+        assert events[0]["samples"][-1]["index"] == 89
+
+
 def test_semantic_store_reflection_title_uses_unique_suffix():
     from store.semantic import SemanticMemory
 
@@ -391,6 +484,238 @@ def test_build_consolidation_plan_extracts_explicit_user_facts_and_semantic_prom
     assert daily_summary is not None
     assert daily_summary.kind == "daily_summary"
     assert daily_summary.source == "daily_consolidation"
+
+
+def test_consolidation_skips_operational_tool_traces_by_default():
+    from core.config_models import MemoryConfig
+    from memory.consolidation import build_consolidation_plan
+
+    plan = build_consolidation_plan(
+        [
+            {
+                "kind": "file.read",
+                "content": "[file.read] " + "A" * 200,
+                "priority": 0.96,
+            },
+            {
+                "kind": "execute_result",
+                "content": "[execute_result] " + "B" * 200,
+                "priority": 0.96,
+            },
+            {
+                "kind": "run_monitor",
+                "content": "[Run 监控] running=3 finished=0",
+                "priority": 0.96,
+            },
+        ],
+        task_id="42",
+        task_title="memory routing",
+        memory_cfg=MemoryConfig(),
+        emotion_valence=0.63,
+    )
+
+    assert plan.semantic_nodes == []
+
+
+def test_consolidation_can_explicitly_promote_execute_result():
+    from core.config_models import MemoryConfig
+    from memory.consolidation import build_consolidation_plan
+
+    cfg = MemoryConfig(promotion_semantic_kinds=["execute_result"])
+    plan = build_consolidation_plan(
+        [
+            {
+                "kind": "execute_result",
+                "content": "[execute_result] 工具结果已人工标记为需要长期保留。",
+                "priority": 0.5,
+            },
+        ],
+        task_id="42",
+        task_title="memory routing",
+        memory_cfg=cfg,
+        emotion_valence=0.63,
+    )
+
+    assert len(plan.semantic_nodes) == 1
+    assert plan.semantic_nodes[0].kind == "task_progress"
+
+
+def test_consolidation_rejects_raw_operational_trace_even_when_explicitly_allowed():
+    from core.config_models import MemoryConfig
+    from memory.consolidation import build_consolidation_plan
+
+    cfg = MemoryConfig(promotion_semantic_kinds=["execute_result"])
+    raw_stdout = "\n".join(
+        f"stdout line {idx} status=running run_id=demo command: pytest {'x' * 260}"
+        for idx in range(12)
+    )
+    plan = build_consolidation_plan(
+        [
+            {
+                "kind": "execute_result",
+                "content": f"[execute_result]\n{raw_stdout}",
+                "priority": 0.96,
+            },
+        ],
+        task_id="42",
+        task_title="memory routing",
+        memory_cfg=cfg,
+        emotion_valence=0.63,
+    )
+
+    assert plan.semantic_nodes == []
+
+
+def test_consolidation_episodic_summary_omits_raw_operational_trace():
+    from core.config_models import MemoryConfig
+    from memory.consolidation import build_consolidation_plan
+
+    raw_stdout = "\n".join(
+        f"stdout line {idx} status=running run_id=demo command: pytest {'z' * 260}"
+        for idx in range(12)
+    )
+    plan = build_consolidation_plan(
+        [
+            {
+                "kind": "execute_result",
+                "content": f"[execute_result]\n{raw_stdout}",
+                "priority": 0.96,
+            },
+        ],
+        task_id="42",
+        task_title="memory routing",
+        memory_cfg=MemoryConfig(),
+        emotion_valence=0.63,
+    )
+
+    assert "omitted raw operational trace" in plan.episodic_summary
+    assert "sha256=" in plan.episodic_summary
+    assert "z" * 120 not in plan.episodic_summary
+
+
+def test_consolidation_does_not_promote_unresolved_self_drive_signal():
+    from core.config_models import MemoryConfig
+    from memory.consolidation import build_consolidation_plan
+
+    signal = "\n".join([
+        "[自驱事件]",
+        "created_self_drive_task: 17",
+        "candidate_task_title: 分析近期失败模式",
+        "candidate_next_step: 先读取日志",
+        "open_questions:",
+        "- 是否值得创建任务？",
+        "available_directions: create_self_drive_task | gather_evidence | ignore_signal",
+    ])
+    plan = build_consolidation_plan(
+        [
+            {
+                "kind": "self_drive",
+                "content": signal,
+                "priority": 0.99,
+            },
+        ],
+        task_id="42",
+        task_title="memory routing",
+        memory_cfg=MemoryConfig(promotion_semantic_kinds=["self_drive"]),
+        emotion_valence=0.63,
+    )
+
+    assert plan.semantic_nodes == []
+
+
+def test_consolidation_episodic_summary_omits_unresolved_self_drive_signal():
+    from core.config_models import MemoryConfig
+    from memory.consolidation import build_consolidation_plan
+
+    signal = "\n".join([
+        "[自驱事件]",
+        "created_self_drive_task: 17",
+        "candidate_task_title: 分析近期失败模式",
+        "candidate_task_goal: " + "重复空转" * 200,
+        "available_directions: create_self_drive_task | gather_evidence | ignore_signal",
+    ])
+    plan = build_consolidation_plan(
+        [
+            {
+                "kind": "self_drive",
+                "content": signal,
+                "priority": 0.99,
+            },
+        ],
+        task_id="42",
+        task_title="memory routing",
+        memory_cfg=MemoryConfig(promotion_semantic_kinds=["self_drive"]),
+        emotion_valence=0.63,
+    )
+
+    assert "omitted unresolved self-drive signal" in plan.episodic_summary
+    assert "sha256=" in plan.episodic_summary
+    assert "重复空转" * 20 not in plan.episodic_summary
+
+
+def test_consolidation_can_promote_refined_self_drive_learning():
+    from core.config_models import MemoryConfig
+    from memory.consolidation import build_consolidation_plan
+
+    plan = build_consolidation_plan(
+        [
+            {
+                "kind": "self_drive",
+                "content": "可复用经验：空转自驱任务必须先复用已有 open self_drive，再考虑创建新任务。",
+                "priority": 0.92,
+            },
+        ],
+        task_id="42",
+        task_title="memory routing",
+        memory_cfg=MemoryConfig(promotion_semantic_kinds=["self_drive"]),
+        emotion_valence=0.63,
+    )
+
+    assert len(plan.semantic_nodes) == 1
+    assert plan.semantic_nodes[0].kind == "drive_trace"
+
+
+def test_consolidation_rejects_low_value_process_reflection():
+    from core.config_models import MemoryConfig
+    from memory.consolidation import build_consolidation_plan
+
+    plan = build_consolidation_plan(
+        [
+            {
+                "kind": "self_awareness",
+                "content": "继续分析近期失败模式，下一步沉淀失败经验并观察是否改善。",
+                "priority": 0.99,
+            },
+        ],
+        task_id="42",
+        task_title="memory routing",
+        memory_cfg=MemoryConfig(promotion_semantic_kinds=["self_awareness"]),
+        emotion_valence=0.63,
+    )
+
+    assert plan.semantic_nodes == []
+
+
+def test_consolidation_keeps_durable_reflection_rule():
+    from core.config_models import MemoryConfig
+    from memory.consolidation import build_consolidation_plan
+
+    plan = build_consolidation_plan(
+        [
+            {
+                "kind": "self_awareness",
+                "content": "可复用经验：裁剪长期记忆时必须保留结论、证据摘要、字符数和 sha256，禁止保存完整原始 stdout。",
+                "priority": 0.92,
+            },
+        ],
+        task_id="42",
+        task_title="memory routing",
+        memory_cfg=MemoryConfig(promotion_semantic_kinds=["self_awareness"]),
+        emotion_valence=0.63,
+    )
+
+    assert len(plan.semantic_nodes) == 1
+    assert "sha256" in plan.semantic_nodes[0].body
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -594,6 +919,35 @@ def test_episodic_record_writes_daily_memory_file():
         assert "继续处理" in recent_daily
 
 
+def test_episodic_record_clips_oversized_content_across_stores():
+    from store.episodic import EpisodicMemory
+
+    huge = "github " + "Z" * 20000 + "TAIL"
+    with tempfile.TemporaryDirectory() as d:
+        memory_dir = Path(d)
+        ep = EpisodicMemory(memory_dir, max_events=0)
+
+        ep.record("assistant", huge, task_id="task-huge")
+
+        task_text = EpisodicMemory.narrative_path_for_dir(memory_dir, "task-huge").read_text(encoding="utf-8")
+        daily_text = EpisodicMemory.daily_path_for_dir(memory_dir, datetime.now(UTC).strftime("%Y-%m-%d")).read_text(encoding="utf-8")
+        with ep._db_session():
+            narrative_content = ep._conn.execute(
+                "SELECT content FROM narrative WHERE task_id='task-huge'"
+            ).fetchone()[0]
+            fts_content = ep._conn.execute(
+                "SELECT content FROM narrative_fts WHERE task_id='task-huge'"
+            ).fetchone()[0]
+
+        assert "episodic record truncated" in task_text
+        assert "episodic record truncated" in daily_text
+        assert len(task_text) < len(huge)
+        assert task_text.endswith("TAIL\n")
+        assert narrative_content == fts_content
+        assert "episodic record truncated" in narrative_content
+        assert narrative_content.endswith("TAIL")
+
+
 def test_episodic_load_for_chat_context_keeps_same_chat_cross_task_history():
     from store.episodic import EpisodicMemory
 
@@ -614,6 +968,43 @@ def test_episodic_load_for_chat_context_keeps_same_chat_cross_task_history():
         assert "chat-1 第二个任务里的续聊" in text
         assert "chat-2 的无关消息" not in text
         assert "内部推理不应进入 chat continuity" not in text
+
+
+def test_episodic_load_for_context_variants_respect_max_chars():
+    from store.episodic import EpisodicMemory
+
+    huge = "START" + "C" * 5000 + "TAIL"
+    with tempfile.TemporaryDirectory() as d:
+        memory_dir = Path(d)
+        ep = EpisodicMemory(memory_dir, max_events=0)
+
+        ep.record(
+            "user",
+            "older chat block should be omitted when latest block exceeds budget",
+            task_id="task-1",
+            chat_id="chat-large",
+            interlocutor_id="interlocutor-large",
+        )
+        ep.record(
+            "assistant_reply",
+            huge,
+            task_id="task-2",
+            chat_id="chat-large",
+            interlocutor_id="interlocutor-large",
+        )
+
+        task_text = ep.load_for_context("task-2", n_recent=20, max_chars=700)
+        chat_text = ep.load_for_chat_context("chat-large", n_recent=20, max_chars=700)
+        interlocutor_text = ep.load_for_interlocutor_context("interlocutor-large", n_recent=20, max_chars=700)
+
+        for text in (task_text, chat_text, interlocutor_text):
+            assert "older chat block should be omitted" not in text
+            assert "START" in text
+            assert "TAIL" in text
+            assert "episodic context truncated" in text
+            assert len(text) <= 700
+
+        assert len(ep.load_for_context("task-2", n_recent=20, max_chars=20)) <= 20
 
 
 def test_episodic_get_recent_turns_supports_chat_scope():

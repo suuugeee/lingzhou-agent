@@ -70,6 +70,48 @@ async def _state_writer_unknown_op_returns_rejected_result():
     assert result.reason == "unknown_op"
 
 
+def test_state_writer_rejects_low_value_semantic_from_internal_sources():
+    asyncio.run(_state_writer_rejects_low_value_semantic_from_internal_sources())
+
+
+async def _state_writer_rejects_low_value_semantic_from_internal_sources():
+    from core.metabolic.proposal import StateProposal
+    from core.metabolic.state_writer import apply_state_write
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "runtime.db")
+        semantic = SemanticMemory(root / "memory")
+        await store.open()
+        try:
+            result = await apply_state_write(
+                store,
+                StateProposal(
+                    op="add_semantic_memory",
+                    key="insight-low",
+                    value={
+                        "id": "insight-low",
+                        "kind": "learned_insight",
+                        "title": "继续观察",
+                        "body": "下一步继续分析近期失败模式，后续观察是否还有类似现象。",
+                        "activation": 0.9,
+                        "source": "loop/tick/reflection",
+                    },
+                    source="loop/tick/reflection",
+                ),
+                accepted=True,
+                semantic_memory=semantic,
+            )
+
+            assert result.accepted is False
+            assert result.reason == "semantic_low_value_process_note"
+            assert semantic.get("insight-low") is None
+        finally:
+            await store.close()
+
+
 def test_metabolic_submit_set_fact_writes_to_store_and_ledger():
     asyncio.run(_metabolic_submit_set_fact_writes_to_store_and_ledger())
 
@@ -333,6 +375,60 @@ async def _run_lifecycle_update_run_through_metabolic() -> None:
             await store.close()
 
 
+def test_run_lifecycle_compacts_large_persistent_payloads():
+    asyncio.run(_run_lifecycle_compacts_large_persistent_payloads())
+
+
+async def _run_lifecycle_compacts_large_persistent_payloads() -> None:
+    from core.metabolic import add_run, update_run
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "runtime.db")
+        await store.open()
+        try:
+            huge = "A" * 20000 + "TAIL"
+            items = [{"index": idx, "value": huge} for idx in range(90)]
+            run_id = await add_run(
+                store,
+                task_id=7,
+                run_type="tool_chain",
+                worker_type="tool-chain-worker",
+                status="running",
+                source="test/run_lifecycle/compact_before",
+            )
+            await update_run(
+                store,
+                run_id,
+                status="succeeded",
+                output_json={"summary": huge, "items": items, "state_delta": {"body": huge}},
+                log_text=huge,
+                progress=huge,
+                source="test/run_lifecycle/compact",
+                proposal_run_id=run_id,
+                decision_basis="unit_test",
+            )
+
+            run = await store.get_run_by_id(run_id)
+            assert run is not None
+            assert len(run.output_json["summary"]) < len(huge)
+            assert "persistent storage truncated" in run.output_json["summary"]
+            assert "TAIL" in run.output_json["summary"]
+            assert run.output_json["items"][39]["_persistent_omitted_items"] == 11
+            assert run.output_json["items"][-1]["index"] == 89
+            assert len(run.log_text) < len(huge)
+            assert len(run.progress) < len(huge)
+
+            rows = await store.ledger_recent(limit=5)
+            update_rows = [row for row in rows if row["op"] == "update_run"]
+            assert update_rows
+            assert len(update_rows[0]["value"]) <= 16000
+            assert "life_ledger value truncated" in update_rows[0]["value"]
+            assert "A" * 20000 not in update_rows[0]["value"]
+        finally:
+            await store.close()
+
+
 def test_metabolic_submit_failed_write_records_ledger_and_reraises():
     asyncio.run(_metabolic_submit_failed_write_records_ledger_and_reraises())
 
@@ -404,7 +500,7 @@ async def _metabolic_submit_failed_write_records_ledger_and_reraises():
             "source": "test/failure",
             "accepted": False,
             "run_id": 42,
-            "reason": "write_error:RuntimeError:write failed task=7",
+            "reason": "write_error | RuntimeError | write failed task=7",
             "proposal_hash": store.ledger_rows[0]["proposal_hash"],
             "decision_basis": "",
         }

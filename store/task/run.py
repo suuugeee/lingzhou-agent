@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from .base import BaseAsyncStore
+from .compact import compact_runtime_mapping, compact_runtime_text
 from .models import Run
 
 
@@ -28,17 +29,17 @@ class RunStore(BaseAsyncStore):
         extras: dict[str, Any] | None = None,
     ) -> int:
         data = {
-            "input_json": input_json or {},
-            "output_json": output_json or {},
-            "log_text": log_text,
-            "error_text": error_text,
+            "input_json": compact_runtime_mapping(input_json),
+            "output_json": compact_runtime_mapping(output_json),
+            "log_text": compact_runtime_text(log_text, marker_label="run log"),
+            "error_text": compact_runtime_text(error_text, marker_label="run error"),
             "tool_name": tool_name,
             "session_id": session_id,
             "model_tier": model_tier,
-            "progress": progress,
+            "progress": compact_runtime_text(progress, marker_label="run progress"),
         }
         if extras:
-            data.update(extras)
+            data.update(compact_runtime_mapping(extras))
         now = datetime.now(UTC).isoformat()
         async with self._db.execute(
             "INSERT INTO runs (task_id, run_type, worker_type, status, created_at, started_at, data) VALUES (?,?,?,?,?,?,?)",
@@ -102,19 +103,19 @@ class RunStore(BaseAsyncStore):
         if status:
             run.status = status
         if output_json is not None:
-            run.output_json = output_json
+            run.output_json = compact_runtime_mapping(output_json)
         if log_text is not None:
-            run.log_text = log_text
+            run.log_text = compact_runtime_text(log_text, marker_label="run log")
         if error_text is not None:
-            run.error_text = error_text
+            run.error_text = compact_runtime_text(error_text, marker_label="run error")
         if session_id is not None:
             run.session_id = session_id
         if model_tier is not None:
             run.model_tier = model_tier
         if progress is not None:
-            run.progress = progress
+            run.progress = compact_runtime_text(progress, marker_label="run progress")
         if extras:
-            run.extras.update(extras)
+            run.extras.update(compact_runtime_mapping(extras))
         if run.status in {"succeeded", "failed", "cancelled"} and not run.completed_at:
             run.completed_at = datetime.now(UTC).isoformat()
         await self._db.execute(

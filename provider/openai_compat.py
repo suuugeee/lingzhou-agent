@@ -725,7 +725,6 @@ class OpenAICompatProvider:
         req_timeout = _request_timeout_override(self._client, level)
         target = self._resolve_url("/chat/completions")
 
-        headers = await self._request_headers()
         resp = await self._post_with_codex_oauth_retry(target, payload, req_timeout)
 
         # Copilot: on 400, refresh token and retry; still 400 → fallback without reasoning

@@ -102,6 +102,10 @@ def test_task_store_run_lifecycle():
     asyncio.run(_task_store_run_lifecycle())
 
 
+def test_task_store_compacts_oversized_runtime_payloads():
+    asyncio.run(_task_store_compacts_oversized_runtime_payloads())
+
+
 def test_task_store_find_similar_open_tasks():
     asyncio.run(_task_store_find_similar_open_tasks())
 
@@ -263,6 +267,109 @@ async def _task_store_run_lifecycle():
 
         runs = await store.list_runs(task_id=task_id)
         assert len(runs) == 1
+
+        await store.close()
+
+
+async def _task_store_compacts_oversized_runtime_payloads():
+    from store.task import TaskStore
+
+    huge = "A" * 18_000 + "TAIL"
+    huge_json = {"payload": huge, "items": [{"index": idx, "value": huge} for idx in range(90)]}
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "compact.db")
+        await store.open()
+
+        task_id = await store.add_task(
+            "T" * 2_000,
+            goal=huge,
+            next_step=huge,
+            state_json=huge_json,
+            extras={"raw_trace": huge},
+        )
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+        assert len(task.title) <= 1000
+        assert "task title truncated chars=" in task.title
+        assert "runtime store truncated chars=" in task.goal
+        assert task.goal.endswith("TAIL")
+        assert "runtime store truncated chars=" in task.state_json["payload"]
+        assert task.state_json["items"][39]["_persistent_omitted_items"] == 11
+        assert task.state_json["items"][-1]["index"] == 89
+
+        await store.update_task_result(task_id, {"raw_result": huge})
+        updated_task = await store.get_task_by_id(task_id)
+        assert updated_task is not None
+        assert "runtime store truncated chars=" in updated_task.result_json["raw_result"]
+
+        run_id = await store.add_run(
+            task_id=task_id,
+            input_json=huge_json,
+            log_text=huge,
+            extras={"raw_extra": huge},
+        )
+        await store.update_run(
+            run_id,
+            status="failed",
+            output_json={"raw_output": huge},
+            error_text=huge,
+        )
+        run = await store.get_run_by_id(run_id)
+        assert run is not None
+        assert "runtime store truncated chars=" in run.input_json["payload"]
+        assert "run log truncated chars=" in run.log_text
+        assert run.log_text.endswith("TAIL")
+        assert "runtime store truncated chars=" in run.output_json["raw_output"]
+        assert "run error truncated chars=" in run.error_text
+        assert "runtime store truncated chars=" in run.extras["raw_extra"]
+
+        await store.record_failure("tool_error", huge, context=huge, task_id=str(task_id))
+        failure = (await store.list_failures(limit=1))[0]
+        assert "failure summary truncated chars=" in failure.summary
+        assert "failure context truncated chars=" in failure.context
+
+        await store.set_fact("runtime:large_json", __import__("json").dumps(huge_json, ensure_ascii=False))
+        fact_value, found = await store.get_fact("runtime:large_json")
+        assert found
+        parsed_fact = __import__("json").loads(fact_value)
+        assert "runtime store truncated chars=" in parsed_fact["payload"]
+        assert parsed_fact["items"][39]["_persistent_omitted_items"] == 11
+        assert parsed_fact["items"][-1]["index"] == 89
+
+        await store.ledger_append(
+            "set_fact",
+            "runtime:large",
+            huge,
+            reason=huge,
+            decision_basis=huge,
+        )
+        ledger = await store.ledger_recent(limit=1)
+        assert "life_ledger value truncated chars=" in ledger[0]["value"]
+        assert "life_ledger reason truncated chars=" in ledger[0]["reason"]
+        assert "life_ledger decision_basis truncated chars=" in ledger[0]["decision_basis"]
+
+        await store.add_meta_reflection(
+            reflection_id="large-reflection",
+            target_kind="tool",
+            trigger="large",
+            loop_level="task",
+            diagnosis=huge,
+            proposal=huge,
+            verification_plan=huge,
+            extras={"raw_extra": huge},
+        )
+        reflection = (await store.list_meta_reflections(limit=1))[0]
+        assert "meta_reflection diagnosis truncated chars=" in reflection.diagnosis
+        assert "meta_reflection proposal truncated chars=" in reflection.proposal
+        assert "meta_reflection verification_plan truncated chars=" in reflection.verification_plan
+        assert "runtime store truncated chars=" in reflection.extras["raw_extra"]
+
+        chat_huge = "C" * 40_000 + "TAIL"
+        message_id = await store.add_chat_message("user", chat_huge, chat_id="chat-1")
+        messages = await store.get_chat_messages_since(message_id - 1, chat_id="chat-1")
+        assert "chat message truncated chars=" in messages[0]["content"]
+        assert messages[0]["content"].endswith("TAIL")
 
         await store.close()
 
@@ -534,6 +641,88 @@ def test_task_wait_rejects_unknown_wait_kind():
 
 def test_task_wait_rejects_blank_wait_kind_with_recovery_hint():
     asyncio.run(_task_wait_rejects_blank_wait_kind_with_recovery_hint())
+
+
+def test_task_wait_blocks_self_drive_evidence_task_without_dependency():
+    asyncio.run(_task_wait_blocks_self_drive_evidence_task_without_dependency())
+
+
+def test_task_wait_allows_self_drive_evidence_task_with_process_dependency():
+    asyncio.run(_task_wait_allows_self_drive_evidence_task_with_process_dependency())
+
+
+async def _task_wait_blocks_self_drive_evidence_task_without_dependency():
+    from store.task import TaskStore
+    from tools.task import task_wait
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "self-drive-evidence-wait.db")
+        await store.open()
+        task_id = await store.add_task(
+            "自驱取证任务",
+            goal="不能把可执行取证任务直接挂起",
+            source="self_drive",
+            status="in_progress",
+            next_step="读取最近 daemon-stdout.log 并确认是否仍有重复 wait_no_progress。",
+        )
+
+        ctx = _tool_ctx(task_store=store)
+        wait_res = await task_wait(
+            {
+                "task_id": task_id,
+                "wait_kind": "external",
+                "next_step": "读取最近 daemon-stdout.log 并确认是否仍有重复 wait_no_progress。",
+            },
+            ctx,
+        )
+
+        assert wait_res.skipped is True
+        assert wait_res.error == "SelfDriveEvidenceRequiredBeforeWait"
+        assert "file.read" in wait_res.state_delta["suggested_tools"]
+
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+        assert task.status == "in_progress"
+
+        await store.close()
+
+
+async def _task_wait_allows_self_drive_evidence_task_with_process_dependency():
+    from store.task import TaskStore
+    from tools.task import task_wait
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "self-drive-evidence-process-wait.db")
+        await store.open()
+        task_id = await store.add_task(
+            "自驱等待进程",
+            goal="明确进程依赖时允许等待",
+            source="self_drive",
+            status="in_progress",
+            next_step="读取进程输出并确认测试结果。",
+        )
+
+        ctx = _tool_ctx(task_store=store)
+        wait_res = await task_wait(
+            {
+                "task_id": task_id,
+                "wait_kind": "process",
+                "wait_key": "exec-123",
+                "next_step": "读取进程输出并确认测试结果。",
+            },
+            ctx,
+        )
+
+        assert wait_res.skipped is False
+        assert wait_res.error is None
+
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+        assert task.status == "waiting"
+        assert task.wait_kind == "process"
+        assert task.wait_key == "exec-123"
+
+        await store.close()
 
 
 async def _task_wait_rejects_blank_wait_kind_with_recovery_hint():

@@ -14,6 +14,8 @@ from core.cortex import build_auto_cortex_result_patch
 from core.log_fields import execution_scope_fields
 from core.metabolic import add_semantic_memory, update_run, update_task_result
 from core.execution.run_profile import worker_limit_config_key
+from memory.consolidation import is_low_value_semantic_text
+from store.compact import compact_runtime_text
 from store.task import build_task_run_result_patch
 from tools.registry import ToolContext, ToolResult
 
@@ -48,6 +50,43 @@ def _clip_run_outcome_memory_field(text: str, *, limit: int = _RUN_OUTCOME_MEMOR
         + f"\n...[run_result memory truncated, omitted {omitted} chars]...\n"
         + value[-keep_each_side:]
     )
+
+
+def _fallback_upsert_semantic_memory(
+    semantic: Any,
+    *,
+    node_id: str,
+    kind: str,
+    title: str,
+    body: str,
+    activation: float,
+    valence: float,
+    tags: list[str],
+    source: str,
+) -> bool:
+    """Fallback semantic write that keeps metabolic quality guarantees."""
+    if is_low_value_semantic_text(kind, title, body):
+        _log.info(
+            "[memory-fallback] skip low-value semantic node id=%s kind=%s source=%s",
+            node_id,
+            kind,
+            source,
+        )
+        return False
+
+    from store.semantic import MemoryNode
+
+    semantic.upsert(MemoryNode(
+        id=node_id,
+        kind=kind,
+        title=compact_runtime_text(title, limit=1000, marker_label="semantic title"),
+        body=compact_runtime_text(body, marker_label="semantic body"),
+        activation=activation,
+        valence=valence,
+        tags=tags,
+        source=source,
+    ))
+    return True
 
 
 async def _load_durable_failure_policy(task_store: TaskStoreViewProtocol | None) -> dict[str, int]:
@@ -127,9 +166,11 @@ def _normalize_tool_result_text_fields(result: ToolResult) -> ToolResult:
     return result
 
 
-def _clip_log_text(value: Any) -> str:
+def _clip_log_text(value: Any, *, limit: int = 1600) -> str:
     text = str(value or "").replace("\n", "\\n").strip()
-    return text
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
 
 
 def _tool_result_log_fields(result: ToolResult) -> tuple[str, str, str]:
@@ -335,8 +376,8 @@ async def record_run_outcome_memory(
         )
     if semantic is None:
         return
-    from store.semantic import MemoryNode
-
+    if not is_failure:
+        return
     tags = [status]
     if tool_name:
         tags.append(tool_name)
@@ -380,15 +421,17 @@ async def record_run_outcome_memory(
         )
     except Exception:
         if semantic is not None:
-            semantic.upsert(MemoryNode(
-                id=f"run-result-{run_id}",
+            _fallback_upsert_semantic_memory(
+                semantic,
+                node_id=f"run-result-{run_id}",
                 kind="run_result",
                 title=f"[run#{run_id}] {tool_name or 'unknown'} {status}",
                 body="\n".join(body_parts),
                 activation=activation,
                 valence=valence,
                 tags=tags,
-            ))
+                source="execution/run_result",
+            )
 
 
 async def record_meta_reflection_memory(
@@ -426,8 +469,6 @@ async def record_meta_reflection_memory(
     writer_owner = metabolic or owner or task_store
     if semantic is None:
         return
-    from store.semantic import MemoryNode
-
     tags = ["meta_reflection", target_kind, loop_level, decision]
     if tool_name:
         tags.append(tool_name)
@@ -454,8 +495,9 @@ async def record_meta_reflection_memory(
             decision_basis=f"meta_reflection:{reflection_id}",
         )
     except Exception:
-        semantic.upsert(MemoryNode(
-            id=f"meta-reflection-{reflection_id}",
+        _fallback_upsert_semantic_memory(
+            semantic,
+            node_id=f"meta-reflection-{reflection_id}",
             kind="meta_reflection",
             title=f"[{decision}] {target_kind or 'reflection'} run#{run_id}",
             body=(
@@ -466,7 +508,8 @@ async def record_meta_reflection_memory(
             activation=0.8 if decision != "defer" else 0.7,
             valence=0.42 if decision == "rollback" else 0.58,
             tags=tags,
-        ))
+            source="execution/meta_reflection",
+        )
     if decision in {"apply", "rollback"}:
         rule_target = target_kind or "rule"
         rule_tool = tool_name or "unknown-tool"
@@ -492,8 +535,9 @@ async def record_meta_reflection_memory(
                 decision_basis=f"rule_revision:{reflection_id}",
             )
         except Exception:
-            semantic.upsert(MemoryNode(
-                id=f"rule-revision-{reflection_id}",
+            _fallback_upsert_semantic_memory(
+                semantic,
+                node_id=f"rule-revision-{reflection_id}",
                 kind="rule_revision",
                 title=f"[{decision}] {rule_target} via {rule_tool} run#{run_id}",
                 body=(
@@ -505,7 +549,8 @@ async def record_meta_reflection_memory(
                 activation=0.83,
                 valence=0.46 if decision == "rollback" else 0.62,
                 tags=[target_kind, decision, tool_name or ""] if tool_name else [target_kind, decision],
-            ))
+                source="execution/rule_revision",
+            )
 
 
 _LOW_VALUE_SUCCESS_TOOLS = frozenset({

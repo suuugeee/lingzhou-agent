@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import os
 import select
@@ -277,7 +278,15 @@ def _append_output(info: ProcessInfo, text: str) -> None:
 
 
 def _preview(text: str, limit: int) -> str:
-    return text
+    value = str(text or "")
+    if len(value) <= limit:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8", errors="replace")).hexdigest()
+    marker = f"\n...[exec output preview truncated chars={len(value)} sha256={digest}]...\n"
+    budget = max(0, limit - len(marker))
+    head = max(80, budget // 2)
+    tail = max(0, budget - head)
+    return value[:head] + marker + (value[-tail:] if tail else "")
 
 
 def _terminate_info(info: ProcessInfo, *, force: bool = False) -> None:

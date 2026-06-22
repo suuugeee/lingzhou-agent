@@ -91,8 +91,9 @@ def _resolve_wait_gap_seconds(
     cfg = loop._cfg
     if has_work:
         return max(float(cfg.loop.min_act_gap) / 1000.0, 0.2)
-    if loop._pending_idle_gap is not None:
-        return loop._pending_idle_gap
+    pending_idle_gap = getattr(loop, "_pending_idle_gap", None)
+    if pending_idle_gap is not None:
+        return pending_idle_gap
     if after_task is not None or getattr(loop, "_bootstrap_mode", "none") == "full":
         return cfg.loop.active_idle_gap / 1000.0 * arousal_factor
     return cfg.loop.max_idle_gap / 1000.0 * arousal_factor

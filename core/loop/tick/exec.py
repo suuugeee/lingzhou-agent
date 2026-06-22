@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
+import os
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -366,7 +368,9 @@ async def _apply_tick_model_strategy(
                 basis=basis,
             )
         else:
-            valid = normalize_routing_overrides(raw_overrides, catalog_path=loop._cfg.workspace_dir / "models.json")
+            workspace_dir = getattr(loop._cfg, "workspace_dir", None)
+            catalog_path = (workspace_dir / "models.json") if workspace_dir is not None else None
+            valid = normalize_routing_overrides(raw_overrides, catalog_path=catalog_path)
             if valid:
                 loop._pending_routing_overrides = valid
                 await _persist_routing_overrides(
@@ -492,6 +496,7 @@ async def _run_tick_maintenance(loop: Any, active_task: Task | None, cycle: int)
         wm_pressure < cfg.memory.consolidate_low_pressure_skip_threshold
         and (cycle % cfg.loop.consolidate_every != 0 or wm_pressure < loop._cfg.thresholds.wm_pressure_task)
     ):
+        await _maybe_run_auto_compaction(loop, cycle)
         return
 
     await loop._consolidate(active_task)
@@ -516,6 +521,139 @@ async def _run_tick_maintenance(loop: Any, active_task: Task | None, cycle: int)
     await loop._soul.sync_md()
     with contextlib.suppress(Exception):
         await loop._task_store.wal_checkpoint()
+    await _maybe_run_auto_compaction(loop, cycle)
+
+
+async def _maybe_run_auto_compaction(loop: Any, cycle: int) -> None:
+    memory_cfg = loop._cfg.memory
+    if not bool(getattr(memory_cfg, "auto_compact_enabled", False)):
+        return
+    every = max(1, int(getattr(memory_cfg, "auto_compact_every_ticks", 50) or 50))
+    if cycle % every != 0:
+        return
+    if bool(getattr(loop, "_auto_compact_running", False)):
+        return
+    loop._auto_compact_running = True
+
+    try:
+        reports: list[dict[str, Any]] = []
+        runtime_path = loop._cfg.db_path
+        runtime_min = int(getattr(memory_cfg, "auto_compact_runtime_db_min_bytes", 0) or 0)
+        if runtime_min > 0 and await asyncio.to_thread(_path_size_bytes, runtime_path) >= runtime_min:
+            from core.maintenance import compact_runtime_db
+
+            try:
+                reports.append({
+                    "kind": "runtime_db",
+                    **(await asyncio.to_thread(
+                        compact_runtime_db,
+                        runtime_path,
+                        apply=True,
+                        vacuum=bool(getattr(memory_cfg, "auto_compact_vacuum", False)),
+                    )),
+                })
+            except Exception as exc:
+                _log.warning("[maintenance] auto compact runtime_db failed: %s", exc)
+                reports.append(_auto_compaction_error_report("runtime_db", exc))
+
+        memory_dir = loop._cfg.memory_dir
+        memory_min = int(getattr(memory_cfg, "auto_compact_memory_dir_min_bytes", 0) or 0)
+        if memory_min > 0 and await asyncio.to_thread(_path_size_bytes, memory_dir) >= memory_min:
+            from core.maintenance import compact_memory_dir
+
+            try:
+                reports.append({
+                    "kind": "memory_dir",
+                    **(await asyncio.to_thread(
+                        compact_memory_dir,
+                        memory_dir,
+                        apply=True,
+                        vacuum=bool(getattr(memory_cfg, "auto_compact_vacuum", False)),
+                    )),
+                })
+            except Exception as exc:
+                _log.warning("[maintenance] auto compact memory_dir failed: %s", exc)
+                reports.append(_auto_compaction_error_report("memory_dir", exc))
+
+        await _record_auto_compaction_result(loop, cycle=cycle, reports=reports)
+        changed = [
+            report for report in reports
+            if int(report.get("changed_rows") or report.get("changed_files") or 0) > 0
+        ]
+        if not changed:
+            return
+
+        from memory.working import WMItem
+
+        summary = "; ".join(
+            f"{report['kind']} changed_rows={report.get('changed_rows', 0)} "
+            f"changed_files={report.get('changed_files', 0)} saved_bytes={report.get('saved_bytes', 0)}"
+            for report in changed
+        )
+        loop._wm.add(WMItem(
+            kind="self_awareness",
+            content=f"[自动记忆维护] cycle={cycle} compact 完成: {summary}",
+            priority=0.72,
+        ))
+        _log.info("[maintenance] auto compact cycle=%s %s", cycle, summary)
+    finally:
+        loop._auto_compact_running = False
+
+
+async def _record_auto_compaction_result(loop: Any, *, cycle: int, reports: list[dict[str, Any]]) -> None:
+    setter = getattr(loop._task_store, "set_fact", None)
+    if not callable(setter):
+        return
+    payload = {
+        "cycle": cycle,
+        "reports": [_compact_auto_compaction_report(report) for report in reports],
+    }
+    with contextlib.suppress(Exception):
+        await setter(
+            "maintenance:auto_compact:last",
+            json.dumps(payload, ensure_ascii=False),
+            scope="system",
+        )
+
+
+def _compact_auto_compaction_report(report: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "kind": report.get("kind"),
+        "error": report.get("error"),
+        "changed_rows": int(report.get("changed_rows") or 0),
+        "changed_files": int(report.get("changed_files") or 0),
+        "saved_bytes": int(report.get("saved_bytes") or 0),
+        "vacuumed": bool(report.get("vacuumed")),
+    }
+
+
+def _auto_compaction_error_report(kind: str, exc: Exception) -> dict[str, Any]:
+    return {
+        "kind": kind,
+        "error": f"{type(exc).__name__}: {exc}",
+        "changed_rows": 0,
+        "changed_files": 0,
+        "saved_bytes": 0,
+        "vacuumed": False,
+    }
+
+
+def _path_size_bytes(path: Any) -> int:
+    try:
+        if not path.exists():
+            return 0
+        if path.is_file():
+            return path.stat().st_size
+    except OSError:
+        return 0
+    total = 0
+    with contextlib.suppress(OSError):
+        for root, _, filenames in os.walk(path):
+            for filename in filenames:
+                file_path = os.path.join(root, filename)
+                with contextlib.suppress(OSError):
+                    total += os.path.getsize(file_path)
+    return total
 
 
 async def _maybe_run_tick_evolution(loop: Any, cycle: int, perception_replay: Any) -> None:
