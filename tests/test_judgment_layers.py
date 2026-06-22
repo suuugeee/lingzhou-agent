@@ -625,6 +625,32 @@ def test_continue_phase_policy_payload_uses_shared_limits(monkeypatch: pytest.Mo
     payload = continue_phase_policy_payload(cfg, tool_history_count=10)
     assert payload["tool_history_compact_threshold"] == 10
     assert payload["tool_history_keep_last"] == 3
+    assert payload["inner_round_limit_enabled"] is True
     assert payload["max_inner_rounds"] == 5
     assert payload["will_hit_inner_round_limit_next"] is True
     assert payload["tool_history_will_compact_next"] is True
+
+
+def test_continue_phase_policy_payload_can_disable_inner_round_limit(monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.config import Config
+    from core.judgment.policy import continue_phase_policy_payload
+
+    monkeypatch.setenv("TEST_API_KEY", "x")
+    cfg = Config.model_validate(
+        {
+            "model": "testprov/m",
+            "providers": {
+                "testprov": {
+                    "type": "openai_compat",
+                    "base_url": "http://127.0.0.1/v1",
+                    "api_key_env": "TEST_API_KEY",
+                    "models": [{"id": "m"}],
+                }
+            },
+            "thresholds": {"continue_max_inner_rounds": 0},
+        }
+    )
+    payload = continue_phase_policy_payload(cfg, tool_history_count=100)
+    assert payload["inner_round_limit_enabled"] is False
+    assert payload["max_inner_rounds"] == 0
+    assert payload["will_hit_inner_round_limit_next"] is False
