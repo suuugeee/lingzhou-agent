@@ -132,6 +132,9 @@ def normalize_action_shape(
     if output.decision != "act":
         return _coerce_non_act_output(output)
 
+    if output.chosen_action_id and output.chosen_action_id != "__parallel__":
+        output.parallel_actions = []
+
     if output.parallel_actions:
         normalized_parallel: list[dict[str, Any]] = []
         unknown_parallel: list[str] = []

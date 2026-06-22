@@ -160,7 +160,7 @@ class ExecutionLayer:
                     priority=0.9,
                 )
             case "act":
-                if action.parallel_actions:
+                if action.parallel_actions and (not action.chosen_action_id or action.chosen_action_id == "__parallel__"):
                     return await self._dispatch_parallel(action, ctx)
                 return await self._dispatch_act(action, ctx)
             case _:
