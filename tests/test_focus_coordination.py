@@ -718,6 +718,10 @@ def test_wait_after_cycle_uses_focus_task_instead_of_global_active():
     asyncio.run(_wait_after_cycle_uses_focus_task_instead_of_global_active())
 
 
+def test_task_change_signature_ignores_same_task_entering_waiting():
+    asyncio.run(_task_change_signature_ignores_same_task_entering_waiting())
+
+
 def test_wait_after_cycle_dispatcher_uses_max_idle_gap_without_focus_task():
     asyncio.run(_wait_after_cycle_dispatcher_uses_max_idle_gap_without_focus_task())
 
@@ -821,6 +825,33 @@ async def _wait_after_cycle_uses_focus_task_instead_of_global_active():
             await store.close()
 
         assert seen_before_task == [focus_id]
+
+
+async def _task_change_signature_ignores_same_task_entering_waiting():
+    from core.loop.cycle.driver import _task_change_signature
+    from core.loop.cycle.focus import claim_focus_task
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "task-change-waiting.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "刚回复后进入等待的任务",
+                goal="进入 waiting 不应立刻唤醒下一轮空闲 judgment",
+                status="waiting",
+                wait_kind="external",
+            )
+            task = await store.get_task_by_id(task_id)
+            assert task is not None
+            loop = SimpleNamespace(_task_store=store)
+            await claim_focus_task(loop, task, clear_current=True)
+
+            sig = await _task_change_signature(loop, (task_id, "resumed"))
+
+            assert sig == (task_id, "resumed")
+        finally:
+            await store.close()
 
 
 async def _wait_after_cycle_dispatcher_uses_max_idle_gap_without_focus_task():
