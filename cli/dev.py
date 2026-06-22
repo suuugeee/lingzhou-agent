@@ -270,10 +270,10 @@ def model(
 
         console.print("\n[bold]选择要设置的模型槽位[/bold]")
         target_options = [
-            ("primary", f"主模型 (model)  [dim]当前: {current}[/dim]"),
-            ("vision", f"识图模型 (vision_model)  [dim]当前: {_effective_target_model(cfg_data, 'vision')}[/dim]"),
+            ("primary", f"主模型 (model)  当前: {current}"),
+            ("vision", f"识图模型 (vision_model)  当前: {_effective_target_model(cfg_data, 'vision')}"),
         ] + [
-            (tier, f"{tier_display_label(tier)} ({tier})  [dim]当前: {_effective_target_model(cfg_data, tier)}[/dim>")
+            (tier, f"{tier_display_label(tier)} ({tier})  当前: {_effective_target_model(cfg_data, tier)}")
             for tier in JUDGMENT_TIERS
         ] + [("other", "其他 routing 键（手动输入）")]
         for i, (_, label) in enumerate(target_options, 1):
