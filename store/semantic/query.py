@@ -52,6 +52,11 @@ _log = _log_sem.getLogger("lingzhou.memory.semantic")
 
 # 向量扫描预筛前置层：每批从 DB 拉多少行 BLOB 做余弦计算
 _VEC_SCAN_PAGE = 500
+_FTS5_OPERATOR_TOKENS = frozenset({"and", "or", "not", "near"})
+
+
+def _quote_fts5_term(term: str) -> str:
+    return '"' + term.replace('"', '""') + '"'
 
 
 def _vec_scan_candidates(
@@ -431,10 +436,13 @@ def _fts_candidates(self, query: str, limit: int = 50) -> list[str]:
         else:
             raw_tokens.append(word)
     # 过滤：保留 CJK 单字 + 长度 >= 2 的非 ASCII 词 + 长度 >= 2 的英文词
-    terms = [t for t in raw_tokens if t.strip() and (not t.isascii() or len(t) >= 2)]
+    terms = [
+        t for t in raw_tokens
+        if t.strip() and t.lower() not in _FTS5_OPERATOR_TOKENS and (not t.isascii() or len(t) >= 2)
+    ]
     if not terms:
         return []
-    fts_query = " OR ".join(terms)
+    fts_query = " OR ".join(_quote_fts5_term(t) for t in terms)
     try:
         rows = self._conn.execute(
             "SELECT id FROM nodes_fts WHERE nodes_fts MATCH ? LIMIT ?",

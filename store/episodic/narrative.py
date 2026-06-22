@@ -644,13 +644,18 @@ def search(
     hits: list[str] = []
     total = 0
     query_stripped = query.strip()
+    fts5_operator_tokens = frozenset({"and", "or", "not", "near"})
+
+    def _quote_fts5_term(term: str) -> str:
+        return '"' + term.replace('"', '""') + '"'
 
     with memory._db_session():
         safe = re.sub(r"[^\w\s]", " ", query, flags=re.UNICODE)
-        strict = [t for t in safe.split() if len(t) >= 2 and not (t.isascii() and len(t) < 5)]
-        terms = strict if strict else [t for t in safe.split() if len(t) > 1]
+        raw_terms = [t for t in safe.split() if t.lower() not in fts5_operator_tokens]
+        strict = [t for t in raw_terms if len(t) >= 2 and not (t.isascii() and len(t) < 5)]
+        terms = strict if strict else [t for t in raw_terms if len(t) > 1]
         if terms:
-            fts_query = " OR ".join(terms)
+            fts_query = " OR ".join(_quote_fts5_term(t) for t in terms)
             try:
                 rows = memory._conn.execute(
                     "SELECT task_id, chat_id, role, content FROM narrative_fts"

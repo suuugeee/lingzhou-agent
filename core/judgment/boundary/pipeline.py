@@ -79,9 +79,12 @@ def _extract_recovery_fields(context_text: str) -> tuple[str, str]:
 def _build_recovery_fallback_action(
     next_verification: str,
     registry: Any | None,
+    *,
+    recovery_state: str = "",
 ) -> tuple[str, dict[str, Any]] | None:
     text = str(next_verification or "")
     lowered = text.lower()
+    state = str(recovery_state or "").strip()
     getter = getattr(registry, "get", None)
 
     def _has_tool(name: str) -> bool:
@@ -104,12 +107,18 @@ def _build_recovery_fallback_action(
 
     if "probe.run" in lowered and not _mentions_blocked_tool("probe.run") and _has_tool("probe.run"):
         return "probe.run", {}
+    memory_search_blocked_by_state = state in {
+        "continue_low_increment_budget_reached",
+        "continue_repeat_action_gated",
+        "memory_search_control_query_gated",
+    }
     if (
         any(
             marker in lowered
             for marker in ("memory.search", "查找", "搜索", "检索", "记录", "历史")
         )
         and not _mentions_blocked_tool("memory.search")
+        and not memory_search_blocked_by_state
         and _has_tool("memory.search")
     ):
         return "memory.search", {"query": next_verification[:420], "top_k": 5}
@@ -162,7 +171,7 @@ def _enforce_recovery_continuation(
     if not recovery_state:
         return output
 
-    fallback = _build_recovery_fallback_action(next_verification, registry)
+    fallback = _build_recovery_fallback_action(next_verification, registry, recovery_state=recovery_state)
     if not fallback:
         return output
 
