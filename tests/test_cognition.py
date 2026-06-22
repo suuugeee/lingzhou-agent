@@ -760,6 +760,10 @@ def test_continue_phase_gates_repeated_same_action_before_dispatch():
     asyncio.run(_continue_phase_gates_repeated_same_action_before_dispatch())
 
 
+def test_continue_phase_stops_after_successful_workbench():
+    asyncio.run(_continue_phase_stops_after_successful_workbench())
+
+
 def test_idle_decision_phase_blocks_taskless_autonomous_act(monkeypatch: pytest.MonkeyPatch):
     asyncio.run(_idle_decision_phase_blocks_taskless_autonomous_act(monkeypatch))
 
@@ -1042,6 +1046,64 @@ async def _continue_phase_gates_repeated_same_action_before_dispatch():
     assert workbench["recovery_state"] == "continue_repeat_action_gated"
     assert "/tmp/repeat.py" in workbench["next_verification"]
     assert "shell.run/grep" in workbench["next_verification"]
+
+
+async def _continue_phase_stops_after_successful_workbench():
+    from core.loop.shared.continue_phase import _run_continue_phase
+
+    cfg = _continue_cfg(
+        thresholds={
+            "continue_max_inner_rounds": 4,
+            "continue_tool_history_compact_threshold": 20,
+            "continue_tool_history_keep_last": 10,
+        },
+    )
+
+    class _Judgment:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def decide_continue(self, tool_history, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                return _judgment_output(
+                    decision="act",
+                    chosen_action_id="task.workbench",
+                    params={"workbench": {"domain": "runtime-loop", "evidence": ["已收敛"]}},
+                    rationale="写入工作台后应结束本 tick",
+                )
+            return _judgment_output(
+                decision="act",
+                chosen_action_id="task.list",
+                params={"status": "all", "limit": 8},
+                rationale="不应进入第二轮",
+            )
+
+    judgment = _Judgment()
+    execution = _ContinueExecution()
+    loop = _continue_loop(
+        cfg=cfg,
+        judgment=judgment,
+        execution=execution,
+        registry=_ContinueWorkbenchRegistry(),
+    )
+
+    final_action, final_result = await _run_continue_phase(
+        loop=loop,
+        ctx=SimpleNamespace(),
+        user_message="",
+        active_task=SimpleNamespace(id=1),
+        cognitive_signals=SimpleNamespace(),
+        action=_judgment_output(decision="act", chosen_action_id="memory.search", params={"query": "manifest"}),
+        result=_tool_result("初始结果"),
+        tool_history=[],
+    )
+
+    assert judgment.calls == 1
+    assert len(execution.actions) == 1
+    assert execution.actions[0].chosen_action_id == "task.workbench"
+    assert final_action.chosen_action_id == "task.workbench"
+    assert final_result.summary == "executed task.workbench"
 
 
 async def _idle_decision_phase_blocks_taskless_autonomous_act(monkeypatch: pytest.MonkeyPatch):

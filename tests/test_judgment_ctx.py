@@ -3499,6 +3499,11 @@ def test_should_continue_within_tick_for_autonomous_act():
     assert _should_continue_within_tick(
         _judgment_output(decision="act", chosen_action_id="task.workbench"),
         has_active_task=True,
+        result=ToolResult(summary="task.workbench id=1"),
+    ) is False
+    assert _should_continue_within_tick(
+        _judgment_output(decision="act", chosen_action_id="task.workbench"),
+        has_active_task=True,
         result=ToolResult(
             summary="工具参数缺失: task.workbench requires workbench",
             skipped=True,

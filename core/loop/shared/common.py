@@ -121,6 +121,8 @@ def _should_continue_within_tick(
         or bool((result.state_delta or {}).get("tool_input_invalid"))
     ):
         return True
+    if tool_name == "task.workbench":
+        return False
     if tool_name == "task.complete":
         return result is not None and result.skipped and str(result.error or "") in _RECOVERABLE_TASK_COMPLETE_ERRORS
     if tool_name == "task.fail":
