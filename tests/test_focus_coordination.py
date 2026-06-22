@@ -96,6 +96,14 @@ def test_run_cycle_skips_direct_tick_when_waiting_focus_exists():
     asyncio.run(_run_cycle_skips_direct_tick_when_waiting_focus_exists())
 
 
+def test_run_cycle_skips_auto_tick_when_unfocused_waiting_task_exists():
+    asyncio.run(_run_cycle_skips_auto_tick_when_unfocused_waiting_task_exists())
+
+
+def test_run_cycle_skips_direct_tick_when_unfocused_waiting_task_exists():
+    asyncio.run(_run_cycle_skips_direct_tick_when_unfocused_waiting_task_exists())
+
+
 async def _try_dispatch_tick_job_enqueues_when_dispatcher_ready():
     from core.loop.cycle.focus import try_dispatch_tick_job
 
@@ -207,6 +215,91 @@ async def _run_cycle_skips_direct_tick_when_waiting_focus_exists():
             assert task is not None
             loop_ref = SimpleNamespace(_task_store=store)
             await claim_focus_task(loop_ref, task, clear_current=True)
+
+            ticked: list[int] = []
+
+            async def _tick(cycle: int) -> None:
+                ticked.append(cycle)
+
+            loop = SimpleNamespace(
+                _task_store=store,
+                _tick_dispatcher=None,
+                _run_driver=None,
+                _tick=_tick,
+            )
+
+            cycle = await _run_cycle_impl(loop, 7)
+
+            assert cycle == 7
+            assert ticked == []
+        finally:
+            await store.close()
+
+
+async def _run_cycle_skips_auto_tick_when_unfocused_waiting_task_exists():
+    from core.loop.cycle.driver import _run_cycle_impl
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "run-cycle-unfocused-waiting-dispatcher.db")
+        await store.open()
+        try:
+            await store.add_task(
+                "未绑定焦点的等待任务",
+                goal="waiting task 不应触发 auto tick",
+                status="waiting",
+                wait_kind="external",
+            )
+
+            seen_jobs: list[object] = []
+
+            class _Dispatcher:
+                enabled = True
+                running_count = 0
+                pending_count = 0
+
+                def can_accept(self):
+                    return True
+
+                async def enqueue(self, job):
+                    seen_jobs.append(job)
+                    return True
+
+            async def _next_dispatch_cycle() -> int:
+                return 99
+
+            loop = SimpleNamespace(
+                _task_store=store,
+                _tick_dispatcher=_Dispatcher(),
+                _run_driver=None,
+                _auto_tick_due=True,
+                _next_dispatch_cycle=_next_dispatch_cycle,
+                _resolve_tick_chain_key=lambda **kwargs: "default",
+            )
+
+            cycle = await _run_cycle_impl(loop, 7)
+
+            assert cycle == 7
+            assert seen_jobs == []
+            assert loop._auto_tick_due is False
+        finally:
+            await store.close()
+
+
+async def _run_cycle_skips_direct_tick_when_unfocused_waiting_task_exists():
+    from core.loop.cycle.driver import _run_cycle_impl
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "run-cycle-unfocused-waiting-direct.db")
+        await store.open()
+        try:
+            await store.add_task(
+                "未绑定焦点的等待任务",
+                goal="waiting task 不应触发 direct auto tick",
+                status="waiting",
+                wait_kind="external",
+            )
 
             ticked: list[int] = []
 
