@@ -4446,7 +4446,45 @@ async def test_sync_task_progress_state_uses_nested_cortex_next_verification():
 
         assert updated is not None
         assert updated.current_step == "旧验证"
-        assert updated.next_step == "下一轮先综合本 tick 工具结果，再选择最高信息增量验证动作。"
+        assert updated.next_step == ""
+        await store.close()
+
+
+async def test_sync_task_progress_state_clears_resolved_workbench_next_step():
+    from core.loop.task.runtime import _sync_task_progress_state
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "runtime-resolved-workbench-clears-next-step.db")
+        await store.open()
+        task_id = await store.add_task(
+            "工作台任务",
+            goal="验证 resolved workbench 不会重新拉起 next_step",
+            next_step="继续重复 all limit=8",
+        )
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+
+        updated = await _sync_task_progress_state(
+            store,
+            task,
+            previous_next_step="继续重复 all limit=8",
+            action=_judgment_output(decision="act", chosen_action_id="task.workbench", next_step=""),
+            progressful=False,
+            state_delta={
+                "cortex": {
+                    "domain": "runtime-loop",
+                    "next_verification": "避免继续重复 all limit=8；切换到一个更高信息增量动作。",
+                    "verification_state": {
+                        "goal": "避免继续重复 all limit=8；切换到一个更高信息增量动作。",
+                        "status": "resolved",
+                    },
+                }
+            },
+        )
+
+        assert updated is not None
+        assert updated.next_step == ""
         await store.close()
 
 
