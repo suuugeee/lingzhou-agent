@@ -24,11 +24,20 @@ from .focus import (
 _log = logging.getLogger("lingzhou.loop")
 
 
-async def _waiting_focus_task(loop: Any) -> Any | None:
+async def _waiting_task(loop: Any) -> Any | None:
     waiting = await resolve_focus_task(loop, include_waiting=True)
-    if waiting is None:
+    if str(getattr(waiting, "status", "") or "") == "waiting":
+        return waiting
+
+    task_store = getattr(loop, "_task_store", None)
+    lister = getattr(task_store, "list_tasks", None)
+    if not callable(lister):
         return None
-    return waiting if str(getattr(waiting, "status", "") or "") == "waiting" else None
+    with contextlib.suppress(Exception):
+        for task in list(await lister(status="waiting", limit=1) or []):
+            if str(getattr(task, "status", "") or "") == "waiting":
+                return task
+    return None
 
 
 async def _run_cycle_impl(loop: Any, cycle: int) -> int:
@@ -55,7 +64,7 @@ async def _run_cycle_impl(loop: Any, cycle: int) -> int:
                 source="auto",
             )
             active_task = dispatch_context.active_task
-            if active_task is None and await _waiting_focus_task(loop) is not None:
+            if active_task is None and await _waiting_task(loop) is not None:
                 loop._auto_tick_due = False
                 _log.debug("[tick-dispatch] waiting task is parked, skip auto tick")
                 return cycle
@@ -74,7 +83,7 @@ async def _run_cycle_impl(loop: Any, cycle: int) -> int:
             else:
                 _log.debug("[tick-dispatch] queue full, skip auto tick")
         else:
-            if await _waiting_focus_task(loop) is not None:
+            if await _waiting_task(loop) is not None:
                 _log.debug("[loop] waiting task is parked, skip direct auto tick")
                 return cycle
             cycle += 1
