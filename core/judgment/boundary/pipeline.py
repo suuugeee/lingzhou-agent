@@ -192,6 +192,15 @@ def _action_first_must_act(context_text: str) -> bool:
     return "must_act=yes" in section
 
 
+def _action_first_section(context_text: str) -> str:
+    marker = "action_first:"
+    marker_index = context_text.find(marker)
+    if marker_index < 0:
+        return ""
+    next_section = context_text.find("\n### ", marker_index + len(marker))
+    return context_text[marker_index:] if next_section < 0 else context_text[marker_index:next_section]
+
+
 def _registry_has(registry: Any | None, tool_name: str) -> bool:
     if registry is None:
         return False
@@ -205,9 +214,14 @@ def _registry_has(registry: Any | None, tool_name: str) -> bool:
 
 
 def _captured_context_values(context_text: str, kind: str) -> list[str]:
+    action_section = _action_first_section(context_text)
+    captured_index = action_section.find("captured_inputs:")
+    if captured_index < 0:
+        return []
+    captured_section = action_section[captured_index:]
     pattern = re.compile(rf"-\s*{re.escape(kind)}=([^\n]+)")
     values: list[str] = []
-    for match in pattern.finditer(context_text):
+    for match in pattern.finditer(captured_section):
         value = str(match.group(1) or "").strip()
         if value and value not in values:
             values.append(value)

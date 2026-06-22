@@ -301,6 +301,42 @@ async def test_action_first_wait_falls_back_to_web_fetch_for_captured_url() -> N
 
 
 @pytest.mark.asyncio
+async def test_action_first_wait_ignores_control_text_paths_outside_captured_inputs() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name in {"file.read", "task.list"} else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "action_first:\n"
+        "- intent=execute\n"
+        "- must_act=yes\n"
+        "- next_verification=不要再读取 /root/.lingzhou/memory/nodes/reflect-demo.json；改用 grep 验证。\n"
+        "\n### 通用问题解决守卫\n"
+        "guard=active\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="先等一下"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "task.list"
+    assert out.params == {"status": "all", "limit": 8}
+
+
+@pytest.mark.asyncio
 async def test_recovery_wait_is_forced_to_probe_if_next_verification_contains_probe() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput

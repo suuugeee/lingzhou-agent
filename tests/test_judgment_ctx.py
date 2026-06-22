@@ -538,6 +538,14 @@ def test_behavior_gate_blocks_repeating_same_action_and_logs_observation(caplog)
     allowed_read = tracker.apply_execution_gate(different_read, _ReadSignals())
     assert allowed_read is different_read
 
+    window_read = _judgment_output(
+        decision="act",
+        chosen_action_id="file.read",
+        params={"path": "/tmp/demo.txt", "offset": 21, "limit": 20},
+    )
+    allowed_window_read = tracker.apply_execution_gate(window_read, _ReadSignals())
+    assert allowed_window_read is window_read
+
     class _BothSignals:
         repeat_action_count = 3
         repeat_action_tool = "file.read"
