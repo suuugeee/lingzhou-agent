@@ -2386,6 +2386,10 @@ def test_task_workbench_preserves_control_next_verification_semantics():
     asyncio.run(_task_workbench_preserves_control_next_verification_semantics())
 
 
+def test_task_workbench_settles_unavailable_tool_fallback_search():
+    asyncio.run(_task_workbench_settles_unavailable_tool_fallback_search())
+
+
 async def _task_workbench_preserves_control_next_verification_semantics():
     from core.cortex import intent as cortex_intent
     from store.task import TaskStore
@@ -2466,6 +2470,49 @@ async def _task_workbench_accepts_flattened_workbench_fields():
             assert cortex["next_verification"] == "检查结果是否收敛"
             assert cortex["completion_checks"] == ["step done"]
             assert "已自动从顶层字段组装 workbench" in result.summary
+        finally:
+            await store.close()
+
+
+async def _task_workbench_settles_unavailable_tool_fallback_search():
+    from store.task import TaskStore
+    from tools.workbench import task_workbench
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-fallback-search.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "fallback search",
+                goal="fallback memory.search should not reopen every tick",
+                status="in_progress",
+                result_json={"cortex": {}},
+            )
+            task = await store.get_task_by_id(task_id)
+            ctx = _tool_ctx(task_store=store, active_task=task)
+
+            result = await task_workbench(
+                {
+                    "workbench": {
+                        "domain": "long_term_memory_inventory_recovery",
+                        "recovery_state": "fallback_search_executed_shell_file_unavailable_in_current_toolset",
+                        "next_verification": (
+                            "优先 shell.run/file.read 只读清点长期记忆根目录与索引文件；"
+                            "若仍不可用，则 memory.search 聚焦 semantic.db episodic.db。"
+                        ),
+                    }
+                },
+                ctx,
+            )
+
+            assert result.error is None
+            refreshed = await store.get_task_by_id(task_id)
+            assert refreshed is not None
+            cortex = refreshed.result_json["cortex"]
+            assert "不再重复执行降级检索" in cortex["next_verification"]
+            assert cortex["verification_state"]["status"] == "resolved"
+            assert result.state_delta["cortex"]["verification_state"]["status"] == "resolved"
         finally:
             await store.close()
 

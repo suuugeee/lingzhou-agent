@@ -236,8 +236,13 @@ def build_verification_state(patch: dict[str, Any], *, source: str = "workbench"
 
     if "next_verification" not in patch:
         return None
-    next_verification = clean_next_verification_text(patch.get("next_verification"))
-    status = VERIFICATION_PENDING if has_actionable_next_verification(next_verification) else "resolved"
+    raw_next_verification = str(patch.get("next_verification") or "").strip()
+    next_verification = clean_next_verification_text(raw_next_verification)
+    status = (
+        "resolved"
+        if is_control_next_verification(raw_next_verification)
+        else (VERIFICATION_PENDING if has_actionable_next_verification(next_verification) else "resolved")
+    )
     return {
         "status": status,
         "goal": next_verification,
