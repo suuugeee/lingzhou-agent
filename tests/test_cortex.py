@@ -35,6 +35,13 @@ def test_build_verification_state_classifies_next_verification_once():
     resolved = cortex_intent.build_verification_state(
         {"next_verification": "none：当前证据已足够完成。"}
     )
+    control = cortex_intent.build_verification_state(
+        {
+            "next_verification": cortex_intent.control_next_verification(
+                "运行 pytest 后再 verify blocker details."
+            )
+        }
+    )
 
     assert pending == {
         "status": "pending",
@@ -44,6 +51,11 @@ def test_build_verification_state_classifies_next_verification_once():
     assert resolved == {
         "status": "resolved",
         "goal": "none：当前证据已足够完成。",
+        "source": "workbench",
+    }
+    assert control == {
+        "status": "resolved",
+        "goal": "运行 pytest 后再 verify blocker details.",
         "source": "workbench",
     }
 

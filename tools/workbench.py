@@ -120,6 +120,22 @@ def _extract_workbench_input(raw_params: Any) -> tuple[Any, list[str]]:
     return None, []
 
 
+def _settle_unavailable_tool_fallback(patch: dict[str, Any]) -> None:
+    recovery_state = str(patch.get("recovery_state") or "").strip()
+    if not recovery_state.startswith("fallback_search_executed"):
+        return
+    next_verification = str(patch.get("next_verification") or "").strip()
+    normalized = cortex_intent.normalize_intent_text(next_verification)
+    if "memory.search" not in normalized and "memory search" not in normalized:
+        return
+    if not any(marker in normalized for marker in ("不可用", "unavailable", "仍不可用", "没有 shell", "没有 file")):
+        return
+    patch["next_verification"] = cortex_intent.control_next_verification(
+        "等待真实文件或 shell 工具恢复，或等待用户提供新的可验证证据；"
+        "当前仅保留候选线索，不再重复执行降级检索。"
+    )
+
+
 @tool(ToolManifest(
     name="task.workbench",
     description=(
@@ -141,6 +157,7 @@ async def task_workbench(params: dict[str, Any], ctx: ToolContext) -> ToolResult
         return ToolResult(summary="未找到任务。请先创建任务，或指定 task_id。", error="NoTask", skipped=True)
     workbench_input, auto_warnings = _extract_workbench_input(params)
     patch, warnings = _clean_workbench_patch(workbench_input)
+    _settle_unavailable_tool_fallback(patch)
     warnings = auto_warnings + warnings
     if not patch:
         reason = "; ".join(warnings) if warnings else "workbench 为空"
