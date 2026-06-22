@@ -2382,6 +2382,53 @@ def test_task_workbench_accepts_flattened_workbench_fields():
     asyncio.run(_task_workbench_accepts_flattened_workbench_fields())
 
 
+def test_task_workbench_preserves_control_next_verification_semantics():
+    asyncio.run(_task_workbench_preserves_control_next_verification_semantics())
+
+
+async def _task_workbench_preserves_control_next_verification_semantics():
+    from core.cortex import intent as cortex_intent
+    from store.task import TaskStore
+    from tools.workbench import task_workbench
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "workbench-control-next-verification.db")
+        await store.open()
+        try:
+            task_id = await store.add_task(
+                "control workbench",
+                goal="control next_verification should not reopen the same loop",
+                status="in_progress",
+                result_json={"cortex": {}},
+            )
+            task = await store.get_task_by_id(task_id)
+            ctx = _tool_ctx(task_store=store, active_task=task)
+
+            result = await task_workbench(
+                {
+                    "workbench": {
+                        "domain": "runtime-loop",
+                        "intent": "continue 阶段停止重复同一取证动作",
+                        "next_verification": cortex_intent.control_next_verification(
+                            "避免继续重复 当前对象；切换到一个更高信息增量动作。"
+                        ),
+                    }
+                },
+                ctx,
+            )
+
+            assert result.error is None
+            refreshed = await store.get_task_by_id(task_id)
+            assert refreshed is not None
+            cortex = refreshed.result_json["cortex"]
+            assert cortex["next_verification"] == "避免继续重复 当前对象；切换到一个更高信息增量动作。"
+            assert cortex["verification_state"]["status"] == "resolved"
+            assert cortex["verification_state"]["goal"] == "避免继续重复 当前对象；切换到一个更高信息增量动作。"
+        finally:
+            await store.close()
+
+
 async def _task_workbench_accepts_flattened_workbench_fields():
     from store.task import TaskStore
     from tools.workbench import task_workbench
