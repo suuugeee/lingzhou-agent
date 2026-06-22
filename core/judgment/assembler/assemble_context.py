@@ -53,6 +53,17 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger("lingzhou.judgment")
 _CROSS_TASK_EPISODIC_MAX_CHARS = 4000
+_EPISODIC_CONTEXT_LOAD_MAX_CHARS = 4000
+_CHAT_CONTINUITY_LOAD_MAX_CHARS = 2400
+_CONTEXT_OPERATIONAL_MEMORY_KINDS = frozenset({
+    "execute_result",
+    "meta_reflection",
+    "run_monitor",
+    "run_result",
+    "task_progress",
+    "working_trace",
+})
+_CONTEXT_SEMANTIC_RECALL_CANDIDATE_LIMIT = 50
 
 
 def _clip_context_artifact(text: Any, max_chars: int) -> str:
@@ -69,6 +80,22 @@ def _is_process_scaffolding_text(text: Any) -> bool:
     if not value:
         return False
     return cortex_intent.is_control_next_verification(value)
+
+
+def _filter_context_semantic_memories(memories: list[Any], limit: int) -> list[Any]:
+    if limit <= 0:
+        return []
+    filtered: list[Any] = []
+    for memory in memories:
+        if not isinstance(memory, dict):
+            continue
+        kind = str(memory.get("kind") or "").strip()
+        if kind in _CONTEXT_OPERATIONAL_MEMORY_KINDS:
+            continue
+        filtered.append(memory)
+        if len(filtered) >= limit:
+            break
+    return filtered
 
 
 def _memory_search_query_for_task(task: Any | None, user_message: str) -> str:
@@ -179,8 +206,8 @@ async def _load_context_artifacts(
     task_id_str = str(task.id) if task else None
     gather_t0 = time.perf_counter()
     futures: list[tuple[str, Any]] = [
-        ("episodic_text", loop.run_in_executor(None, episodic.load_for_context, task_id_str, assembler._cfg.memory.episodic_n_recent)),
-        ("chat_continuity", loop.run_in_executor(None, episodic.load_for_chat_context, resolved_chat_id, assembler._cfg.memory.episodic_n_recent) if resolved_chat_id else None),
+        ("episodic_text", loop.run_in_executor(None, functools.partial(episodic.load_for_context, task_id_str, assembler._cfg.memory.episodic_n_recent, max_chars=_EPISODIC_CONTEXT_LOAD_MAX_CHARS))),
+        ("chat_continuity", loop.run_in_executor(None, functools.partial(episodic.load_for_chat_context, resolved_chat_id, assembler._cfg.memory.episodic_n_recent, max_chars=_CHAT_CONTINUITY_LOAD_MAX_CHARS)) if resolved_chat_id else None),
         ("recent_turns", loop.run_in_executor(None, functools.partial(episodic.get_recent_turns, task_id_str, assembler._cfg.thresholds.chat_history_turn_limit, chat_id=resolved_chat_id)) if (resolved_chat_id or task_id_str) else None),
         ("chat_memories", loop.run_in_executor(None, functools.partial(semantic.retrieve, search_query or resolved_chat_id or "", min(3, assembler._cfg.memory.semantic_top_k), tag=f"chat:{str(resolved_chat_id or '').strip()}", source="chat_summary")) if resolved_chat_id else None),
         ("speaker_hint", asyncio.create_task(task_store.get_fact(f"chat:{resolved_chat_id}:interlocutor_profile_id")) if resolved_chat_id else None),
@@ -388,12 +415,17 @@ async def _retrieve_multi_anchor_memories(
         len(anchors),
     )
     try:
+        top_k = int(assembler._cfg.memory.semantic_top_k)
+        candidate_top_k = min(
+            _CONTEXT_SEMANTIC_RECALL_CANDIDATE_LIMIT,
+            max(top_k, top_k * 4, top_k + 8),
+        )
         memories = await asyncio.wait_for(
             asyncio.get_running_loop().run_in_executor(
                 None,
                 semantic.retrieve_multi_anchor,
                 anchors,
-                assembler._cfg.memory.semantic_top_k,
+                candidate_top_k,
             ),
             timeout=8.0,
         )
@@ -415,11 +447,15 @@ async def _retrieve_multi_anchor_memories(
             resolved_chat_id or "",
             len(anchors),
         )
+    raw_memory_count = len(memories)
+    memories = _filter_context_semantic_memories(memories, int(assembler._cfg.memory.semantic_top_k))
     semantic_top_score = max((float(item.get("score") or 0.0) for item in memories if isinstance(item.get("score"), (int, float))), default=0.0)
     _log.info(
-        "[context.stage] semantic_multi_anchor_done dt=%.3fs hits=%d top_score=%.4f",
+        "[context.stage] semantic_multi_anchor_done dt=%.3fs hits=%d raw_hits=%d filtered=%d top_score=%.4f",
         time.perf_counter() - memories_t0,
         len(memories),
+        raw_memory_count,
+        max(0, raw_memory_count - len(memories)),
         semantic_top_score,
     )
     return memories, semantic_top_score

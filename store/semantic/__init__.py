@@ -109,11 +109,15 @@ _STABLE_MEMORY_KINDS = frozenset({
 })
 
 _EPHEMERAL_MEMORY_KINDS = frozenset({
+    "execute_result",
     "event",
+    "meta_reflection",
+    "run_monitor",
     "task_progress",
     "run_result",
     "sensor_snapshot",
     "delegated_result",
+    "working_trace",
 })
 
 _STABLE_MEMORY_SOURCES = frozenset({

@@ -37,10 +37,11 @@ _CONSOLIDATE_PREDICTION_ERROR_THRESHOLD = 0.15
 _CONSOLIDATE_PROBABILITY = 0.30
 
 _DEFAULT_EVIDENCE_NEEDED = [
-    "读取相关运行时状态或代码证据",
+    "读取至少一个具体运行时状态、代码文件、日志片段或任务记录",
     "确认是否已有未完成 self_drive 任务覆盖同一问题",
-    "形成一条可复用观察或明确维持现状的理由",
+    "形成一条带来源的可复用观察或明确维持现状的理由",
 ]
+_DEFAULT_ARTIFACT = "task.workbench 中包含 evidence、decision、next_step 的记录"
 _DEFAULT_DONE_CONDITION = "能用具体证据回答 question，并写出下一步是否需要行动。"
 
 
@@ -73,43 +74,107 @@ _EVENT_DOMAIN_MAPPING = {
 _DOMAIN_TASKS = {
     "code_structure": {
         "title": "探索灵舟代码结构",
-        "goal": "阅读 core/ 中的关键模块，理解架构和可改进点。选择你之前没细读过的文件开始。",
-        "next_step": "列出 core/ 目录中最近修改的文件，选择一个不熟悉的开始阅读",
+        "goal": "定位一个当前问题相关的 core/ 模块，读源码并产出一个可验证的结构边界结论。",
+        "next_step": "列出 core/ 中最近相关文件，选择一个模块读取并写出其输入、输出和边界风险",
+        "question": "哪个 core 模块的职责边界会影响当前问题解决能力？",
+        "evidence_needed": [
+            "core/ 下一个具体源码文件及其相邻调用点",
+            "该模块已有测试或调用方中的一个证据",
+            "任务工作台中的边界结论和后续是否修改的判断",
+        ],
+        "artifact": "模块边界结论：文件路径、关键函数、风险、下一步",
+        "done_condition": "能引用具体文件/函数说明边界，并判断是否需要代码调整。",
     },
     "tool_mastery": {
         "title": "练习工具掌握",
-        "goal": "选择一个你较少使用的工具，阅读其实现，理解其能力边界。尝试用它解决一个小问题。",
-        "next_step": "列出 tools/ 目录中最近未使用的工具，选择一个学习",
+        "goal": "选择一个与当前任务推进有关的工具，验证它的能力边界并记录可复用用法。",
+        "next_step": "读取一个 tools/ 工具实现和对应测试，用一次低成本调用验证边界",
+        "question": "哪个工具边界最可能导致近期任务卡住或误判？",
+        "evidence_needed": [
+            "tools/ 下一个具体工具实现",
+            "至少一个对应测试或 manifest 能力标注",
+            "一次成功或明确失败的低成本调用结果",
+        ],
+        "artifact": "工具边界记录：适用场景、失败条件、验证结果",
+        "done_condition": "能说明该工具何时可用、何时不该用，并有一次验证证据。",
     },
     "memory_system": {
         "title": "优化记忆系统",
-        "goal": "检查 memory/ 目录中的记忆文件，寻找可以整理、合并或提炼的内容。让记忆更结构化。",
-        "next_step": "列出 memory/ 目录文件，识别冗余或需要合并的内容",
+        "goal": "抽样检查记忆写入或检索链路，找出一个可证实的冗余、污染或缺失边界。",
+        "next_step": "抽样读取一个 memory/store 相关实现或记忆统计，判断是否存在可修正的污染路径",
+        "question": "当前记忆系统最需要收紧的是写入质量、检索噪声还是存储体积？",
+        "evidence_needed": [
+            "一个具体 memory/store 源码路径或记忆统计样本",
+            "一个低价值或高价值记忆样例的判定理由",
+            "是否需要修改代码、只 compact、还是保持现状的决策",
+        ],
+        "artifact": "记忆质量判定：样例、原因、处理动作",
+        "done_condition": "能用样例说明该记忆应保存、拒写、压缩或删除，并完成对应动作或明确不改。",
     },
     "self_evolution": {
         "title": "自我进化迭代",
-        "goal": "回顾最近的操作日志，寻找可以改进的模式。思考：如果我能改一行代码来让自己更好，会改什么？",
-        "next_step": "读取最近日志，寻找重复模式或可优化点",
+        "goal": "从近期失败或停滞证据中提炼一个可执行的行为改进，并决定是否落地代码。",
+        "next_step": "读取一条具体失败/停滞记录，定位根因链路并写出改或不改的硬理由",
+        "question": "哪个行为改进能减少重复空转或提高下一轮问题解决率？",
+        "evidence_needed": [
+            "一条具体失败、停滞或低增量工具循环记录",
+            "对应的代码路径、配置门或任务状态字段",
+            "改代码/调配置/不改的明确决策及验证方式",
+        ],
+        "artifact": "行为改进决策：证据、根因、动作、验证",
+        "done_condition": "必须形成已实施并验证的改动，或写清不改的硬约束和监控条件。",
     },
     "environment": {
         "title": "拓展环境认知",
-        "goal": "探索 workspace 中尚未了解的文件和目录。建立更完整的环境地图。",
-        "next_step": "列出 workspace 中最近未访问的子目录，选择一个探索",
+        "goal": "补齐一个会影响任务执行的环境事实，避免因路径、依赖或运行状态误判。",
+        "next_step": "读取当前 workspace 或配置中的一个具体路径，确认其用途和风险",
+        "question": "哪个环境事实如果未知，会导致下一次执行走错路径？",
+        "evidence_needed": [
+            "一个具体目录、配置文件或依赖入口",
+            "该环境事实与当前任务的关系",
+            "需要记住、忽略或补文档的判断",
+        ],
+        "artifact": "环境事实记录：路径、用途、风险、后续处理",
+        "done_condition": "能引用具体路径说明环境事实，并说明它如何影响后续行动。",
     },
     "error_patterns": {
         "title": "分析错误模式",
-        "goal": "回顾最近的失败记录，寻找重复模式。总结根因并思考预防措施。",
-        "next_step": "列出最近的失败记录，按类型分组分析",
+        "goal": "从最近失败记录中识别一个可复现或可防止的错误模式，并形成处置动作。",
+        "next_step": "读取最近失败记录和关联 run/task，上溯到触发工具或配置门",
+        "question": "最近失败里是否有一个可通过代码、配置或流程修正的重复模式？",
+        "evidence_needed": [
+            "至少一条具体失败记录或 run 结果",
+            "失败对应的工具、参数、状态或堆栈摘要",
+            "预防动作及验证方式",
+        ],
+        "artifact": "错误模式报告：样本、根因、修复/规避、验证",
+        "done_condition": "能用具体失败样本说明根因，并完成修复/规避或明确暂不处理原因。",
     },
     "api_integration": {
         "title": "掌握 API 集成",
-        "goal": "检查 provider/ 中的 API 集成代码，理解不同 model 的配置和切换机制。",
-        "next_step": "阅读 provider/ 目录中的 API 客户端实现",
+        "goal": "核对一个 provider/API 调用链路，确认认证、代理、重试或模型路由边界。",
+        "next_step": "读取 provider/ 中一个具体实现和相关测试，记录失败恢复路径",
+        "question": "哪个 provider/API 边界最容易造成误判或重复失败？",
+        "evidence_needed": [
+            "provider/ 下一个具体实现文件",
+            "相关配置项或测试用例",
+            "一个失败恢复或路由边界结论",
+        ],
+        "artifact": "API 边界记录：配置、失败信号、恢复动作",
+        "done_condition": "能说明该 API 链路失败时应如何恢复，并有代码或测试证据支撑。",
     },
     "performance": {
         "title": "性能自检优化",
-        "goal": "检查自己的运行效率：token 消耗、内存占用、工具调用延迟。寻找可优化的环节。",
-        "next_step": "读取 self_model 状态，分析 token 消耗趋势",
+        "goal": "用具体指标定位一个运行效率问题，优先处理存储、上下文或工具输出膨胀。",
+        "next_step": "读取 runtime/memory 统计或配置，找出一个最大膨胀来源并给出处置",
+        "question": "当前最大的效率损耗来自存储体积、上下文长度还是工具输出？",
+        "evidence_needed": [
+            "一个 runtime.db、memory_dir、上下文或工具输出统计",
+            "最大来源的字节数、条数或示例",
+            "compact、限流、拒写或保持现状的决策",
+        ],
+        "artifact": "性能处置记录：指标、来源、动作、验证",
+        "done_condition": "能用指标说明瓶颈，并执行 compact/限流/拒写改动或明确无需处理。",
     },
 }
 
@@ -417,5 +482,6 @@ class SelfDriveEngine:
         template["domain"] = resolved_domain
         template.setdefault("question", f"当前最值得验证的 {resolved_domain} 问题是什么？")
         template.setdefault("evidence_needed", _DEFAULT_EVIDENCE_NEEDED)
+        template.setdefault("artifact", _DEFAULT_ARTIFACT)
         template.setdefault("done_condition", _DEFAULT_DONE_CONDITION)
         return template

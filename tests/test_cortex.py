@@ -397,6 +397,37 @@ def test_problem_solving_guard_idles_when_workbench_is_complete():
     assert guard.missing_fields == []
 
 
+def test_problem_solving_guard_does_not_block_on_completion_only_gaps():
+    task = Task(
+        id=14,
+        title="验证修复",
+        status="in_progress",
+        priority="normal",
+        created_at="2026-06-09T00:00:00+00:00",
+        result_json={
+            "cortex": {
+                "domain": "runtime persistence",
+                "intent": "verify compaction",
+                "hypothesis": "store layer keeps previews instead of full raw output",
+                "evidence": ["pytest 已覆盖大输出持久化"],
+                "next_verification": "运行 pytest 验证回归。",
+            }
+        },
+    )
+    workspace = build_cortex_workspace(task=task)
+
+    guard = build_problem_solving_guard(
+        task=task,
+        workspace=workspace,
+        user_message="继续修复并验证",
+    )
+
+    assert guard.active is False
+    assert "completion_checks" in guard.missing_fields
+    assert "capabilities" in guard.missing_fields
+    assert "workbench_incomplete" not in guard.signals
+
+
 def test_auto_cortex_patch_appends_run_outcomes_without_overwriting_intent():
     patch = build_auto_cortex_patch(
         existing_cortex={

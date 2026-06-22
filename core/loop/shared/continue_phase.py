@@ -427,6 +427,11 @@ def _specific_round_limit_next_verification(tool_history: list[dict[str, Any]]) 
         if str(entry.get("status") or "") == "ok" and tool and not tool.startswith("task."):
             summary = _clip_for_context(str(entry.get("summary") or entry.get("result") or ""), 140)
             if summary:
+                if tool in _LOW_INCREMENT_CONTINUE_TOOLS:
+                    return (
+                        "基于最近一次低信息探索成功结果形成结论；"
+                        "不要重复同一工具和参数。若仍缺证据，选择不同证据源执行一个具体验证动作。"
+                    )
                 return (
                     f"基于最近 {tool} 成功结果收敛判断。{_switch_hints(tool, key_param)}"
                     " 若仍缺证据，提交 task.workbench 明确下一步可验证动作。"

@@ -2,7 +2,9 @@
 import asyncio
 import json
 import os
+import sqlite3
 import tempfile
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -287,6 +289,10 @@ def test_self_drive_signal_does_not_duplicate_pending_growth_task():
     asyncio.run(_self_drive_signal_does_not_duplicate_pending_growth_task())
 
 
+def test_self_drive_signal_does_not_duplicate_waiting_growth_task():
+    asyncio.run(_self_drive_signal_does_not_duplicate_waiting_growth_task())
+
+
 def test_self_drive_signal_preserves_in_progress_focus_when_exploration_stuck():
     asyncio.run(_self_drive_signal_preserves_in_progress_focus_when_exploration_stuck())
 
@@ -342,7 +348,34 @@ def test_self_drive_engine_updates_from_tick_feedback(tmp_path):
     assert template["domain"] == "memory_system"
     assert template["question"]
     assert template["evidence_needed"]
+    assert template["artifact"]
     assert template["done_condition"]
+    assert "具体" in " ".join(template["evidence_needed"])
+
+    for domain in (
+        "code_structure",
+        "tool_mastery",
+        "memory_system",
+        "self_evolution",
+        "environment",
+        "error_patterns",
+        "api_integration",
+        "performance",
+    ):
+        candidate = engine.generate_exploration_task(domain)
+        combined = " ".join([
+            str(candidate.get("goal") or ""),
+            str(candidate.get("next_step") or ""),
+            str(candidate.get("question") or ""),
+            str(candidate.get("artifact") or ""),
+            str(candidate.get("done_condition") or ""),
+            " ".join(str(item) for item in candidate.get("evidence_needed") or []),
+        ])
+        assert candidate["question"]
+        assert candidate["artifact"]
+        assert candidate["evidence_needed"]
+        assert candidate["done_condition"]
+        assert any(marker in combined for marker in ("具体", "证据", "路径", "指标", "测试"))
 
 
 def test_crash_recovery_uses_runtime_emotion_fallback():
@@ -440,6 +473,9 @@ async def _self_drive_signal_auto_creates_lightweight_growth_task():
             assert task.model_tier == "reasoner"
             assert task.result_json["cortex"]["intent"] == "self_drive_growth"
             assert task.extras["evidence_needed"]
+            assert task.extras["artifact"]
+            completion_checks = task.result_json["cortex"]["completion_checks"]
+            assert any("产物已写入" in item for item in completion_checks)
 
             wm_items = loop._wm.get_top(10)
             self_drive_items = [item for item in wm_items if item["kind"] == "self_drive"]
@@ -451,6 +487,7 @@ async def _self_drive_signal_auto_creates_lightweight_growth_task():
             assert "proposal:" in content
             assert "candidate_question:" in content
             assert "candidate_evidence_needed:" in content
+            assert "candidate_artifact:" in content
             assert "candidate_done_condition:" in content
             assert "open_questions:" in content
             assert "available_directions:" in content
@@ -530,6 +567,44 @@ async def _self_drive_signal_does_not_duplicate_pending_growth_task():
             wm_items = loop._wm.get_top(10)
             self_drive_items = [item for item in wm_items if item["kind"] == "self_drive"]
             assert self_drive_items == []
+        finally:
+            await loop.task_store.close()
+            await loop.provider.close()
+
+
+async def _self_drive_signal_does_not_duplicate_waiting_growth_task():
+    os.environ.setdefault("DASHSCOPE_API_KEY", "test-key")
+    os.environ.setdefault("GITHUB_TOKEN", "test-token")
+    from core.config import Config
+    from core.loop import CognitionLoop
+
+    cfg = Config.load(_proj_root() / "lingzhou.json.example")
+    with tempfile.TemporaryDirectory() as d:
+        cfg.loop.db_path = f"{d}/state/runtime.db"
+        cfg.loop.memory_dir = f"{d}/memory"
+        cfg.loop.workspace_dir = f"{d}/workspace"
+        cfg.loop.act = False
+        cfg.evolution.enabled = False
+
+        loop = CognitionLoop(cfg)
+        await loop.task_store.open()
+        try:
+            existing_id = await loop.task_store.add_task(
+                "已有等待中的自驱成长任务",
+                goal="等待中的自驱任务也应阻止重复创建",
+                source="self_drive",
+                status="waiting",
+                wait_kind="external",
+                next_step="收到外部日志后继续取证",
+            )
+            loop._behavior._wait_streak = cfg.thresholds.curiosity_idle_min_cycles
+
+            await loop._emit_self_drive_signal()
+
+            tasks = await loop.task_store.list_tasks(limit=20)
+            self_drive_tasks = [task for task in tasks if task.source == "self_drive"]
+            assert [task.id for task in self_drive_tasks] == [existing_id]
+            assert [item for item in loop._wm.get_top(10) if item["kind"] == "self_drive"] == []
         finally:
             await loop.task_store.close()
             await loop.provider.close()
@@ -706,7 +781,7 @@ async def _continue_phase_records_workbench_when_inner_round_limit_reached():
     workbench = execution.actions[-1].params["workbench"]
     assert workbench["recovery_state"] == "continue_round_limit_reached"
     assert "本 tick continue 阶段已执行 2 轮工具续判" in workbench["evidence"][0]
-    assert "基于最近 file.read 成功结果收敛判断" in workbench["next_verification"]
+    assert "基于最近一次低信息探索成功结果形成结论" in workbench["next_verification"]
 
 
 def test_continue_round_limit_prefers_runtime_recovery_next_step():
@@ -822,7 +897,8 @@ async def _continue_phase_gates_repeated_same_action_before_dispatch():
     assert execution.actions[0].chosen_action_id == "task.workbench"
     workbench = execution.actions[0].params["workbench"]
     assert workbench["recovery_state"] == "continue_repeat_action_gated"
-    assert "file.read /tmp/repeat.py" in workbench["next_verification"]
+    assert "/tmp/repeat.py" in workbench["next_verification"]
+    assert "shell.run/grep" in workbench["next_verification"]
 
 
 async def _continue_phase_inherits_task_id_for_task_scoped_tools():
@@ -1103,6 +1179,18 @@ def test_run_tick_maintenance_uses_configured_low_pressure_skip_threshold():
     asyncio.run(_run_tick_maintenance_uses_configured_low_pressure_skip_threshold())
 
 
+def test_run_tick_maintenance_auto_compacts_large_runtime_and_memory():
+    asyncio.run(_run_tick_maintenance_auto_compacts_large_runtime_and_memory())
+
+
+def test_run_tick_maintenance_auto_compaction_records_errors(monkeypatch):
+    asyncio.run(_run_tick_maintenance_auto_compaction_records_errors(monkeypatch))
+
+
+def test_run_tick_maintenance_auto_compaction_skips_concurrent_run(monkeypatch):
+    asyncio.run(_run_tick_maintenance_auto_compaction_skips_concurrent_run(monkeypatch))
+
+
 async def _run_tick_maintenance_uses_configured_global_md_warn_lines():
     from core.config import Config
     from core.loop.tick import _run_tick_maintenance
@@ -1252,6 +1340,304 @@ async def _run_tick_maintenance_uses_configured_low_pressure_skip_threshold():
 
     assert await _run_case(0.90) is False
     assert await _run_case(0.80) is True
+
+
+async def _run_tick_maintenance_auto_compacts_large_runtime_and_memory():
+    from core.config import Config
+    from core.loop.tick import _run_tick_maintenance
+
+    class _WM:
+        def __init__(self) -> None:
+            self.pressure = 0.1
+            self.items: list[Any] = []
+
+        def add(self, item: Any) -> None:
+            self.items.append(item)
+
+    class _Soul:
+        async def sync_md(self) -> None:
+            return None
+
+    class _TaskStore:
+        def __init__(self) -> None:
+            self.facts: dict[str, str] = {}
+
+        async def set_fact(self, key: str, value: str, scope: str = "general") -> None:
+            _ = scope
+            self.facts[key] = value
+
+        async def wal_checkpoint(self) -> None:
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        db_path = root / "runtime.db"
+        memory_dir = root / "memory"
+        node_dir = memory_dir / "nodes"
+        node_dir.mkdir(parents=True)
+        huge = "M" * 20_000 + "TAIL"
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("CREATE TABLE runs (id INTEGER PRIMARY KEY, data TEXT NOT NULL DEFAULT '{}')")
+            conn.execute(
+                "INSERT INTO runs (id, data) VALUES (?, ?)",
+                (1, json.dumps({"output_json": {"summary": huge}}, ensure_ascii=False)),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        (node_dir / "large.json").write_text(
+            json.dumps({"id": "large", "kind": "fact", "title": "large", "body": huge}, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        cfg = Config.model_validate({
+            "providers": {
+                "bailian": {
+                    "type": "openai_compat",
+                    "base_url": "https://example.invalid/v1",
+                    "api_key_env": "DASHSCOPE_API_KEY",
+                }
+            },
+            "model": "bailian/qwen3.6-plus",
+            "temperature": 0.7,
+            "timeout": 60.0,
+            "loop": {
+                "db_path": str(db_path),
+                "memory_dir": str(memory_dir),
+                "consolidate_every": 100,
+            },
+            "memory": {
+                "auto_compact_enabled": True,
+                "auto_compact_every_ticks": 1,
+                "auto_compact_runtime_db_min_bytes": 1,
+                "auto_compact_memory_dir_min_bytes": 1,
+                "auto_compact_vacuum": False,
+                "global_md_warn_bytes": 999999,
+                "global_md_warn_lines": 999999,
+            },
+            "thresholds": {
+                "wm_pressure_task": 0.8,
+            },
+        })
+        store = _TaskStore()
+        loop = cast("Any", SimpleNamespace(
+            _cfg=cfg,
+            _wm=_WM(),
+            _soul=_Soul(),
+            _task_store=store,
+            consolidated=False,
+        ))
+
+        async def _consolidate(active_task: Any) -> None:
+            loop.consolidated = True
+
+        loop._consolidate = _consolidate
+
+        await _run_tick_maintenance(loop, active_task=None, cycle=1)
+
+        conn = sqlite3.connect(db_path)
+        try:
+            run_data = json.loads(conn.execute("SELECT data FROM runs WHERE id=1").fetchone()[0])
+        finally:
+            conn.close()
+        node_data = json.loads((node_dir / "large.json").read_text(encoding="utf-8"))
+        marker = json.loads(store.facts["maintenance:auto_compact:last"])
+
+        assert "persistent storage truncated" in run_data["output_json"]["summary"]
+        assert "persistent storage truncated" in node_data["body"]
+        assert {report["kind"] for report in marker["reports"]} == {"runtime_db", "memory_dir"}
+        assert any("自动记忆维护" in item.content for item in loop._wm.items)
+        assert loop.consolidated is False
+
+
+async def _run_tick_maintenance_auto_compaction_records_errors(monkeypatch):
+    from core.config import Config
+    from core.loop.tick import _run_tick_maintenance
+    import core.maintenance as maintenance_mod
+
+    def _raise_runtime_compaction(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        _ = args, kwargs
+        raise RuntimeError("database is locked")
+
+    monkeypatch.setattr(maintenance_mod, "compact_runtime_db", _raise_runtime_compaction)
+
+    class _WM:
+        pressure = 0.1
+
+        def __init__(self) -> None:
+            self.items: list[Any] = []
+
+        def add(self, item: Any) -> None:
+            self.items.append(item)
+
+    class _Soul:
+        async def sync_md(self) -> None:
+            return None
+
+    class _TaskStore:
+        def __init__(self) -> None:
+            self.facts: dict[str, str] = {}
+
+        async def set_fact(self, key: str, value: str, scope: str = "general") -> None:
+            _ = scope
+            self.facts[key] = value
+
+        async def wal_checkpoint(self) -> None:
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "runtime.db"
+        db_path.write_text("large enough", encoding="utf-8")
+        cfg = Config.model_validate({
+            "providers": {
+                "bailian": {
+                    "type": "openai_compat",
+                    "base_url": "https://example.invalid/v1",
+                    "api_key_env": "DASHSCOPE_API_KEY",
+                }
+            },
+            "model": "bailian/qwen3.6-plus",
+            "temperature": 0.7,
+            "timeout": 60.0,
+            "loop": {
+                "db_path": str(db_path),
+                "memory_dir": str(Path(d) / "memory"),
+                "consolidate_every": 100,
+            },
+            "memory": {
+                "auto_compact_enabled": True,
+                "auto_compact_every_ticks": 1,
+                "auto_compact_runtime_db_min_bytes": 1,
+                "auto_compact_memory_dir_min_bytes": 0,
+                "global_md_warn_bytes": 999999,
+                "global_md_warn_lines": 999999,
+            },
+            "thresholds": {
+                "wm_pressure_task": 0.8,
+            },
+        })
+        store = _TaskStore()
+        loop = cast("Any", SimpleNamespace(
+            _cfg=cfg,
+            _wm=_WM(),
+            _soul=_Soul(),
+            _task_store=store,
+            consolidated=False,
+        ))
+
+        async def _consolidate(active_task: Any) -> None:
+            loop.consolidated = True
+
+        loop._consolidate = _consolidate
+
+        await _run_tick_maintenance(loop, active_task=None, cycle=1)
+
+        marker = json.loads(store.facts["maintenance:auto_compact:last"])
+        assert marker["reports"][0]["kind"] == "runtime_db"
+        assert marker["reports"][0]["error"] == "RuntimeError: database is locked"
+        assert loop._wm.items == []
+        assert loop.consolidated is False
+
+
+async def _run_tick_maintenance_auto_compaction_skips_concurrent_run(monkeypatch):
+    from core.config import Config
+    from core.loop.tick import _run_tick_maintenance
+    import core.maintenance as maintenance_mod
+
+    calls = 0
+
+    def _slow_runtime_compaction(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        nonlocal calls
+        _ = args, kwargs
+        calls += 1
+        time.sleep(0.05)
+        return {
+            "changed_rows": 1,
+            "changed_files": 0,
+            "saved_bytes": 10,
+            "vacuumed": False,
+        }
+
+    monkeypatch.setattr(maintenance_mod, "compact_runtime_db", _slow_runtime_compaction)
+
+    class _WM:
+        pressure = 0.1
+
+        def __init__(self) -> None:
+            self.items: list[Any] = []
+
+        def add(self, item: Any) -> None:
+            self.items.append(item)
+
+    class _Soul:
+        async def sync_md(self) -> None:
+            return None
+
+    class _TaskStore:
+        def __init__(self) -> None:
+            self.facts: dict[str, str] = {}
+
+        async def set_fact(self, key: str, value: str, scope: str = "general") -> None:
+            _ = scope
+            self.facts[key] = value
+
+        async def wal_checkpoint(self) -> None:
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        db_path = Path(d) / "runtime.db"
+        db_path.write_text("large enough", encoding="utf-8")
+        cfg = Config.model_validate({
+            "providers": {
+                "bailian": {
+                    "type": "openai_compat",
+                    "base_url": "https://example.invalid/v1",
+                    "api_key_env": "DASHSCOPE_API_KEY",
+                }
+            },
+            "model": "bailian/qwen3.6-plus",
+            "temperature": 0.7,
+            "timeout": 60.0,
+            "loop": {
+                "db_path": str(db_path),
+                "memory_dir": str(Path(d) / "memory"),
+                "consolidate_every": 100,
+            },
+            "memory": {
+                "auto_compact_enabled": True,
+                "auto_compact_every_ticks": 1,
+                "auto_compact_runtime_db_min_bytes": 1,
+                "auto_compact_memory_dir_min_bytes": 0,
+                "global_md_warn_bytes": 999999,
+                "global_md_warn_lines": 999999,
+            },
+            "thresholds": {
+                "wm_pressure_task": 0.8,
+            },
+        })
+        loop = cast("Any", SimpleNamespace(
+            _cfg=cfg,
+            _wm=_WM(),
+            _soul=_Soul(),
+            _task_store=_TaskStore(),
+            consolidated=False,
+        ))
+
+        async def _consolidate(active_task: Any) -> None:
+            loop.consolidated = True
+
+        loop._consolidate = _consolidate
+
+        await asyncio.gather(
+            _run_tick_maintenance(loop, active_task=None, cycle=1),
+            _run_tick_maintenance(loop, active_task=None, cycle=1),
+        )
+
+        assert calls == 1
+        assert len(loop._wm.items) == 1
+        assert "自动记忆维护" in loop._wm.items[0].content
+        assert loop.consolidated is False
 
 
 def test_post_tick_memory_crystallizes_task_summary_title_with_task_id():
@@ -1432,6 +1818,10 @@ def test_post_tick_memory_crystallizes_event_title_with_task_id():
     asyncio.run(_post_tick_memory_crystallizes_event_title_with_task_id())
 
 
+def test_post_tick_memory_skips_low_value_reflection_semantic_nodes():
+    asyncio.run(_post_tick_memory_skips_low_value_reflection_semantic_nodes())
+
+
 async def _post_tick_memory_crystallizes_event_title_with_task_id():
     from core.loop.tick import _post_tick_memory_impl
     from store.semantic import SemanticMemory
@@ -1467,6 +1857,69 @@ async def _post_tick_memory_crystallizes_event_title_with_task_id():
             node = semantic.get(f"event-task{task_id}-{ts_label}")
             assert node is not None
             assert node.title == f"[{ts_label}] task#{task_id} 事件任务"
+        finally:
+            await store.close()
+
+
+async def _post_tick_memory_skips_low_value_reflection_semantic_nodes():
+    import hashlib
+
+    from core.loop.tick import _post_tick_memory_impl
+    from store.semantic import SemanticMemory
+    from store.task import TaskStore
+
+    reflection = "继续分析近期失败模式，下一步沉淀失败经验并观察是否改善。"
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        store = TaskStore(root / "runtime.db")
+        await store.open()
+        try:
+            task_id = await store.add_task("低价值反思任务", goal="skip low value reflection", status="in_progress")
+            active_task = await store.get_task_by_id(task_id)
+            assert active_task is not None
+            semantic = SemanticMemory(root / "semantic")
+            loop = cast("Any", SimpleNamespace(
+                _task_store=store,
+                _episodic=SimpleNamespace(load_for_context=lambda task_id_str, n_recent=40000: "", record=lambda **kwargs: None),
+                _semantic=semantic,
+                _emotion=SimpleNamespace(valence=0.66, arousal=0.44),
+                _wm=SimpleNamespace(add=lambda item: None),
+                _cfg=SimpleNamespace(
+                    thresholds=SimpleNamespace(wm_pri_insight=0.8),
+                    memory=SimpleNamespace(chat_crystallize_every=1),
+                    emotion=SimpleNamespace(),
+                ),
+            ))
+            action = cast("Any", SimpleNamespace(
+                chosen_action_id="",
+                params={},
+                reflection=reflection,
+                rationale="",
+                reply_to_user="我会继续处理。",
+            ))
+            result = SimpleNamespace(summary="", skipped=False, error=None, kind="execute_result", priority=0.5)
+
+            await _post_tick_memory_impl(
+                loop,
+                action,
+                result,
+                active_task,
+                cycle=1,
+                user_message="继续",
+                chat_id="chat-low-value",
+            )
+
+            insight_id = f"insight_{hashlib.md5(reflection.encode()).hexdigest()[:10]}"
+            ts_label = datetime.now(UTC).strftime("%Y-%m-%d")
+            chat_digest = hashlib.md5(b"chat-low-value").hexdigest()[:12]
+            chat_node = semantic.get(f"chat-summary-{chat_digest}-{ts_label}")
+            turns, found = await store.get_fact(f"task:{task_id}:reflection_turns")
+            assert semantic.get(insight_id) is None
+            assert semantic.get(f"event-task{task_id}-{ts_label}") is None
+            assert chat_node is not None
+            assert reflection not in chat_node.body
+            assert found is True
+            assert turns == "1"
         finally:
             await store.close()
 

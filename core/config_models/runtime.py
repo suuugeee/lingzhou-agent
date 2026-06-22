@@ -185,7 +185,7 @@ class MemoryConfig(BaseModel):
         description="WM 条目正文短于此长度时默认不提升为语义节点，避免长期层充满碎片",
     )
     promotion_body_max_chars: int = Field(
-        default=0, ge=0,
+        default=12000, ge=0,
         description="提升到语义记忆的单节点正文上限（字符）；0 = 不限制",
     )
     promotion_reinforce_delta: float = Field(
@@ -202,17 +202,14 @@ class MemoryConfig(BaseModel):
             "routing_guard",
             "task_result",
             "progress_crystal",
-            "execute_result",
-            "run_monitor",
             "probe_result",
             "subagent_result",
             "skill_activation",
             "skill_evolution",
             "skill_synthesis",
-            "self_drive",
             "crash_recovery",
         ],
-        description="即使优先级不足，也允许直接提升到语义记忆的 WM kind 白名单",
+        description="允许进入语义晋升候选的 WM kind 白名单；仍需通过内容质量门，不能无条件保存原始流水",
     )
     promotion_fact_kinds: list[str] = Field(
         default_factory=lambda: ["user_message"],
@@ -225,6 +222,28 @@ class MemoryConfig(BaseModel):
     global_md_warn_lines: int = Field(
         default=600, ge=1,
         description="global.md 行数告警阈值；超过后在 maintenance 阶段向 WM 注入记忆压力感知信号",
+    )
+    auto_compact_enabled: bool = Field(
+        default=True,
+        description="maintenance 阶段是否启用低频自动 compact，防止 runtime.db / memory 目录长期膨胀",
+    )
+    auto_compact_every_ticks: int = Field(
+        default=50, ge=1,
+        description="自动 compact 的最小 tick 间隔；只在 cycle 能整除该值时检查，避免每轮扫库",
+    )
+    auto_compact_runtime_db_min_bytes: int = Field(
+        default=256 * 1024 * 1024,
+        ge=0,
+        description="runtime.db 文件达到此大小才触发自动 compact；0 表示不按 runtime.db 大小触发",
+    )
+    auto_compact_memory_dir_min_bytes: int = Field(
+        default=512 * 1024 * 1024,
+        ge=0,
+        description="memory 目录达到此大小才触发自动 compact；0 表示不按 memory 目录大小触发",
+    )
+    auto_compact_vacuum: bool = Field(
+        default=False,
+        description="自动 compact 后是否执行 VACUUM 回收文件空间；默认关闭，避免运行时长时间锁库",
     )
     run_result_success_activation: float = Field(
         default=_RUN_RESULT_SUCCESS_ACTIVATION, ge=0.0, le=1.0,

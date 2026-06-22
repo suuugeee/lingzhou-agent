@@ -5,6 +5,8 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from .compact import compact_runtime_mapping
+
 _TASK_CORE_DATA_KEYS = frozenset({
     "goal",
     "source",
@@ -108,6 +110,7 @@ class Task:
             "model_tier": self.model_tier,
         }
         d.update({k: v for k, v in self.extras.items() if k not in _TASK_CORE_DATA_KEYS})
+        d = compact_runtime_mapping(d)
         return json.dumps(d, ensure_ascii=False)
 
 
@@ -217,6 +220,7 @@ class Run:
             "progress": self.progress,
         }
         data.update(self.extras)
+        data = compact_runtime_mapping(data)
         return json.dumps(data, ensure_ascii=False)
 
 
@@ -271,4 +275,5 @@ class MetaReflection:
             "tool_name": self.tool_name,
         }
         data.update(self.extras)
+        data = compact_runtime_mapping(data)
         return json.dumps(data, ensure_ascii=False)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .base import BaseAsyncStore
+from .compact import compact_runtime_json_text
 
 FACT_UPSERT_SQL = (
     "INSERT INTO facts (key, value, scope, updated_at) VALUES (?,?,?,datetime('now')) "
@@ -10,7 +11,11 @@ FACT_UPSERT_SQL = (
 
 
 def build_fact_upsert(key: str, value: str, *, scope: str = "general") -> tuple[str, tuple[str, str, str]]:
-    return FACT_UPSERT_SQL, (str(key), str(value), str(scope or "general"))
+    return FACT_UPSERT_SQL, (
+        str(key),
+        compact_runtime_json_text(value, marker_label="fact value"),
+        str(scope or "general"),
+    )
 
 
 class FactStore(BaseAsyncStore):

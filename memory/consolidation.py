@@ -22,14 +22,11 @@ _DEFAULT_PROMOTION_SEMANTIC_KINDS = (
     "routing_guard",
     "task_result",
     "progress_crystal",
-    "execute_result",
-    "run_monitor",
     "probe_result",
     "subagent_result",
     "skill_activation",
     "skill_evolution",
     "skill_synthesis",
-    "self_drive",
     "crash_recovery",
 )
 
@@ -54,6 +51,99 @@ _KIND_TO_MEMORY_KIND = {
     "self_drive": "drive_trace",
     "crash_recovery": "failure_trace",
 }
+
+_NOISY_OPERATIONAL_KINDS = frozenset({
+    "execute_result",
+    "run_monitor",
+})
+
+_PROCESS_SIGNAL_KINDS = frozenset({
+    "self_drive",
+})
+
+_RAW_OPERATIONAL_TEXT_MARKERS = (
+    "stdout",
+    "stderr",
+    "traceback",
+    "process exited with code",
+    "exit code",
+    "wall time",
+    "run_id",
+    "tool=",
+    "status=",
+    "[execute_result]",
+    "[run 监控]",
+    "command:",
+)
+
+_SELF_DRIVE_SIGNAL_MARKERS = (
+    "[自驱事件]",
+    "created_self_drive_task:",
+    "candidate_task_title:",
+    "candidate_task_goal:",
+    "candidate_next_step:",
+    "candidate_question:",
+    "candidate_evidence_needed:",
+    "available_directions:",
+)
+
+_REFLECTION_LIKE_KINDS = frozenset({
+    "self_awareness",
+    "behavior_sense",
+    "task_reflection",
+    "meta_reflection",
+    "learned_insight",
+    "structural",
+    "observation",
+    "consolidated_insight",
+    "self_model_signal",
+})
+
+_LOW_VALUE_PROCESS_MARKERS = (
+    "继续分析",
+    "继续观察",
+    "后续观察",
+    "进一步观察",
+    "沉淀失败经验",
+    "分析近期失败模式",
+    "校准路径认知",
+    "梳理近期",
+    "下一步",
+    "准备",
+    "计划",
+    "待进一步",
+    "follow up",
+    "next step",
+    "continue",
+    "observe",
+)
+
+_DURABLE_VALUE_MARKERS = (
+    "结论",
+    "根因",
+    "原因是",
+    "修复",
+    "已验证",
+    "测试通过",
+    "可复用经验",
+    "稳定规则",
+    "规则",
+    "边界",
+    "必须",
+    "不再",
+    "禁止",
+    "prefer",
+    "preference",
+    "root cause",
+    "verified",
+    "passed",
+    "failed",
+    "fix",
+    "rule",
+)
+
+_EPISODIC_SUMMARY_MAX_CHARS = 1600
+_EPISODIC_OPERATIONAL_PREVIEW_CHARS = 80
 
 _KIND_IMPORTANCE_BONUS = {
     "self_model_signal": 0.12,
@@ -127,7 +217,7 @@ def build_consolidation_plan(
         content = str(item.get("content") or "").strip()
         if not content:
             continue
-        summary_lines.append(f"- [{kind or 'unknown'}] {content}")
+        summary_lines.append(_episodic_summary_line(kind, content))
 
         if kind in fact_kinds:
             for fact in _extract_user_facts(content):
@@ -136,7 +226,13 @@ def build_consolidation_plan(
         if len(semantic_nodes) >= max_nodes:
             continue
         priority = _coerce_priority(item.get("priority"))
+        if kind not in semantic_allow and kind not in _KIND_TO_MEMORY_KIND:
+            continue
+        if kind in _NOISY_OPERATIONAL_KINDS and kind not in semantic_allow:
+            continue
         if priority < priority_threshold and kind not in semantic_allow:
+            continue
+        if kind in _PROCESS_SIGNAL_KINDS and kind not in semantic_allow:
             continue
         node = _build_semantic_node(
             kind=kind,
@@ -238,6 +334,8 @@ def _build_semantic_node(
     min_chars = max(1, int(getattr(memory_cfg, "promotion_min_chars", 24)))
     if _content_length_units(cleaned) < min_chars:
         return None
+    if _should_skip_semantic_promotion(kind, cleaned):
+        return None
 
     memory_kind = _KIND_TO_MEMORY_KIND.get(kind, "working_trace")
     importance_bonus = _KIND_IMPORTANCE_BONUS.get(memory_kind, 0.0)
@@ -312,6 +410,114 @@ def _split_sentences(text: str) -> list[str]:
 def _clean_content(content: str) -> str:
     text = re.sub(r"^\[[^\]]+\]\s*", "", content.strip())
     return re.sub(r"\s+", " ", text).strip()
+
+
+def _episodic_summary_line(kind: str, content: str) -> str:
+    label = kind or "unknown"
+    cleaned = _clean_content(content)
+    if kind in _NOISY_OPERATIONAL_KINDS and _looks_like_raw_operational_text(cleaned):
+        return (
+            f"- [{label}] omitted raw operational trace "
+            f"chars={len(content)} sha256={_digest_text(content)} "
+            f"preview={_clip_inline(cleaned, _EPISODIC_OPERATIONAL_PREVIEW_CHARS)}"
+        )
+    if kind == "self_drive" and _looks_like_unresolved_self_drive_signal(cleaned):
+        return (
+            f"- [{label}] omitted unresolved self-drive signal "
+            f"chars={len(content)} sha256={_digest_text(content)} "
+            f"preview={_clip_inline(cleaned, _EPISODIC_OPERATIONAL_PREVIEW_CHARS)}"
+        )
+    return f"- [{label}] {_clip_persistent_summary(content)}"
+
+
+def _should_skip_semantic_promotion(kind: str, cleaned: str) -> bool:
+    """Keep raw process traces out of long-term semantic memory.
+
+    Consolidation still writes the full item into episodic memory; semantic memory is
+    reserved for stable facts, rules, skills and conclusions.
+    """
+    if kind in _NOISY_OPERATIONAL_KINDS and _looks_like_raw_operational_text(cleaned):
+        return True
+    if kind == "self_drive" and _looks_like_unresolved_self_drive_signal(cleaned):
+        return True
+    if is_low_value_semantic_text(kind, "", cleaned):
+        return True
+    return False
+
+
+def is_low_value_semantic_text(kind: str, title: str, body: str) -> bool:
+    """Return True for process-only notes that should not become long-term memory."""
+    kind_text = str(kind or "").strip()
+    if kind_text not in _REFLECTION_LIKE_KINDS:
+        return False
+    text = _clean_content(f"{title}\n{body}")
+    if not text:
+        return True
+    lowered = text.lower()
+    if any(marker in text or marker in lowered for marker in _DURABLE_VALUE_MARKERS):
+        return False
+    if _has_evidence_anchor(text):
+        return False
+    return any(marker in text or marker in lowered for marker in _LOW_VALUE_PROCESS_MARKERS)
+
+
+def _clip_persistent_summary(text: str) -> str:
+    if len(text) <= _EPISODIC_SUMMARY_MAX_CHARS:
+        return text
+    digest = _digest_text(text)
+    marker = f"\n...[episodic summary truncated chars={len(text)} sha256={digest}]...\n"
+    budget = max(0, _EPISODIC_SUMMARY_MAX_CHARS - len(marker))
+    head = max(120, budget // 2)
+    tail = max(0, budget - head)
+    return text[:head] + marker + (text[-tail:] if tail else "")
+
+
+def _clip_inline(text: str, limit: int) -> str:
+    normalized = " ".join(str(text or "").split())
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[: max(0, limit - 3)]}..."
+
+
+def _digest_text(text: str) -> str:
+    return hashlib.sha256(str(text or "").encode("utf-8", errors="replace")).hexdigest()
+
+
+def _looks_like_raw_operational_text(text: str) -> bool:
+    lowered = text.lower()
+    marker_hits = sum(1 for marker in _RAW_OPERATIONAL_TEXT_MARKERS if marker in lowered)
+    if marker_hits <= 0:
+        return False
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    line_count = len(lines)
+    long_lines = sum(1 for line in lines if len(line) > 240)
+    jsonish_lines = sum(1 for line in lines if line.startswith(("{", "[")) and line.endswith(("}", "]")))
+    if marker_hits >= 2 and len(text) > 200:
+        return True
+    if len(text) > 1200 and (line_count >= 8 or long_lines >= 3):
+        return True
+    return line_count >= 40 and jsonish_lines >= 8
+
+
+def _looks_like_unresolved_self_drive_signal(text: str) -> bool:
+    lowered = text.lower()
+    marker_hits = sum(1 for marker in _SELF_DRIVE_SIGNAL_MARKERS if marker.lower() in lowered)
+    if marker_hits <= 0:
+        return False
+    conclusion_markers = ("结论", "已验证", "稳定规则", "可复用经验", "learned", "rule:")
+    if any(marker in text for marker in conclusion_markers):
+        return False
+    return True
+
+
+def _has_evidence_anchor(text: str) -> bool:
+    return bool(re.search(
+        r"(/[^\s]+|[\w.-]+\.(?:py|ts|tsx|js|java|md|json|ya?ml|log|db)|"
+        r"\b(?:Traceback|Exception|Error|pytest|sha256=|token_revoked|exit code)\b)",
+        text,
+        flags=re.IGNORECASE,
+    ))
 
 
 def _content_length_units(text: str) -> int:

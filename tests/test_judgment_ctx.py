@@ -97,6 +97,42 @@ def test_continue_low_increment_budget_builds_workbench_gate():
     assert gated.params["workbench"]["recovery_state"] == "continue_low_increment_budget_reached"
 
 
+def test_memory_search_control_query_rewrites_to_workbench():
+    asyncio.run(_memory_search_control_query_rewrites_to_workbench())
+
+
+async def _memory_search_control_query_rewrites_to_workbench():
+    from core.judgment.boundary.pipeline import normalize_judgment_output
+
+    action = _judgment_output(
+        decision="act",
+        chosen_action_id="memory.search",
+        params={
+            "query": (
+                "基于最近 memory.search 成功结果收敛判断。"
+                "不要重复同一 query 的 memory.search；改为读取命中语义 ID 或切换到 shell.run/file.read。"
+            )
+        },
+        rationale="任务仍需推进，继续 memory.search",
+    )
+
+    normalized = await normalize_judgment_output(
+        SimpleNamespace(),
+        action,
+        context_text="",
+        raw="",
+        registry=_WorkbenchRegistry(),
+    )
+
+    assert normalized.decision == "act"
+    assert normalized.chosen_action_id == "task.workbench"
+    workbench = normalized.params["workbench"]
+    assert workbench["recovery_state"] == "memory_search_control_query_gated"
+    assert "控制约束" in workbench["intent"]
+    assert "不要重复同一 query" in workbench["evidence"][0]
+    assert "具体语义节点 ID" in workbench["next_verification"]
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # SemanticMemory — 多锚点情境召回（ACT-R 收敛激活）
 # ══════════════════════════════════════════════════════════════════════════════
@@ -151,6 +187,7 @@ def test_memory_query_ignores_runtime_process_scaffolding_next_step():
     from core.cortex import intent as cortex_intent
     from core.judgment.assembler.assemble_context import (
         _build_context_anchors,
+        _filter_context_semantic_memories,
         _memory_search_query_for_task,
     )
 
@@ -175,6 +212,18 @@ def test_memory_query_ignores_runtime_process_scaffolding_next_step():
     assert query == "定位长期记忆召回差强人意的原因"
     assert anchors[0] == "定位长期记忆召回差强人意的原因"
     assert "下一轮先综合本 tick 工具结果" not in " ".join(anchors)
+
+    memories = _filter_context_semantic_memories(
+        [
+            {"id": "run-1", "kind": "run_result", "title": "pytest stdout", "body": "raw output", "score": 0.99},
+            {"id": "meta-1", "kind": "meta_reflection", "title": "继续观察", "body": "下一步继续沉淀", "score": 0.95},
+            {"id": "fact-1", "kind": "fact", "title": "记忆裁剪规则", "body": "保留可复用结论", "score": 0.80},
+            {"id": "skill-1", "kind": "learned_skill", "title": "排障步骤", "body": "先定位真实链路", "score": 0.70},
+        ],
+        limit=1,
+    )
+
+    assert [item["id"] for item in memories] == ["fact-1"]
 
 
 def test_fill_template_raises_when_variable_missing():
@@ -392,7 +441,7 @@ def test_prefer_tier_for_task_uses_pending_then_task_default():
         model_tier="reader",
     )
 
-    assert _prefer_tier_for_task(None, task) is None
+    assert _prefer_tier_for_task(None, task) == "reader"
     assert _prefer_tier_for_task("reader", task) == "reader"
     assert _prefer_tier_for_task(" Reader ", task) == "reader"
     assert _prefer_tier_for_task("repair", task) == "repair"
@@ -1294,7 +1343,7 @@ def test_select_provider_build_failure_enters_config_cooldown_and_suppresses_dup
     })
 
     layer = JudgmentLayer(_DummyProvider(), ToolRegistry(), cfg)
-    layer._executor._tier_model_candidates = lambda tier, routing_overrides=None: ("deepseek/deepseek-v4-flash",)  # type: ignore[method-assign]
+    layer._executor._tier_model_candidates = lambda tier, **kwargs: ("deepseek/deepseek-v4-flash",)  # type: ignore[method-assign]
     layer._executor._fallback_tiers = lambda tier, exclude_reader=False: ()  # type: ignore[method-assign]
     layer._executor._find_or_create_provider = lambda model_ref: (_ for _ in ()).throw(RuntimeError(  # type: ignore[method-assign]
         "OpenAI 兼容 provider 的环境变量 'DEEPSEEK_API_KEY' 为空，请设置该变量或从 routing/model_fallbacks 中移除此 provider。"
@@ -1423,6 +1472,11 @@ def test_fmt_config_snapshot_exposes_reference_thresholds():
             "daily_summary_max_chars": 1500,
             "daily_summary_activation": 0.77,
             "daily_summary_importance": 0.84,
+            "auto_compact_enabled": True,
+            "auto_compact_every_ticks": 12,
+            "auto_compact_runtime_db_min_bytes": 123456,
+            "auto_compact_memory_dir_min_bytes": 654321,
+            "auto_compact_vacuum": True,
         },
         "emotion": {
             "reflection_valence_history_weight": 0.7,
@@ -1469,7 +1523,7 @@ def test_fmt_config_snapshot_exposes_reference_thresholds():
     assert "consolidate_low_pressure_skip_threshold: 0.81" in text
     assert "promotion_priority_threshold: 0.78" in text
     assert "promotion_max_nodes_per_consolidation: 6" in text
-    assert "promotion_body_max_chars: 0" in text
+    assert "promotion_body_max_chars: 12000" in text
     assert "promotion_reinforce_delta: 0.05" in text
     assert "daily_recall_days: 3" in text
     assert "daily_recall_max_chars: 640" in text
@@ -1480,6 +1534,11 @@ def test_fmt_config_snapshot_exposes_reference_thresholds():
     assert "daily_summary_importance: 0.84" in text
     assert "global_md_warn_bytes: 12345" in text
     assert "global_md_warn_lines: 67" in text
+    assert "auto_compact_enabled: True" in text
+    assert "auto_compact_every_ticks: 12" in text
+    assert "auto_compact_runtime_db_min_bytes: 123456" in text
+    assert "auto_compact_memory_dir_min_bytes: 654321" in text
+    assert "auto_compact_vacuum: True" in text
     assert "reference_topic_anchor_min_chars: 4" in text
     assert "reference_time_phrase_hours" not in text
     assert "reference_days_ago_pattern" not in text
@@ -2005,8 +2064,8 @@ async def test_chat_with_retry_output_overflow_skips_prompt_compression(monkeypa
     assert "messages_omitted=false" in caplog.text
 
 
-def test_fmt_chat_history_keeps_full_content():
-    """有预算时丢弃最旧整轮，不在单条消息内截断（ADR 0015）。"""
+def test_fmt_chat_history_keeps_budget_by_dropping_old_turns_then_clipping_singletons():
+    """有预算时优先丢弃最旧整轮；单条仍超长时裁剪头尾。"""
     from core.judgment.context.sections import _fmt_chat_history
 
     messages = [
@@ -2020,6 +2079,13 @@ def test_fmt_chat_history_keeps_full_content():
     trimmed = _fmt_chat_history(messages, max_chars=20)
     assert trimmed == "我: 123456789"
     assert "abcdefghi" not in trimmed
+
+    huge = "START" + "A" * 500 + "TAIL"
+    clipped = _fmt_chat_history([{"role": "user", "content": huge}], max_chars=80)
+    assert "START" in clipped
+    assert "TAIL" in clipped
+    assert "chars omitted" in clipped
+    assert len(clipped) <= 120
 
 
 def test_tool_tier_uses_manifest_truth_for_reasoner_tools():
@@ -2882,6 +2948,12 @@ def test_action_made_progress_result_aware():
     config_set_action = _judgment_output(decision="act", chosen_action_id="config.set", params={"key": "loop.max_idle_gap"})
     empty_mutation = ToolResult(summary="")
     assert _action_made_progress(config_set_action, empty_mutation)[0] is True
+
+    workbench_action = _judgment_output(decision="act", chosen_action_id="task.workbench", params={})
+    workbench_res = ToolResult(summary="task.workbench id=1", state_delta={"cortex": {"next_verification": "继续验证"}})
+    made_progress, reason = _action_made_progress(workbench_action, workbench_res)
+    assert made_progress is False
+    assert "不视为外部推进" in reason
 
     fail_action = _judgment_output(decision="act", chosen_action_id="file.read", params={"path": "/tmp/missing"})
     fail_res = ToolResult(summary="文件不存在: /tmp/missing", error="FileNotFound")
@@ -4436,6 +4508,11 @@ async def _fmt_context_facts_surfaces_task_and_recent_general_facts():
         assert task is not None
 
         await store.set_fact(f'task:{task_id}:progress', '已确认 sqlite 为主载体', scope='task')
+        await store.set_fact(
+            f'task:{task_id}:large_json',
+            json.dumps({"head": "START", "payload": "A" * 5000 + "TAIL"}, ensure_ascii=False),
+            scope='task',
+        )
         await store.set_fact('legacy_runtime.workspace_memory.primary_carrier', '/root/.legacy-runtime/memory/main.sqlite')
         await store.set_fact('pref:routing_overrides', '{"reader":"demo"}', scope='system')
 
@@ -4443,6 +4520,11 @@ async def _fmt_context_facts_surfaces_task_and_recent_general_facts():
         text = _fmt_context_facts(facts)
 
         assert f'task:{task_id}:progress' in text
+        assert f'task:{task_id}:large_json' in text
+        assert "START" in text
+        assert "TAIL" in text
+        assert "chars omitted" in text
+        assert "A" * 1000 not in text
         assert 'legacy_runtime.workspace_memory.primary_carrier' in text
         assert 'pref:routing_overrides' not in text
         await store.close()

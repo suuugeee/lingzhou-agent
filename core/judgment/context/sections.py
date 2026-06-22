@@ -16,6 +16,14 @@ if TYPE_CHECKING:
     from store.semantic import SemanticMemory
     from tools.registry import ToolManifest
 
+_OPERATIONAL_WM_KINDS = frozenset({
+    "execute_result",
+    "run_monitor",
+    "run_result",
+    "working_trace",
+})
+_WM_ITEM_CONTEXT_MAX_CHARS = 1200
+
 
 def _cached_section(cache_key: str, build: Callable[[], str]) -> str:
     if cache_key in _context_fmt_cache:
@@ -57,10 +65,21 @@ def _fmt_wm(
         header = f"[{wm_count}/{wm_capacity}，{wm_count / wm_capacity:.0%}]"
     if not items:
         return f"{header} （工作记忆为空）"
-    anti_loop = [item for item in items if item.get("kind") == "self_awareness"]
-    rest = [item for item in items if item.get("kind") != "self_awareness"]
+    operational_counts = _operational_wm_counts(items)
+    visible_items = [
+        item for item in items
+        if str(item.get("kind") or "") not in _OPERATIONAL_WM_KINDS
+    ]
+    anti_loop = [item for item in visible_items if item.get("kind") == "self_awareness"]
+    rest = [item for item in visible_items if item.get("kind") != "self_awareness"]
     ordered = anti_loop + rest
-    lines = [header] + [f"- [{item['kind']}|p={item.get('priority', 0):.2f}] {item['content']}" for item in ordered]
+    lines = [header] + [
+        f"- [{item['kind']}|p={item.get('priority', 0):.2f}] "
+        f"{_clip_for_context(str(item.get('content') or ''), _WM_ITEM_CONTEXT_MAX_CHARS)}"
+        for item in ordered
+    ]
+    if operational_counts:
+        lines.append(f"- [operational_summary] omitted raw operational WM: {operational_counts}")
     large_items = sorted(ordered, key=lambda item: _estimate_tokens(item.get("content", "")), reverse=True)
     large_items = [item for item in large_items if _estimate_tokens(item.get("content", "")) > 100]
     if large_items:
@@ -70,6 +89,15 @@ def _fmt_wm(
         )
         lines.append(f"⚠ 大条目（可能坠占预算）: {warnings_str}")
     return "\n".join(lines)
+
+
+def _operational_wm_counts(items: list[dict[str, Any]]) -> str:
+    counts: dict[str, int] = {}
+    for item in items:
+        kind = str(item.get("kind") or "")
+        if kind in _OPERATIONAL_WM_KINDS:
+            counts[kind] = counts.get(kind, 0) + 1
+    return ", ".join(f"{kind}={count}" for kind, count in sorted(counts.items()))
 
 
 def _fmt_memory_recall(
@@ -265,6 +293,11 @@ def _fmt_config_snapshot(cfg: Config) -> str:
         f"  daily_summary_importance: {me.daily_summary_importance}",
         f"  global_md_warn_bytes: {me.global_md_warn_bytes}",
         f"  global_md_warn_lines: {me.global_md_warn_lines}",
+        f"  auto_compact_enabled: {me.auto_compact_enabled}",
+        f"  auto_compact_every_ticks: {me.auto_compact_every_ticks}",
+        f"  auto_compact_runtime_db_min_bytes: {me.auto_compact_runtime_db_min_bytes}",
+        f"  auto_compact_memory_dir_min_bytes: {me.auto_compact_memory_dir_min_bytes}",
+        f"  auto_compact_vacuum: {me.auto_compact_vacuum}",
         "",
         "## Ethos guardrails (soul.ethos.*)",
         f"  ema_alpha: {so.ethos.ema_alpha}",
@@ -435,7 +468,7 @@ def _fmt_chat_history(messages: list[dict[str, Any]], max_chars: int = 300) -> s
     """将最近 N 条对话消息格式化为 LLM 可读的历史轮次。
 
     role=user 显示为 '用户:', role=assistant 显示为 '我:'。
-    超 max_chars 时仅丢弃**最旧完整轮次**（整行），不在单条消息内截断（ADR 0015）。
+    超 max_chars 时优先丢弃最旧完整轮次；单条消息仍超预算时保留头尾摘要。
     """
     cache_key = f"_fmt_chat_history:{max_chars}:{hash(str(messages)) if messages else 'none'}"
     if cache_key in _context_fmt_cache:
@@ -459,7 +492,7 @@ def _fmt_chat_history(messages: list[dict[str, Any]], max_chars: int = 300) -> s
             lines.pop(0)
         result = "\n".join(lines)
         if len(result) > max_chars and len(lines) == 1:
-            result = lines[0]
+            result = _clip_for_context(lines[0], max_chars)
     else:
         result = "\n".join(lines)
     _cache_put(cache_key, result)

@@ -4,6 +4,8 @@ import json
 import sqlite3
 from datetime import UTC, datetime
 
+from store.compact import compact_runtime_mapping
+
 DDL = """
 PRAGMA journal_mode=WAL;
 PRAGMA synchronous=NORMAL;
@@ -136,7 +138,7 @@ def migrate_from_jsonl(memory) -> None:
                 ts = data.pop("ts", datetime.now(UTC).isoformat())
                 memory._conn.execute(
                     "INSERT INTO events(event_type, ts, data) VALUES (?, ?, ?)",
-                    (et, ts, json.dumps(data, ensure_ascii=False)),
+                    (et, ts, json.dumps(compact_runtime_mapping(data), ensure_ascii=False)),
                 )
             except Exception:
                 pass

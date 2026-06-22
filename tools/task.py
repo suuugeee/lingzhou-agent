@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging as _logging
+import re
 import uuid
 from typing import Any
 
@@ -52,6 +53,109 @@ def _is_self_drive_growth_task(task: Any) -> bool:
     return isinstance(cortex, dict) and str(cortex.get("intent") or "") == "self_drive_growth"
 
 
+_SELF_DRIVE_EVIDENCE_ANCHOR_RE = re.compile(
+    r"("
+    r"/[^\s]+|"
+    r"[\w./-]+\.(?:py|ts|tsx|js|java|md|json|ya?ml|log|db|sqlite|txt)|"
+    r"\b(?:run|task|trace|failure|error|exception|pytest|exit code|sha256)[#:= -]*[A-Za-z0-9_.-]*|"
+    r"\b[a-z_]+=\d+\b|"
+    r"\b\d+(?:\.\d+)?\s*(?:次|条|个|bytes|kb|mb|gb|mib|gib|ms|s|%)\b"
+    r")",
+    re.IGNORECASE,
+)
+_TASK_SKILL_BODY_MAX_CHARS = 4000
+_TASK_SKILL_LINE_MAX_CHARS = 600
+_TASK_SKILL_MAX_LINES = 12
+_TASK_SKILL_VALUE_MARKERS = (
+    "结论",
+    "根因",
+    "原因是",
+    "已验证",
+    "验证通过",
+    "测试通过",
+    "修复",
+    "规则",
+    "边界",
+    "必须",
+    "不再",
+    "禁止",
+    "root cause",
+    "verified",
+    "passed",
+    "failed",
+    "fix",
+    "rule",
+)
+_TASK_SKILL_RAW_MARKERS = (
+    "stdout",
+    "stderr",
+    "traceback",
+    "process exited with code",
+    "wall time",
+    "run_id",
+    "command:",
+)
+
+
+def _has_concrete_self_drive_evidence(text: Any) -> bool:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return False
+    return bool(_SELF_DRIVE_EVIDENCE_ANCHOR_RE.search(value))
+
+
+def _has_task_skill_value(text: Any) -> bool:
+    value = " ".join(str(text or "").split())
+    if not value:
+        return False
+    lowered = value.lower()
+    return bool(_SELF_DRIVE_EVIDENCE_ANCHOR_RE.search(value)) or any(
+        marker in value or marker in lowered
+        for marker in _TASK_SKILL_VALUE_MARKERS
+    )
+
+
+def _looks_like_raw_task_skill_line(text: str) -> bool:
+    lowered = text.lower()
+    marker_hits = sum(1 for marker in _TASK_SKILL_RAW_MARKERS if marker in lowered)
+    if marker_hits <= 0:
+        return False
+    return len(text) > 240 or marker_hits >= 2
+
+
+def _clip_task_skill_line(text: str) -> str:
+    value = " ".join(str(text or "").split())
+    if len(value) <= _TASK_SKILL_LINE_MAX_CHARS:
+        return value
+    return value[: _TASK_SKILL_LINE_MAX_CHARS - 1].rstrip() + "…"
+
+
+def _compile_task_narrative_skill_body(task: Any, narrative: str) -> str:
+    selected: list[str] = []
+    for raw_line in str(narrative or "").splitlines():
+        line = raw_line.strip(" \t\r\n-*`")
+        if not line or _looks_like_raw_task_skill_line(line):
+            continue
+        if not _has_task_skill_value(line):
+            continue
+        clipped = _clip_task_skill_line(line)
+        if clipped and clipped not in selected:
+            selected.append(clipped)
+        if len(selected) >= _TASK_SKILL_MAX_LINES:
+            break
+    if not selected:
+        return ""
+    body = "\n".join([
+        f"task_id={getattr(task, 'id', '')}",
+        f"title={getattr(task, 'title', '')}",
+        "compiled_task_learning:",
+        *[f"- {line}" for line in selected],
+    ])
+    if len(body) <= _TASK_SKILL_BODY_MAX_CHARS:
+        return body
+    return body[: _TASK_SKILL_BODY_MAX_CHARS - 1].rstrip() + "…"
+
+
 def _self_drive_growth_completion_blockers(task: Any, recent_runs: list[Any]) -> list[str]:
     if not _is_self_drive_growth_task(task):
         return []
@@ -69,11 +173,11 @@ def _self_drive_growth_completion_blockers(task: Any, recent_runs: list[Any]) ->
     result_json = getattr(task, "result_json", None)
     cortex = result_json.get("cortex") if isinstance(result_json, dict) else {}
     evidence = cortex.get("evidence") if isinstance(cortex, dict) else None
-    has_evidence = isinstance(evidence, list) and any(str(item or "").strip() for item in evidence)
-    has_current_step = bool(str(getattr(task, "current_step", "") or "").strip())
+    has_evidence = isinstance(evidence, list) and any(_has_concrete_self_drive_evidence(item) for item in evidence)
+    has_current_step = _has_concrete_self_drive_evidence(getattr(task, "current_step", ""))
     summary = str(result_json.get("summary") or "").strip() if isinstance(result_json, dict) else ""
-    if not (has_evidence or has_current_step or summary):
-        blockers.append("尚未把成长证据写入 task.workbench/current_step/result summary。")
+    if not (has_evidence or has_current_step or _has_concrete_self_drive_evidence(summary)):
+        blockers.append("尚未把带具体锚点的成长证据写入 task.workbench/current_step/result summary。")
     return blockers
 
 
@@ -180,7 +284,18 @@ def _run_workbench_cortex(run: Any) -> dict[str, Any]:
     return {}
 
 
-def _latest_workbench_verification_gate(recent_runs: list[Any]) -> tuple[str, int | None]:
+def _workbench_has_explicit_resolved_verification(run: Any) -> bool:
+    if str(getattr(run, "tool_name", "") or "") != "task.workbench":
+        return False
+    cortex = _run_workbench_cortex(run)
+    state = cortex.get(cortex_intent.VERIFICATION_STATE_KEY) if isinstance(cortex, dict) else None
+    if not isinstance(state, dict):
+        return False
+    status = str(state.get("status") or "").strip().lower()
+    return status in cortex_intent.VERIFICATION_RESOLVED_STATES
+
+
+def _unresolved_workbench_verification_gate(recent_runs: list[Any]) -> tuple[str, int | None]:
     for idx, run in enumerate(recent_runs):
         if str(getattr(run, "tool_name", "") or "") != "task.workbench":
             continue
@@ -188,21 +303,24 @@ def _latest_workbench_verification_gate(recent_runs: list[Any]) -> tuple[str, in
             _run_workbench_cortex(run)
         )
         if status == "pending":
+            newer_runs = recent_runs[:idx]
+            if any(
+                cortex_intent.is_successful_verification_run(
+                    newer_run,
+                    next_verification=next_verification,
+                )
+                for newer_run in newer_runs
+            ):
+                continue
+            if any(_workbench_has_explicit_resolved_verification(newer_run) for newer_run in newer_runs):
+                continue
             return next_verification, idx
-        return "", None
     return "", None
 
 
 def _unresolved_workbench_verification_blockers(task: Any, recent_runs: list[Any]) -> list[str]:
-    next_verification, latest_workbench_idx = _latest_workbench_verification_gate(recent_runs)
-    if not next_verification or latest_workbench_idx is None:
-        return []
-
-    newer_runs = recent_runs[:latest_workbench_idx]
-    if any(
-        cortex_intent.is_successful_verification_run(run, next_verification=next_verification)
-        for run in newer_runs
-    ):
+    next_verification, workbench_idx = _unresolved_workbench_verification_gate(recent_runs)
+    if not next_verification or workbench_idx is None:
         return []
 
     return [
@@ -387,6 +505,29 @@ def _similar_task_source_filters(source: str) -> tuple[tuple[str, ...] | None, t
     if normalized_source == "self_drive":
         return ("self_drive",), None
     return None, ("self_drive",)
+
+
+def _self_drive_wait_requires_evidence(
+    task: Any,
+    *,
+    wait_kind: str,
+    wait_key: str,
+    next_step: str,
+) -> str:
+    if getattr(task, "source", None) != "self_drive":
+        return ""
+    if str(getattr(task, "status", "") or "").strip() in {"done", "cancelled"}:
+        return ""
+    step = str(next_step or getattr(task, "next_step", "") or "").strip()
+    if not step or not cortex_intent.contains_evidence_intent(step):
+        return ""
+    has_explicit_dependency = bool(wait_key) and wait_kind in {"process", "task", "signal"}
+    if has_explicit_dependency:
+        return ""
+    return (
+        "自驱任务的 next_step 明确要求取证，不能在没有明确外部依赖锚点时进入 waiting；"
+        "请先执行 file.read/shell.run/probe.run 等低成本取证动作，或写入 task.workbench 说明具体依赖。"
+    )
 
 
 @tool(ToolManifest(
@@ -578,7 +719,7 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             )
         workbench_verification_blockers = _unresolved_workbench_verification_blockers(task, recent_runs)
         if workbench_verification_blockers:
-            next_verification, _ = _latest_workbench_verification_gate(recent_runs)
+            next_verification, _ = _unresolved_workbench_verification_gate(recent_runs)
             if not next_verification:
                 next_verification = str(_task_cortex(task).get("next_verification") or "").strip()
             return _completion_block_result(
@@ -701,14 +842,15 @@ async def task_complete(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     # 程序性记忆编译：任务叙事 → 语义记忆节点（Anderson 1983 ACT-R）
     task_id_str = str(task.id)
     narrative = ctx.episodic.load_for_context(task_id_str, n_recent=5)
-    if narrative.strip():
+    skill_body = _compile_task_narrative_skill_body(task, narrative)
+    if skill_body:
         node_id = f"skill-{uuid.uuid4().hex[:12]}"
         await metabolic_add_semantic_memory(
             ctx,
             node_id=node_id,
             kind="learned_skill",
             title=f"完成: task#{task.id} {task.title}",
-            body=narrative,
+            body=skill_body,
             activation=0.8,
             valence=0.5,
             source="tools/task.complete",
@@ -927,6 +1069,33 @@ async def task_wait(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if wait_kind == "external" and not wait_key and not str(next_step or "").strip():
         recovery = "external wait 缺少 wait_key 时必须写清 next_step，说明收到什么外部信号后如何恢复。"
         return _invalid_wait_input(recovery, code="WaitConditionAmbiguous")
+    evidence_wait_blocker = _self_drive_wait_requires_evidence(
+        task,
+        wait_kind=wait_kind,
+        wait_key=wait_key,
+        next_step=str(next_step or ""),
+    )
+    if evidence_wait_blocker:
+        return ToolResult(
+            summary=f"任务 [{task.id}] 暂不允许等待：{evidence_wait_blocker}",
+            skipped=True,
+            error="SelfDriveEvidenceRequiredBeforeWait",
+            state_delta={
+                "task_status": str(getattr(task, "status", "") or "in_progress"),
+                "completion_blocked": True,
+                "completion_blocker": "SelfDriveEvidenceRequiredBeforeWait",
+                "recovery_next_step": str(next_step or "").strip() or evidence_wait_blocker,
+                "next_verification": str(next_step or "").strip(),
+                "suggested_tools": ["file.read", "shell.run", "probe.run", "task.workbench"],
+            },
+            metadata=_task_metadata(
+                task,
+                tool_name="task.wait",
+                log_summary=f"task.wait rejected self_drive evidence wait id={task.id}",
+                wait_kind=wait_kind,
+                wait_key=wait_key,
+            ),
+        )
     await metabolic_mark_task_waiting(
         ctx,
         task.id,

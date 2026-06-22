@@ -52,15 +52,25 @@ def _self_drive_signal_lines(loop: Any, signal: Any, drive_type: str) -> list[st
 
 
 def _self_drive_task_status_lines(
-    pending_count: int,
+    open_count: int,
     created_task_id: int | None,
     last_done_ago: str,
 ) -> list[str]:
     return [
-        f"pending_self_drive_tasks: {pending_count}",
+        f"open_self_drive_tasks: {open_count}",
         f"created_self_drive_task: {created_task_id or 'none'}",
         f"last_self_drive_done: {last_done_ago}",
     ]
+
+
+async def _list_open_self_drive_tasks(loop: Any, *, limit: int = 20) -> list[Any]:
+    task_store = getattr(loop, "_task_store", None)
+    lister = getattr(task_store, "list_open_tasks", None)
+    if callable(lister):
+        tasks = await lister(limit=limit)
+    else:
+        tasks = await task_store.list_tasks(limit=limit)
+    return [task for task in tasks if getattr(task, "source", None) == "self_drive"]
 
 
 def build_task_anchor_item(
@@ -101,6 +111,7 @@ def build_task_anchor_item(
 
 async def _create_self_drive_task(loop: Any, task_template: dict[str, Any], signal: Any) -> int | None:
     """把高置信自驱信号转成一个可推进的轻量任务，而不是只停留在 WM 念头。"""
+    artifact = str(task_template.get("artifact") or "task.workbench 中包含 evidence、decision、next_step 的记录")
     evidence_needed = [
         str(item)
         for item in task_template.get("evidence_needed", [])
@@ -118,7 +129,8 @@ async def _create_self_drive_task(loop: Any, task_template: dict[str, Any], sign
         ],
         "next_verification": str(task_template.get("next_step") or "执行一次低成本取证动作。"),
         "completion_checks": [
-            str(task_template.get("done_condition") or "能用具体证据回答问题，并写出下一步是否需要行动。")
+            str(task_template.get("done_condition") or "能用具体证据回答问题，并写出下一步是否需要行动。"),
+            f"产物已写入: {artifact}",
         ],
     }
     data = {
@@ -135,6 +147,7 @@ async def _create_self_drive_task(loop: Any, task_template: dict[str, Any], sign
             "curiosity_score": float(getattr(signal, "curiosity_score", 0.0) or 0.0),
             "rationale": str(getattr(signal, "rationale", "") or ""),
             "evidence_needed": evidence_needed,
+            "artifact": artifact,
             "done_condition": str(task_template.get("done_condition") or ""),
         },
     }
@@ -206,13 +219,13 @@ async def emit_self_drive_signal(loop: Any) -> None:
     if not signal.should_explore:
         return
 
-    # 为 LLM 提供可裁决上下文：待处理自驱任务数 + 最近一次自驱完成时长。
-    runnable = await loop._task_store.list_runnable_tasks(limit=20)
-    pending_sd = [task for task in runnable if getattr(task, "source", None) == "self_drive"]
-    if pending_sd:
+    # 为 LLM 提供可裁决上下文：未完成自驱任务数 + 最近一次自驱完成时长。
+    # waiting 也算 open；否则旧自驱任务一旦被挂起，空闲期会继续创建近似任务。
+    open_sd = await _list_open_self_drive_tasks(loop, limit=20)
+    if open_sd:
         _log.info(
-            "[self_drive] skip signal pending_self_drive_tasks=%d active_focus_preserved",
-            len(pending_sd),
+            "[self_drive] skip signal open_self_drive_tasks=%d active_focus_preserved",
+            len(open_sd),
         )
         return
     recent_done = await loop._task_store.list_tasks(status="done", limit=10)
@@ -231,7 +244,7 @@ async def emit_self_drive_signal(loop: Any) -> None:
         signal.suggested_domain or "self_evolution"
     )
     created_task_id = await _create_self_drive_task(loop, task_template, signal)
-    status_lines = _self_drive_task_status_lines(len(pending_sd), created_task_id, last_done_ago)
+    status_lines = _self_drive_task_status_lines(len(open_sd), created_task_id, last_done_ago)
     if signal.drive_type == "consolidate":
         drive_content = "\n".join([
             *_self_drive_signal_lines(loop, signal, "consolidation"),
@@ -257,6 +270,7 @@ async def emit_self_drive_signal(loop: Any) -> None:
             f"candidate_question: {task_template.get('question', '(未提供)')}",
             "candidate_evidence_needed:",
             _fmt_drive_template_list(task_template.get('evidence_needed')),
+            f"candidate_artifact: {task_template.get('artifact', '(未提供)')}",
             f"candidate_done_condition: {task_template.get('done_condition', '(未提供)')}",
             "proposal:",
             "- create_task: 为候选方向建立一次轻量探索任务。",

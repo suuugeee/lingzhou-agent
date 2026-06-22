@@ -116,8 +116,14 @@ class _SubagentEpisodicView:
     def record_event(self, *args: Any, **kwargs: Any) -> None:
         return None
 
-    def load_for_context(self, task_id: str | None, n_recent: int = 20) -> str:
-        return self._parent.load_for_context(task_id, n_recent)
+    def load_for_context(
+        self,
+        task_id: str | None,
+        n_recent: int = 20,
+        *,
+        max_chars: int | None = None,
+    ) -> str:
+        return self._parent.load_for_context(task_id, n_recent, max_chars=max_chars)
 
     def load_for_chat_context(
         self,

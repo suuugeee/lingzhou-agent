@@ -349,13 +349,7 @@ def rebuild_index(self) -> None:
 
 def _db_upsert(self, node: MemoryNode) -> None:
     tags_json = json.dumps(node.tags, ensure_ascii=False)
-    body = node.body
-    if body and len(body) > _BODY_STORE_MAX:
-        body = body[-_BODY_STORE_MAX:]  # 保留末尾（最新内容），丢弃远古历史
-        _log.warning(
-            "[semantic] body 超过 %d bytes，已截断至最近 %d bytes: id=%s kind=%s",
-            _BODY_STORE_MAX, _BODY_STORE_MAX, node.id, node.kind,
-        )
+    body = _stored_node_body(node)
     self._conn.execute(
         """INSERT INTO nodes
                          (id, kind, title, body, activation, valence, importance, tags, source, created_at)
@@ -384,7 +378,7 @@ def _db_upsert(self, node: MemoryNode) -> None:
             self._sync_node_fts(
                 node_id=node.id,
                 title=node.title,
-                body=node.body,
+                body=body,
                 tags_json=tags_json,
             )
         except Exception as exc:
@@ -451,11 +445,12 @@ def stats(self) -> dict[str, Any]:
 
 
 def upsert(self, node: MemoryNode) -> None:
+    stored_node = _node_for_storage(node)
     path = self._dir / f"{node.id}.json"
-    path.write_text(json.dumps(node.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(stored_node.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
     with self._db_session():
         try:
-            self._db_upsert(node)
+            self._db_upsert(stored_node)
         except Exception as exc:
             _log.warning("[semantic] 节点写入 DB 失败，保留 json 作为恢复源: %s", exc)
 
@@ -475,6 +470,35 @@ def upsert(self, node: MemoryNode) -> None:
                 self._conn.commit()
             except Exception:
                 pass
+
+
+def _stored_node_body(node: MemoryNode) -> str:
+    body = node.body or ""
+    if body and len(body) > _BODY_STORE_MAX:
+        body = body[-_BODY_STORE_MAX:]  # 保留末尾（最新内容），丢弃远古历史
+        _log.warning(
+            "[semantic] body 超过 %d bytes，已截断至最近 %d bytes: id=%s kind=%s",
+            _BODY_STORE_MAX, _BODY_STORE_MAX, node.id, node.kind,
+        )
+    return body
+
+
+def _node_for_storage(node: MemoryNode) -> MemoryNode:
+    body = _stored_node_body(node)
+    if body == (node.body or ""):
+        return node
+    return MemoryNode(
+        id=node.id,
+        kind=node.kind,
+        title=node.title,
+        body=body,
+        activation=node.activation,
+        valence=node.valence,
+        importance=node.importance,
+        tags=list(node.tags or []),
+        source=node.source,
+        created_at=node.created_at,
+    )
 
 
 def get(self, node_id: str) -> MemoryNode | None:

@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -49,6 +50,7 @@ from tools.registry import ToolContext, ToolResult, tool_metadata
 
 _log = logging.getLogger("lingzhou.execution")
 _TERMINAL_TASK_ACTIONS = frozenset({"task.complete", "task.fail"})
+_DURABLE_FAILURE_SUMMARY_MAX_CHARS = 1200
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,24 @@ class _ExecutionDispatch:
         if self.run_id is not None:
             tool_result.metadata.setdefault("run_id", self.run_id)
         return tool_result
+
+
+def _durable_failure_summary_fields(summary: str) -> dict[str, Any]:
+    text = str(summary or "")
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
+    if len(text) <= _DURABLE_FAILURE_SUMMARY_MAX_CHARS:
+        preview = text
+    else:
+        marker = f"\n...[durable failure summary truncated chars={len(text)} sha256={digest}]...\n"
+        budget = max(0, _DURABLE_FAILURE_SUMMARY_MAX_CHARS - len(marker))
+        head = max(160, budget // 2)
+        tail = max(0, budget - head)
+        preview = text[:head] + marker + (text[-tail:] if tail else "")
+    return {
+        "last_summary_preview": preview,
+        "last_summary_chars": len(text),
+        "last_summary_sha256": digest,
+    }
 
 
 if TYPE_CHECKING:
@@ -335,7 +355,7 @@ class ExecutionLayer:
                         return dispatch_ctx.stamp_metadata(ToolResult(
                             summary=(
                                 f"跳过已知稳定失败动作 {dispatch_ctx.tool_name!r}："
-                                f" {mute_data.get('last_summary', '')}"
+                                f" {mute_data.get('last_summary_preview') or mute_data.get('last_summary', '')}"
                             ),
                             error="KnownStableFailure",
                             skipped=True,
@@ -414,12 +434,12 @@ class ExecutionLayer:
                 "key": action_key_param(action.params),
                 "reason": reason,
                 "count": count,
-                "last_summary": result.summary,
                 "last_seen": time.time(),
                 "muted_until": time.time() + durable_ttl_sec if count >= durable_threshold else 0,
                 "policy_threshold": durable_threshold,
                 "policy_ttl_sec": durable_ttl_sec,
             }
+            payload.update(_durable_failure_summary_fields(result.summary))
             await submit_fact(
                 ctx,
                 key=failure_key,
@@ -441,7 +461,7 @@ class ExecutionLayer:
                 "key": action_key_param(action.params),
                 "reason": "",
                 "count": 0,
-                "last_summary": result.summary,
+                **_durable_failure_summary_fields(result.summary),
                 "last_seen": time.time(),
                 "muted_until": 0,
             }, ensure_ascii=False),
@@ -544,8 +564,8 @@ class ExecutionLayer:
             task_id = str(_resolved_run_task_id(result, dispatch_ctx.run_task_id) or "")
             await ctx.task_store.record_failure(
                 kind=dispatch_ctx.tool_name,
-                summary=result.summary,
-                context=result.evidence,
+                summary=_durable_failure_summary_fields(result.summary)["last_summary_preview"],
+                context=_durable_failure_summary_fields(result.evidence)["last_summary_preview"],
                 task_id=task_id,
             )
 

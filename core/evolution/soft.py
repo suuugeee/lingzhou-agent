@@ -16,6 +16,23 @@ if TYPE_CHECKING:
     from tools.registry import ToolContext
 
 
+_ETHOS_REFLECTION_BODY_MAX_CHARS = 900
+_ETHOS_REFLECTION_TOTAL_MAX_CHARS = 4000
+
+
+def _node_value(node: object, key: str, default: str = "") -> str:
+    if isinstance(node, dict):
+        return str(node.get(key) or default)
+    return str(getattr(node, key, default) or default)
+
+
+def _clip_ethos_reflection_text(text: str, limit: int) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: max(32, limit - 32)].rstrip() + "\n...[reflection truncated]..."
+
+
 async def evolve_model(engine: EvolutionEngine, new_model: str, reason: str, ctx: ToolContext) -> EvolutionResult:
     """升级协议：主脑模型切换的三器官联合确认（公理 A2 Phase 3）。"""
 
@@ -99,8 +116,11 @@ async def evolve_ethos(engine: EvolutionEngine, ctx: ToolContext) -> EvolutionRe
         baseline_source = "config fallback"
 
     try:
-        reflection_nodes = ctx.semantic.retrieve("reflection 近期经历感悟", top_k=5)
-        reflections = [n for n in reflection_nodes if getattr(n, "kind", "") == "reflection"]
+        try:
+            reflection_nodes = ctx.semantic.retrieve("reflection 近期经历感悟", top_k=5, kind="reflection")
+        except TypeError:
+            reflection_nodes = ctx.semantic.retrieve("reflection 近期经历感悟", top_k=5)
+        reflections = [n for n in reflection_nodes if _node_value(n, "kind") == "reflection"]
     except Exception:
         reflections = []
 
@@ -108,9 +128,10 @@ async def evolve_ethos(engine: EvolutionEngine, ctx: ToolContext) -> EvolutionRe
         return EvolutionResult(success=False, target="ethos_baseline", reason="no reflections yet")
 
     reflection_text = "\n".join(
-        f"- [{getattr(r, 'title', '')}] {getattr(r, 'body', '')}"
+        f"- [{_node_value(r, 'title')}] {_clip_ethos_reflection_text(_node_value(r, 'body'), _ETHOS_REFLECTION_BODY_MAX_CHARS)}"
         for r in reflections
     )
+    reflection_text = _clip_ethos_reflection_text(reflection_text, _ETHOS_REFLECTION_TOTAL_MAX_CHARS)
 
     from core.immune import extract_constitution_boundaries, load_constitution
 

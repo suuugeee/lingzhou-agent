@@ -75,6 +75,16 @@ def _missing_workbench_fields(workspace: CortexWorkspace) -> list[str]:
     return missing
 
 
+def _blocking_missing_workbench_fields(workspace: CortexWorkspace) -> list[str]:
+    """Fields that are missing enough to pause action and rebuild the workbench."""
+    missing = _missing_workbench_fields(workspace)
+    blockers = [field for field in missing if field in {"domain", "intent", "hypothesis", "next_verification"}]
+    has_evidence = bool(workspace.experiments or workspace.evidence or workspace.progress or workspace.failures)
+    if "experiments_or_evidence" in missing and not has_evidence:
+        blockers.append("experiments_or_evidence")
+    return blockers
+
+
 def build_problem_solving_guard(
     *,
     task: Any | None,
@@ -100,6 +110,7 @@ def build_problem_solving_guard(
         signals.append("action_first_required")
 
     missing = _missing_workbench_fields(workspace)
+    blocking_missing = _blocking_missing_workbench_fields(workspace)
     has_existing_workbench = bool(
         workspace.domain
         or workspace.intent
@@ -114,10 +125,10 @@ def build_problem_solving_guard(
         or workspace.plan
         or has_existing_workbench
     )
-    if complex_task and missing:
+    if complex_task and blocking_missing:
         signals.append("workbench_incomplete")
 
-    active = bool(signals and missing)
+    active = bool(signals and blocking_missing)
     if not active:
         return ProblemSolvingGuard(
             active=False,
@@ -129,12 +140,13 @@ def build_problem_solving_guard(
     if "user_correction" in signals:
         required = (
             "若用户纠正改变了任务定义，先调用 task.amend；随后调用 task.workbench "
-            "重写 domain/intent/hypothesis/next_verification/completion_checks。"
+            "重写阻断字段 domain/intent/hypothesis/next_verification，并补入当前证据。"
         )
     else:
         required = (
-            "优先调用 task.workbench 补齐 domain/intent/hypothesis/capabilities/"
-            "experiments_or_evidence/next_verification/completion_checks，再继续执行或回复。"
+            "优先调用 task.workbench 补齐阻断字段 domain/intent/hypothesis/"
+            "experiments_or_evidence/next_verification，再继续执行或回复；"
+            "capabilities/completion_checks 可在收尾前补强。"
         )
     return ProblemSolvingGuard(
         active=True,

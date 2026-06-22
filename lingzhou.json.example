@@ -220,14 +220,11 @@
       "routing_guard",
       "task_result",
       "progress_crystal",
-      "execute_result",
-      "run_monitor",
       "probe_result",
       "subagent_result",
       "skill_activation",
       "skill_evolution",
       "skill_synthesis",
-      "self_drive",
       "crash_recovery"
     ],
     "promotion_fact_kinds": [
@@ -261,7 +258,12 @@
     "daily_summary_importance": 0.82,
     "chat_crystallize_every": 20,
     "global_md_warn_bytes": 80000,
-    "global_md_warn_lines": 600
+    "global_md_warn_lines": 600,
+    "auto_compact_enabled": true,
+    "auto_compact_every_ticks": 50,
+    "auto_compact_runtime_db_min_bytes": 268435456,
+    "auto_compact_memory_dir_min_bytes": 536870912,
+    "auto_compact_vacuum": false
   },
 
   "emotion": {

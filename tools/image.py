@@ -83,6 +83,10 @@ def _image_part_from_source(source: str, detail: str) -> dict[str, Any]:
     }
 
 
+def _resolve_multimodal_model_ref(ctx: ToolContext, *, capability: str, input_modality: str) -> str:
+    return resolve_model_ref_for_input(ctx.config, capability=capability, input_modality=input_modality)
+
+
 @tool(ToolManifest(
     name="image.analyze",
     description="分析一张或多张图片，支持本地文件、远程 URL 或 data URL。",

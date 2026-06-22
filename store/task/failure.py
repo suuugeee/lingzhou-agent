@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from .base import BaseAsyncStore
+from .compact import compact_runtime_text
 from .models import Failure
 
 
@@ -16,7 +17,11 @@ class FailureStore(BaseAsyncStore):
         task_id: str = "",
     ) -> None:
         data = json.dumps(
-            {"summary": summary, "context": context, "task_id": task_id},
+            {
+                "summary": compact_runtime_text(summary, marker_label="failure summary"),
+                "context": compact_runtime_text(context, marker_label="failure context"),
+                "task_id": task_id,
+            },
             ensure_ascii=False,
         )
         await self._db.execute(

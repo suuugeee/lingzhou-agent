@@ -20,12 +20,14 @@ import shutil
 import subprocess
 from typing import Any
 
+from store.compact import compact_runtime_text
 from tools.registry import ToolContext, ToolManifest, ToolParam, ToolResult, tool, tool_metadata
 
 # ── 常量 ─────────────────────────────────────────────────────────────────────
 BROWSER_CMD = "agent-browser"
 BROWSER_ARGS = []
 BROWSER_TIMEOUT = 30  # 浏览器操作超时（秒）
+BROWSER_EVIDENCE_MAX_CHARS = 12_000
 _NAVIGATE_NETWORK_PATTERNS = (
     "err_name_not_resolved",
     "err_internet_disconnected",
@@ -224,7 +226,11 @@ async def browser_navigate(params: dict[str, Any], ctx: ToolContext) -> ToolResu
         return ToolResult(
             summary=f"已打开: {url}\n{_make_snapshot_summary(stdout)}",
             resource_key=url,
-            evidence=stdout,
+            evidence=compact_runtime_text(
+                stdout,
+                limit=BROWSER_EVIDENCE_MAX_CHARS,
+                marker_label="browser snapshot",
+            ),
             metadata=tool_metadata(
                 "browser.navigate",
                 f"browser.navigate ok url={url} chars={len(stdout)}",
@@ -262,7 +268,11 @@ async def browser_snapshot(params: dict[str, Any], ctx: ToolContext) -> ToolResu
             )
         return ToolResult(
             summary=_make_snapshot_summary(raw),
-            evidence=raw,
+            evidence=compact_runtime_text(
+                raw,
+                limit=BROWSER_EVIDENCE_MAX_CHARS,
+                marker_label="browser snapshot",
+            ),
             metadata=tool_metadata(
                 "browser.snapshot",
                 f"browser.snapshot chars={len(raw)}",

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from store.compact import compact_runtime_mapping, compact_runtime_text
+
 from .base import BaseAsyncStore
 
 
@@ -15,10 +17,15 @@ class SignalStore(BaseAsyncStore):
         repeat_secs: int = 0,
         payload: dict[str, Any] | None = None,
     ) -> int:
-        payload_json = json.dumps(payload or {}, ensure_ascii=False)
+        payload_json = json.dumps(compact_runtime_mapping(payload), ensure_ascii=False)
         async with self._db.execute(
             "INSERT INTO signals (title, run_at, repeat_secs, payload) VALUES (?,?,?,?)",
-            (title, run_at, repeat_secs, payload_json),
+            (
+                compact_runtime_text(title, limit=1000, marker_label="signal title"),
+                run_at,
+                repeat_secs,
+                payload_json,
+            ),
         ) as cur:
             new_id = cur.lastrowid
         await self._db.commit()

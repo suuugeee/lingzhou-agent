@@ -89,6 +89,94 @@ def tools(
         console.print(f"  [cyan]{m.name:<26}[/cyan] {m.description or ''}")
 
 
+@dev_app.command("compact-runtime")
+def compact_runtime(
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG_PATH,
+    db_path: Annotated[Path | None, typer.Option("--db", help="runtime.db 路径；默认读取配置中的 loop.db_path")] = None,
+    apply_changes: Annotated[bool, typer.Option("--apply/--dry-run", help="实际写入压缩结果；默认 dry-run")] = False,
+    vacuum: Annotated[bool, typer.Option("--vacuum/--no-vacuum", help="apply 后执行 VACUUM 回收文件空间")] = False,
+) -> None:
+    """压缩 runtime.db 中 oversized run/task/fact/ledger 载荷。"""
+    from core.maintenance import compact_runtime_db
+
+    cfg = load_cfg(config)
+    target = db_path or Path(str(cfg.loop.db_path)).expanduser()
+    report = compact_runtime_db(target, apply=apply_changes, vacuum=vacuum)
+    if report.get("error"):
+        console.print(f"[red]runtime compact failed:[/red] {report['error']}  {report['db_path']}")
+        raise typer.Exit(1)
+
+    mode = "apply" if apply_changes else "dry-run"
+    console.print(f"[bold]runtime compact[/bold] mode={mode} db={report['db_path']}")
+    console.print(
+        "  scanned={scanned_rows} changed={changed_rows} saved≈{saved_bytes} bytes".format(**report)
+    )
+    if apply_changes:
+        console.print(
+            "  file_bytes_before={file_bytes_before} file_bytes_after={file_bytes_after} vacuumed={vacuumed}".format(**report)
+        )
+    for table, stats in sorted((report.get("tables") or {}).items()):
+        if not stats.get("changed_rows"):
+            continue
+        console.print(
+            "  {table}: changed={changed_rows} {original_bytes}->{compacted_bytes} bytes".format(
+                table=table,
+                **stats,
+            )
+        )
+    if not apply_changes:
+        console.print("[yellow]未写入数据库。确认结果后加 --apply；需要回收文件空间再加 --vacuum。[/yellow]")
+
+
+@dev_app.command("compact-memory")
+def compact_memory(
+    config: Annotated[Path, typer.Option("--config", "-c")] = DEFAULT_CONFIG_PATH,
+    memory_dir: Annotated[Path | None, typer.Option("--memory-dir", help="语义记忆目录；默认读取配置中的 loop.memory_dir")] = None,
+    apply_changes: Annotated[bool, typer.Option("--apply/--dry-run", help="实际写入压缩结果；默认 dry-run")] = False,
+    vacuum: Annotated[bool, typer.Option("--vacuum/--no-vacuum", help="apply 后对 memory SQLite DB 执行 VACUUM")] = False,
+) -> None:
+    """压缩 memory JSON、episodic markdown 与 semantic/episodic SQLite DB 中 oversized 文本。"""
+    from core.maintenance import compact_memory_dir
+
+    cfg = load_cfg(config)
+    target = memory_dir or cfg.memory_dir
+    report = compact_memory_dir(target, apply=apply_changes, vacuum=vacuum)
+    if report.get("error"):
+        console.print(f"[red]memory compact failed:[/red] {report['error']}  {report['memory_dir']}")
+        raise typer.Exit(1)
+
+    mode = "apply" if apply_changes else "dry-run"
+    console.print(f"[bold]memory compact[/bold] mode={mode} dir={report['memory_dir']}")
+    console.print(
+        (
+            "  files scanned={scanned_files} changed={changed_files} bad_json={bad_json_files}; "
+            "db_rows scanned={scanned_rows} changed={changed_rows}; saved≈{saved_bytes} bytes"
+        ).format(**report)
+    )
+    if apply_changes:
+        console.print("  vacuumed={vacuumed}".format(**report))
+    for dirname, stats in sorted((report.get("dirs") or {}).items()):
+        if not stats.get("changed_files") and not stats.get("bad_json_files"):
+            continue
+        console.print(
+            "  {dirname}: changed={changed_files} bad_json={bad_json_files} {original_bytes}->{compacted_bytes} bytes".format(
+                dirname=dirname,
+                **stats,
+            )
+        )
+    for db_name, stats in sorted((report.get("dbs") or {}).items()):
+        if not stats.get("changed_rows"):
+            continue
+        console.print(
+            "  {db}: changed_rows={changed_rows} {original_bytes}->{compacted_bytes} bytes vacuumed={vacuumed}".format(
+                db=db_name,
+                **stats,
+            )
+        )
+    if not apply_changes:
+        console.print("[yellow]未写入文件/数据库。确认结果后加 --apply；需要回收 DB 文件空间再加 --vacuum。[/yellow]")
+
+
 @dev_app.command("skills")
 def skills(
     search: Annotated[str | None, typer.Argument(help="关键词过滤")] = None,

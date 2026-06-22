@@ -18,6 +18,7 @@ DEFAULT_UA = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
 )
+DEFAULT_FETCH_CHARS = 12000
 MAX_FETCH_CHARS = 50000
 MAX_SEARCH_RESULTS = 10
 HTTP_TIMEOUT = httpx.Timeout(connect=25.0, read=35.0, write=15.0, pool=10.0)
@@ -99,7 +100,7 @@ def _html_to_text(html: str, max_chars: int = MAX_FETCH_CHARS) -> str:
     progress_category="io",
     params=[
         ToolParam("url", "string", "页面 URL", required=True),
-        ToolParam("max_chars", "number", "最大返回字符数（默认 50000）", required=False),
+        ToolParam("max_chars", "number", "最大返回字符数（默认 12000，上限 50000）", required=False),
     ],
 ))
 async def web_fetch(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
@@ -111,7 +112,7 @@ async def web_fetch(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
     if parsed.scheme not in ("http", "https"):
         return ToolResult(summary=f"不支持的协议: {parsed.scheme}", error="BadScheme", skipped=True)
 
-    max_chars = min(int(params.get("max_chars", MAX_FETCH_CHARS)), MAX_FETCH_CHARS)
+    max_chars = min(int(params.get("max_chars", DEFAULT_FETCH_CHARS)), MAX_FETCH_CHARS)
 
     try:
         resp = await _safe_request("GET", url)
