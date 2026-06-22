@@ -14,6 +14,7 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from core.cortex import intent as cortex_intent
 from core.metabolic import delete_fact, mark_task_waiting, resume_task, submit_fact
 
 from .dispatcher import TickJob
@@ -31,6 +32,19 @@ _RUNNABLE_STATUSES = frozenset({"pending", "ready", "in_progress", "resumed"})
 _OPEN_STATUSES = frozenset({*tuple(_RUNNABLE_STATUSES), "waiting"})
 _RUNNABLE_STATUS_ORDER = ("pending", "ready", "in_progress", "resumed")
 _OPEN_STATUS_ORDER = ("pending", "ready", "in_progress", "resumed", "waiting")
+_EXTERNAL_WAIT_TEXT_HINTS = (
+    "等你",
+    "等您",
+    "等用户",
+    "用户提供",
+    "用户补充",
+    "用户反馈",
+    "收到用户",
+    "收到新消息",
+    "收到 url",
+    "收到URL",
+    "明天",
+)
 
 
 @dataclass(frozen=True)
@@ -121,6 +135,26 @@ def _task_is_runnable(task: Task | None) -> bool:
 
 def _task_is_waiting(task: Task | None) -> bool:
     return task is not None and _task_status(task) == "waiting"
+
+
+def _text_requests_external_wait(*values: Any) -> bool:
+    text = " ".join(str(value or "").strip() for value in values if str(value or "").strip())
+    if not text:
+        return False
+    lowered = text.lower()
+    return cortex_intent.contains_wait_dependency(text) or any(hint.lower() in lowered for hint in _EXTERNAL_WAIT_TEXT_HINTS)
+
+
+def _pause_requests_waiting(action: JudgmentOutput, active_task: Task, planned_next_step: str) -> bool:
+    if action.decision != "pause":
+        return False
+    return _text_requests_external_wait(
+        planned_next_step,
+        action.reply_to_user,
+        action.rationale,
+        getattr(active_task, "next_step", ""),
+        getattr(active_task, "goal", ""),
+    )
 
 
 def _task_is_open(task: Task | None) -> bool:
@@ -643,7 +677,7 @@ async def finalize_focus_task(
         _task_is_runnable(active_task)
         and bool(resolved_chat_id or str(user_message or "").strip() or str(action.reply_to_user or "").strip())
         and (
-            action.decision == "pause"
+            _pause_requests_waiting(action, active_task, planned_next_step)
             or (action.decision == "wait" and not planned_next_step)
         )
     )

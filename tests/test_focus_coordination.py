@@ -449,6 +449,10 @@ def test_finalize_focus_task_parks_user_facing_pause_into_waiting():
     asyncio.run(_finalize_focus_task_parks_user_facing_pause_into_waiting())
 
 
+def test_finalize_focus_task_keeps_pause_with_actionable_next_step_runnable():
+    asyncio.run(_finalize_focus_task_keeps_pause_with_actionable_next_step_runnable())
+
+
 def test_finalize_focus_task_keeps_wait_with_next_step_runnable():
     asyncio.run(_finalize_focus_task_keeps_wait_with_next_step_runnable())
 
@@ -517,6 +521,49 @@ async def _finalize_focus_task_parks_user_facing_pause_into_waiting():
         assert current_focus == str(task_id)
         assert chat_exists is True
         assert chat_focus == str(task_id)
+        await store.close()
+
+
+async def _finalize_focus_task_keeps_pause_with_actionable_next_step_runnable():
+    from core.judgment import JudgmentOutput
+    from core.loop.cycle.focus import claim_focus_task, finalize_focus_task
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "focus-finalize-pause-runnable.db")
+        await store.open()
+        task_id = await store.add_task(
+            "OpenClaw 记忆找回",
+            goal="继续用真实工具找回 OpenClaw 记忆",
+            status="in_progress",
+            next_step="先用 memory.search 和 shell.run 核对 OpenClaw 相关记忆",
+        )
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+        await store.set_fact(f"task:{task.id}:chat_id", "chat:test", scope="task")
+
+        loop = SimpleNamespace(_task_store=store)
+        await claim_focus_task(loop, task, chat_id="chat:test", clear_current=True)
+        action = JudgmentOutput(
+            decision="pause",
+            reply_to_user="本轮已经进入最终回复阶段，下一轮我会继续用真实工具核对。",
+            next_step="使用 memory.search 召回 OpenClaw，并用 shell.run 核对导入文件。",
+        )
+
+        finalized = await finalize_focus_task(
+            loop,
+            action=action,
+            active_task=task,
+            chat_id=None,
+            user_message="",
+        )
+
+        assert finalized is not None
+        assert finalized.status == "in_progress"
+        refreshed = await store.get_task_by_id(task_id)
+        assert refreshed is not None
+        assert refreshed.status == "in_progress"
+        assert refreshed.wait_kind == ""
         await store.close()
 
 
