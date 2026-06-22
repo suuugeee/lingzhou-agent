@@ -184,6 +184,14 @@ def _latest_task_id_from_history(history: list[dict[str, Any]]) -> int | None:
     return None
 
 
+def _is_continue_control_workbench(action: JudgmentOutput) -> bool:
+    if action.chosen_action_id != "task.workbench":
+        return False
+    params = action.params if isinstance(action.params, dict) else {}
+    workbench = params.get("workbench") if isinstance(params.get("workbench"), dict) else {}
+    return str(workbench.get("recovery_state") or "").startswith("continue_")
+
+
 def _ensure_continue_task_id(action: JudgmentOutput, active_task: Any | None, history: list[dict[str, Any]]) -> None:
     if action.decision != "act" or action.chosen_action_id not in _TASK_SCOPED_CONTINUE_TOOLS:
         return
@@ -235,6 +243,8 @@ def _continue_low_increment_budget(loop: Any, max_inner_rounds: int) -> int:
             return max(1, int(explicit))
         except (TypeError, ValueError):
             pass
+    if int(max_inner_rounds) <= 0:
+        return 2
     return max(1, min(2, int(max_inner_rounds)))
 
 
@@ -451,20 +461,29 @@ async def _record_continue_round_limit(
         return None, None
     recent_tools = _recent_tool_names(tool_history)
     next_verification = _specific_round_limit_next_verification(tool_history)
+    control_next_verification = cortex_intent.control_next_verification(
+        "本 tick 已达到显式 continue 轮次上限；不要在下一 tick 重复同一路径。"
+        "先综合本 tick 工具结果形成用户可见结论；若仍缺证据，只选择一个不同证据源的高信息增量动作。"
+    )
     action = build_workbench_action(
         workbench={
             "domain": "runtime-loop",
-            "intent": "continue 阶段达到单 tick 工具续判上限，收敛到下一轮验证",
+            "intent": "continue 阶段达到显式单 tick 工具续判上限，结束本 tick 收敛",
             "evidence": [
                 f"本 tick continue 阶段已执行 {max_inner_rounds} 轮工具续判。",
                 f"最近工具序列: {', '.join(recent_tools) if recent_tools else '（无）'}",
+                f"建议的后续验证入口: {next_verification}",
             ],
-            "hypothesis": "当前任务仍需推进，但继续留在同一 tick 内追加工具会削弱总结与用户可见收敛。",
+            "hypothesis": "显式轮次上限只能结束当前 tick，不能把同一路径写成下一 tick 的待执行验证，否则会形成限制-重启循环。",
             "recovery_state": "continue_round_limit_reached",
-            "next_verification": next_verification,
+            "next_verification": control_next_verification,
+            "verification_state": {
+                "status": "resolved",
+                "goal": "显式轮次上限已处理为控制性收敛状态，禁止由该 workbench 自动重启同一工具链。",
+            },
             "completion_checks": [
                 "已停止在同一 tick 内继续追加工具调用。",
-                "已把本轮工具结果收敛为下一轮的验证入口。",
+                "已把本轮工具结果收敛为用户可见结论或不同证据源选择入口。",
             ],
         },
         rationale=(
@@ -500,12 +519,12 @@ async def _run_continue_phase(
     from core.judgment.policy import tool_history_compact_limits
 
     compact_threshold, keep_last = tool_history_compact_limits(cfg)
-    max_inner_rounds = max(1, int(getattr(cfg.thresholds, "continue_max_inner_rounds", 4) or 4))
+    max_inner_rounds = max(0, int(getattr(cfg.thresholds, "continue_max_inner_rounds", 0) or 0))
     low_increment_budget = _continue_low_increment_budget(loop, max_inner_rounds)
 
     _inner = 0
     while True:
-        if _inner >= max_inner_rounds:
+        if max_inner_rounds > 0 and _inner >= max_inner_rounds:
             recorded_action, recorded_result = await _record_continue_round_limit(
                 loop=loop,
                 ctx=ctx,
@@ -658,6 +677,10 @@ async def _run_continue_phase(
             if callable(on_act_result):
                 on_act_result(cont.chosen_action_id or "", cont_result.summary or "")
             tool_history.append(_tool_history_entry(cont, cont_result))
+            if _is_continue_control_workbench(cont):
+                action = cont
+                result = cont_result
+                break
 
         if cont.reply_to_user:
             cont.speech_intent = cont.reply_to_user

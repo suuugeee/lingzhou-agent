@@ -665,8 +665,8 @@ def test_continue_phase_records_workbench_when_inner_round_limit_reached():
     asyncio.run(_continue_phase_records_workbench_when_inner_round_limit_reached())
 
 
-def test_continue_phase_default_inner_round_limit_is_conservative():
-    asyncio.run(_continue_phase_default_inner_round_limit_is_conservative())
+def test_continue_phase_default_disables_inner_round_limit():
+    asyncio.run(_continue_phase_default_disables_inner_round_limit())
 
 
 def test_continue_phase_gates_repeated_same_action_before_dispatch():
@@ -786,10 +786,12 @@ async def _continue_phase_records_workbench_when_inner_round_limit_reached():
     workbench = execution.actions[-1].params["workbench"]
     assert workbench["recovery_state"] == "continue_round_limit_reached"
     assert "本 tick continue 阶段已执行 2 轮工具续判" in workbench["evidence"][0]
-    assert "基于最近一次低信息探索成功结果形成结论" in workbench["next_verification"]
+    assert "显式 continue 轮次上限" in workbench["next_verification"]
+    assert workbench["verification_state"]["status"] == "resolved"
+    assert "建议的后续验证入口" in workbench["evidence"][2]
 
 
-async def _continue_phase_default_inner_round_limit_is_conservative():
+async def _continue_phase_default_disables_inner_round_limit():
     from core.loop.shared.continue_phase import _run_continue_phase
 
     cfg = _continue_cfg(thresholds=None)
@@ -808,7 +810,7 @@ async def _continue_phase_default_inner_round_limit_is_conservative():
             )
 
     judgment = _Judgment()
-    execution = _ContinueExecution(workbench_summary="默认上限工作台已更新")
+    execution = _ContinueExecution(workbench_summary="默认低信息收敛工作台已更新")
     loop = _continue_loop(
         cfg=cfg,
         judgment=judgment,
@@ -827,10 +829,11 @@ async def _continue_phase_default_inner_round_limit_is_conservative():
         tool_history=[],
     )
 
-    assert cfg.thresholds.continue_max_inner_rounds == 2
-    assert judgment.calls == 2
+    assert cfg.thresholds.continue_max_inner_rounds == 0
+    assert judgment.calls == 3
     assert final_action.chosen_action_id == "task.workbench"
-    assert final_result.summary == "默认上限工作台已更新"
+    assert final_result.summary == "默认低信息收敛工作台已更新"
+    assert execution.actions[-1].params["workbench"]["recovery_state"] == "continue_low_increment_budget_reached"
 
 
 def test_continue_round_limit_prefers_runtime_recovery_next_step():
