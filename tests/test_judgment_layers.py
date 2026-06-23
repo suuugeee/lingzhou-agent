@@ -381,6 +381,49 @@ async def test_action_first_recovery_gate_converts_blocked_file_read_to_shell_ru
 
 
 @pytest.mark.asyncio
+async def test_action_first_uses_file_list_for_context_known_not_file_path() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name in {"file.read", "file.list"} else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "action_first:\n"
+        "- intent=execute\n"
+        "- must_act=yes\n"
+        "captured_inputs:\n"
+        "- path=/root/.lingzhou/memory\n"
+        "\n### 最近工具结果\n"
+        "run=708 task=1 tool=file.read status=cancelled "
+        "progress=跳过已知稳定失败动作 'file.read'： 不是文件: /root/.lingzhou/memory "
+        "error=KnownStableFailure\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="先等一下"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "file.list"
+    assert out.params == {
+        "path": "/root/.lingzhou/memory",
+        "limit": 200,
+        "include_hidden": True,
+    }
+
+
+@pytest.mark.asyncio
 async def test_action_first_wait_ignores_control_text_paths_outside_captured_inputs() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput

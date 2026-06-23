@@ -172,6 +172,25 @@ def _recovery_requests_path_listing(next_verification: str) -> bool:
     ))
 
 
+def _context_marks_path_not_file(context_text: str, path: str) -> bool:
+    text = str(context_text or "")
+    normalized_path = str(path or "").strip()
+    if not normalized_path or normalized_path not in text:
+        return False
+    lowered = text.lower()
+    path_index = text.find(normalized_path)
+    if path_index < 0:
+        return False
+    window = text[max(0, path_index - 240): path_index + len(normalized_path) + 240]
+    lowered_window = window.lower()
+    return (
+        "不是文件" in window
+        or "knownstablefailure" in lowered_window
+        or "notafile" in lowered_window
+        or "not a file" in lowered_window
+    )
+
+
 def _path_type_command(path: str) -> str:
     quoted = shlex.quote(path)
     return (
@@ -346,6 +365,22 @@ def enforce_action_first_progress(
     paths = _captured_context_values(context_text, "path")
     if paths:
         path = paths[0]
+        if _context_marks_path_not_file(context_text, path):
+            if _registry_has(registry, "file.list"):
+                return _fallback_action_output(
+                    output,
+                    chosen_action_id="file.list",
+                    params={"path": path, "limit": 200, "include_hidden": True},
+                    rationale="Action-first fallback: 上下文已证明该路径不是普通文件，改为 file.list 做目录级/类型级清点。",
+                )
+            if _registry_has(registry, "shell.run"):
+                return _fallback_action_output(
+                    output,
+                    chosen_action_id="shell.run",
+                    params={"command": _path_type_command(path)},
+                    rationale="Action-first fallback: 上下文已证明该路径不是普通文件，改用 shell.run 确认路径类型。",
+                )
+            return output
         if _recovery_blocks_path_file_read(path, recovery_state, next_verification):
             if _recovery_requests_path_listing(next_verification) and _registry_has(registry, "file.list"):
                 return _fallback_action_output(
