@@ -64,9 +64,10 @@ def _switch_hints(tool_name: str, key_param: str) -> str:
         if key_param:
             return (
                 f"不要再重复读取 {target}；基于已读结果先形成结论，"
-                "或改用 shell.run/grep 对该路径做定位验证。"
+                "若该路径不是普通文件，优先改用 file.list 做目录级清点；"
+                "必要时再用 shell.run/stat/find 对该路径做定位验证。"
             )
-        return "不要继续重复同类文件读取；改用 shell.run 或 task.workbench 切换验证层。"
+        return "不要继续重复同类文件读取；优先改用 file.list 或 shell.run 切换验证层。"
     if tool_name == "file.list":
         if key_param:
             return (
@@ -157,6 +158,68 @@ def _compacted_history_entry(tool: str, result: str, params: dict[str, Any] | No
 
 def _action_history_key(action: JudgmentOutput) -> tuple[str, str]:
     return str(action.chosen_action_id or ""), action_key_param(action.params)
+
+
+def _history_has_not_a_file_failure(history: list[dict[str, Any]], path: str) -> bool:
+    if not path:
+        return False
+    for entry in reversed(history):
+        if str(entry.get("tool") or "") != "file.read":
+            continue
+        params = entry.get("params") if isinstance(entry.get("params"), dict) else {}
+        if str(params.get("path") or "") != path:
+            continue
+        text = " ".join(
+            str(value or "")
+            for value in (
+                entry.get("error"),
+                entry.get("summary"),
+                entry.get("result"),
+            )
+        )
+        lowered = text.lower()
+        if "notafile" in lowered or "knownstablefailure" in lowered or "不是文件" in text:
+            return True
+    return False
+
+
+def _redirect_not_a_file_read_to_list(
+    action: JudgmentOutput,
+    *,
+    history: list[dict[str, Any]],
+    registry: Any,
+) -> JudgmentOutput:
+    if action.decision != "act" or action.chosen_action_id != "file.read":
+        return action
+    params = action.params if isinstance(action.params, dict) else {}
+    path = str(params.get("path") or "").strip()
+    if not path or not _history_has_not_a_file_failure(history, path):
+        return action
+    if not registry_has_tool(registry, "file.list"):
+        return action
+    from core.judgment import JudgmentOutput  # noqa: PLC0415
+
+    return JudgmentOutput(
+        decision="act",
+        chosen_action_id="file.list",
+        params={"path": path, "limit": 200, "include_hidden": True},
+        rationale=(
+            "continue 阶段检测到同一路径的 file.read 已稳定失败为非普通文件，"
+            "改用 file.list 做目录级/类型级清点。"
+        ),
+        reflection=action.reflection,
+        next_step=action.next_step,
+        model_strategy=dict(action.model_strategy or {}),
+        applied_skills=list(action.applied_skills or []),
+    )
+
+
+def _is_not_a_file_redirected_list(action: JudgmentOutput, history: list[dict[str, Any]]) -> bool:
+    if action.decision != "act" or action.chosen_action_id != "file.list":
+        return False
+    params = action.params if isinstance(action.params, dict) else {}
+    path = str(params.get("path") or "").strip()
+    return _history_has_not_a_file_failure(history, path)
 
 
 def _coerce_task_id(value: Any) -> int | None:
@@ -566,6 +629,12 @@ async def _run_continue_phase(
             routing_overrides=loop._pending_routing_overrides,
             wm_delta=_wm_delta or None,
         )
+        cont = _redirect_not_a_file_read_to_list(
+            cont,
+            history=tool_history,
+            registry=loop._registry,
+        )
+        redirected_not_a_file_list = _is_not_a_file_redirected_list(cont, tool_history)
 
         if (
             cont.decision == "act"
@@ -586,6 +655,7 @@ async def _run_continue_phase(
         if (
             cont.decision == "act"
             and cont.chosen_action_id in _LOW_INCREMENT_CONTINUE_TOOLS
+            and not _is_not_a_file_redirected_list(cont, tool_history)
             and registry_has_tool(loop._registry, "task.workbench")
             and _low_increment_history_count(tool_history) >= low_increment_budget
         ):
@@ -677,6 +747,10 @@ async def _run_continue_phase(
             if callable(on_act_result):
                 on_act_result(cont.chosen_action_id or "", cont_result.summary or "")
             tool_history.append(_tool_history_entry(cont, cont_result))
+            if redirected_not_a_file_list:
+                action = cont
+                result = cont_result
+                break
             if _is_continue_control_workbench(cont):
                 action = cont
                 result = cont_result

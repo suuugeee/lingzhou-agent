@@ -57,6 +57,18 @@ class _ContinueWorkbenchRegistry:
         )
 
 
+class _ContinueWorkbenchAndFileListRegistry:
+    def get(self, name: str):
+        if name not in {"task.workbench", "file.list"}:
+            return None
+        from tools.registry import ToolEntry, ToolManifest
+
+        return ToolEntry(
+            manifest=ToolManifest(name=name, description="demo"),
+            handler=lambda params, ctx: None,  # type: ignore[arg-type]
+        )
+
+
 class _ContinueBehavior:
     def on_act(self, *args, **kwargs):
         return []
@@ -760,6 +772,10 @@ def test_continue_phase_gates_repeated_same_action_before_dispatch():
     asyncio.run(_continue_phase_gates_repeated_same_action_before_dispatch())
 
 
+def test_continue_phase_redirects_not_a_file_read_to_file_list():
+    asyncio.run(_continue_phase_redirects_not_a_file_read_to_file_list())
+
+
 def test_continue_phase_stops_after_successful_workbench():
     asyncio.run(_continue_phase_stops_after_successful_workbench())
 
@@ -1045,7 +1061,77 @@ async def _continue_phase_gates_repeated_same_action_before_dispatch():
     workbench = execution.actions[0].params["workbench"]
     assert workbench["recovery_state"] == "continue_repeat_action_gated"
     assert "/tmp/repeat.py" in workbench["next_verification"]
-    assert "shell.run/grep" in workbench["next_verification"]
+    assert "file.list" in workbench["next_verification"]
+
+
+async def _continue_phase_redirects_not_a_file_read_to_file_list():
+    from core.loop.shared.continue_phase import _run_continue_phase
+
+    cfg = _continue_cfg(
+        thresholds={
+            "continue_max_inner_rounds": 4,
+            "continue_tool_history_compact_threshold": 20,
+            "continue_tool_history_keep_last": 10,
+            "continue_low_increment_budget": 4,
+        },
+    )
+
+    class _Judgment:
+        async def decide_continue(self, tool_history, **kwargs):
+            return _judgment_output(
+                decision="act",
+                chosen_action_id="file.read",
+                params={"path": "/root/.lingzhou/memory", "max_chars": 12000},
+                rationale="继续读取 memory 路径",
+            )
+
+    execution = _ContinueExecution()
+    loop = _continue_loop(
+        cfg=cfg,
+        judgment=_Judgment(),
+        execution=execution,
+        registry=_ContinueWorkbenchAndFileListRegistry(),
+    )
+    tool_history = [
+        {
+            "tool": "memory.search",
+            "params": {"query": "memory archive"},
+            "result": "hits=5",
+            "status": "ok",
+            "error": "",
+            "summary": "hits=5",
+            "state_delta": {},
+        },
+        {
+            "tool": "file.read",
+            "params": {"path": "/root/.lingzhou/memory", "max_chars": 12000},
+            "result": "跳过已知稳定失败动作 'file.read'： 不是文件: /root/.lingzhou/memory",
+            "status": "cancelled",
+            "error": "KnownStableFailure",
+            "summary": "跳过已知稳定失败动作 'file.read'： 不是文件: /root/.lingzhou/memory",
+            "state_delta": {"run_id": 653},
+        },
+    ]
+
+    final_action, final_result = await _run_continue_phase(
+        loop=loop,
+        ctx=SimpleNamespace(),
+        user_message="",
+        active_task=SimpleNamespace(id=1),
+        cognitive_signals=SimpleNamespace(),
+        action=_judgment_output(decision="act", chosen_action_id="file.read", params={"path": "/root/.lingzhou/memory"}),
+        result=_tool_result("初始结果"),
+        tool_history=tool_history,
+    )
+
+    assert execution.actions[0].chosen_action_id == "file.list"
+    assert execution.actions[0].params == {
+        "path": "/root/.lingzhou/memory",
+        "limit": 200,
+        "include_hidden": True,
+    }
+    assert final_action.chosen_action_id == "file.list"
+    assert final_result.summary == "executed file.list"
 
 
 async def _continue_phase_stops_after_successful_workbench():
