@@ -301,6 +301,86 @@ async def test_action_first_wait_falls_back_to_web_fetch_for_captured_url() -> N
 
 
 @pytest.mark.asyncio
+async def test_action_first_recovery_gate_converts_blocked_file_read_to_file_list() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name in {"file.read", "file.list"} else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "action_first:\n"
+        "- intent=execute\n"
+        "- must_act=yes\n"
+        "captured_inputs:\n"
+        "- path=/root/.lingzhou/memory/archive\n"
+        "problem_solving:\n"
+        "- recovery_state=continue_repeat_action_gated\n"
+        "- next_verification=不要再对 /root/.lingzhou/memory/archive 使用 file.read；"
+        "下一次可用 file.list/shell.run 时做目录级清点。\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="先等一下"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "file.list"
+    assert out.params == {"path": "/root/.lingzhou/memory/archive"}
+
+
+@pytest.mark.asyncio
+async def test_action_first_recovery_gate_converts_blocked_file_read_to_shell_run() -> None:
+    from core.judgment.boundary import normalize_judgment_output
+    from core.judgment.output import JudgmentOutput
+
+    class _Executor:
+        async def _repair_output(self, context_text: str, raw: str) -> JudgmentOutput | None:
+            return None
+
+    class _Registry:
+        def get(self, name: str):
+            return object() if name in {"file.read", "shell.run"} else None
+
+    context = (
+        "### 任务级皮层工作区\n"
+        "action_first:\n"
+        "- intent=execute\n"
+        "- must_act=yes\n"
+        "captured_inputs:\n"
+        "- path=/root/.lingzhou/memory/archive\n"
+        "problem_solving:\n"
+        "- recovery_state=continue_low_increment_budget_reached\n"
+        "- next_verification=不要再对 /root/.lingzhou/memory/archive 使用 file.read；"
+        "下一次可用 shell.run 时用 stat/find 确认路径类型和下一级对象。\n"
+    )
+
+    out = await normalize_judgment_output(
+        _Executor(),
+        JudgmentOutput(decision="wait", rationale="先等一下"),
+        context_text=context,
+        raw="{}",
+        registry=_Registry(),
+    )
+
+    assert out.decision == "act"
+    assert out.chosen_action_id == "shell.run"
+    assert set(out.params) == {"command"}
+    assert "/root/.lingzhou/memory/archive" in out.params["command"]
+    assert "find" in out.params["command"]
+
+
+@pytest.mark.asyncio
 async def test_action_first_wait_ignores_control_text_paths_outside_captured_inputs() -> None:
     from core.judgment.boundary import normalize_judgment_output
     from core.judgment.output import JudgmentOutput

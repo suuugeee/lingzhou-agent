@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import shlex
 from typing import Any
 
 from core.cortex.actions import build_workbench_action
@@ -140,6 +141,50 @@ def _recovery_state_blocks_generic_action_first(recovery_state: str, next_verifi
         return False
     lowered = str(next_verification or "").lower()
     return not any(marker in lowered for marker in ("task.list", "任务列表", "任务状态", "列出任务"))
+
+
+def _recovery_blocks_path_file_read(path: str, recovery_state: str, next_verification: str) -> bool:
+    text = str(next_verification or "")
+    lowered = text.lower()
+    normalized_path = str(path or "").strip().lower()
+    if not normalized_path or normalized_path not in lowered:
+        return False
+    if str(recovery_state or "").strip() not in {
+        "continue_low_increment_budget_reached",
+        "continue_repeat_action_gated",
+        "memory_search_control_query_gated",
+    }:
+        return False
+    if "file.read" not in lowered and "读取" not in text:
+        return False
+    return any(marker in lowered for marker in (
+        "不要", "不再", "不能", "禁止", "停止", "避免", "别",
+        "do not", "don't", "avoid", "stop",
+    ))
+
+
+def _recovery_requests_path_listing(next_verification: str) -> bool:
+    text = str(next_verification or "")
+    lowered = text.lower()
+    return any(marker in lowered for marker in (
+        "file.list", "shell.run", "stat", "find", " ls", "list", "directory",
+        "目录", "下一级", "清点", "列出", "枚举",
+    ))
+
+
+def _path_type_command(path: str) -> str:
+    quoted = shlex.quote(path)
+    return (
+        f"p={quoted}; "
+        'if [ -e "$p" ]; then '
+        'if [ -d "$p" ]; then '
+        'echo "directory $p"; '
+        'find "$p" -maxdepth 2 -printf "%y %p\\n" 2>/dev/null | sed -n "1,200p"; '
+        'else '
+        'file "$p" 2>/dev/null || ls -ld "$p"; '
+        'fi; '
+        'else echo "missing $p"; fi'
+    )
 
 
 def _problem_solving_guard_active(context_text: str) -> bool:
@@ -287,6 +332,7 @@ def enforce_action_first_progress(
         return output
     if output.decision == "act":
         return output
+    recovery_state, next_verification = _extract_recovery_fields(context_text)
 
     urls = _captured_context_values(context_text, "url")
     if urls and _registry_has(registry, "web.fetch"):
@@ -300,6 +346,22 @@ def enforce_action_first_progress(
     paths = _captured_context_values(context_text, "path")
     if paths:
         path = paths[0]
+        if _recovery_blocks_path_file_read(path, recovery_state, next_verification):
+            if _recovery_requests_path_listing(next_verification) and _registry_has(registry, "file.list"):
+                return _fallback_action_output(
+                    output,
+                    chosen_action_id="file.list",
+                    params={"path": path},
+                    rationale="Action-first fallback: 恢复态已禁止继续 file.read 该路径，改为目录级清点。",
+                )
+            if _recovery_requests_path_listing(next_verification) and _registry_has(registry, "shell.run"):
+                return _fallback_action_output(
+                    output,
+                    chosen_action_id="shell.run",
+                    params={"command": _path_type_command(path)},
+                    rationale="Action-first fallback: 恢复态已禁止继续 file.read 该路径，改用 shell.run 确认路径类型。",
+                )
+            return output
         if path.endswith("/") and _registry_has(registry, "file.list"):
             return _fallback_action_output(
                 output,
@@ -315,7 +377,6 @@ def enforce_action_first_progress(
                 rationale="Action-first fallback: 用户给出文件路径且本轮不能空等，先读取路径形成证据。",
             )
 
-    recovery_state, next_verification = _extract_recovery_fields(context_text)
     if _recovery_state_blocks_generic_action_first(recovery_state, next_verification):
         return output
 
