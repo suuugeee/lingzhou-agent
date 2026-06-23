@@ -546,6 +546,10 @@ def test_finalize_focus_task_keeps_pause_with_actionable_next_step_runnable():
     asyncio.run(_finalize_focus_task_keeps_pause_with_actionable_next_step_runnable())
 
 
+def test_finalize_focus_task_ignores_stale_wait_hint_when_pause_has_actionable_next_step():
+    asyncio.run(_finalize_focus_task_ignores_stale_wait_hint_when_pause_has_actionable_next_step())
+
+
 def test_finalize_focus_task_keeps_wait_with_next_step_runnable():
     asyncio.run(_finalize_focus_task_keeps_wait_with_next_step_runnable())
 
@@ -641,6 +645,52 @@ async def _finalize_focus_task_keeps_pause_with_actionable_next_step_runnable():
             decision="pause",
             reply_to_user="本轮已经进入最终回复阶段，下一轮我会继续用真实工具核对。",
             next_step="使用 memory.search 召回 OpenClaw，并用 shell.run 核对导入文件。",
+        )
+
+        finalized = await finalize_focus_task(
+            loop,
+            action=action,
+            active_task=task,
+            chat_id=None,
+            user_message="",
+        )
+
+        assert finalized is not None
+        assert finalized.status == "in_progress"
+        refreshed = await store.get_task_by_id(task_id)
+        assert refreshed is not None
+        assert refreshed.status == "in_progress"
+        assert refreshed.wait_kind == ""
+        await store.close()
+
+
+async def _finalize_focus_task_ignores_stale_wait_hint_when_pause_has_actionable_next_step():
+    from core.judgment import JudgmentOutput
+    from core.loop.cycle.focus import claim_focus_task, finalize_focus_task
+    from store.task import TaskStore
+
+    with tempfile.TemporaryDirectory() as d:
+        store = TaskStore(Path(d) / "focus-finalize-stale-wait-hint.db")
+        await store.open()
+        task_id = await store.add_task(
+            "长期记忆盘点",
+            goal="盘点长期记忆目录并核对具体文件",
+            status="in_progress",
+            next_step="下一次可用 file.list/shell.run 时做目录级清点。",
+        )
+        task = await store.get_task_by_id(task_id)
+        assert task is not None
+        await store.set_fact(f"task:{task.id}:chat_id", "chat:test", scope="task")
+
+        loop = SimpleNamespace(_task_store=store)
+        await claim_focus_task(loop, task, chat_id="chat:test", clear_current=True)
+        action = JudgmentOutput(
+            decision="pause",
+            reply_to_user=(
+                "有进展我会及时汇报。当前状态是：任务已经从反复列目录切换出来，"
+                "下一步必须基于已有目录结果选择具体文件做读取或 grep。"
+            ),
+            next_step="基于已有目录结果选择具体记忆文件做 file.read，或用 grep 查找重复/膨胀线索。",
         )
 
         finalized = await finalize_focus_task(

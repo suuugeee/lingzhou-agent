@@ -148,10 +148,16 @@ def _text_requests_external_wait(*values: Any) -> bool:
 def _pause_requests_waiting(action: JudgmentOutput, active_task: Task, planned_next_step: str) -> bool:
     if action.decision != "pause":
         return False
-    return _text_requests_external_wait(
+    current_action_requests_wait = _text_requests_external_wait(
         planned_next_step,
         action.reply_to_user,
         action.rationale,
+    )
+    if current_action_requests_wait:
+        return True
+    if planned_next_step or str(action.reply_to_user or "").strip() or str(action.rationale or "").strip():
+        return False
+    return _text_requests_external_wait(
         getattr(active_task, "next_step", ""),
         getattr(active_task, "goal", ""),
     )
