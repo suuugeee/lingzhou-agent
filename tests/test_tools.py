@@ -4526,6 +4526,32 @@ def test_file_list_missing_path_returns_recovery_state():
     asyncio.run(_file_list_missing_path_returns_recovery_state())
 
 
+def test_file_list_returns_structured_entry_types():
+    asyncio.run(_file_list_returns_structured_entry_types())
+
+
+async def _file_list_returns_structured_entry_types():
+    from tools.file import file_list
+
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / "semantic.db").write_text("sqlite", encoding="utf-8")
+        (root / "archive").mkdir()
+        ctx = _tool_ctx(workspace_dir=d)
+
+        result = await file_list({"path": str(root)}, ctx)
+
+        assert result.error is None
+        assert "d archive/ size=" in result.summary
+        assert "f semantic.db size=6 mtime=" in result.summary
+        entries = {entry["name"]: entry for entry in result.metadata["entries"]}
+        assert entries["archive"]["type"] == "directory"
+        assert entries["archive"]["type_code"] == "d"
+        assert entries["semantic.db"]["type"] == "file"
+        assert entries["semantic.db"]["size"] == 6
+        assert result.state_delta["entries"] == result.metadata["entries"]
+
+
 async def _file_list_missing_path_returns_recovery_state():
     from tools.file import file_list
 

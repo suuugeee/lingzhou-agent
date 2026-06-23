@@ -4185,6 +4185,12 @@ async def _file_list_and_memory_search():
             listed = await file_list({'path': str(root)}, ctx)
             assert 'a.txt' in listed.summary
             assert 'sub/' in listed.summary
+            assert 'f a.txt size=5 mtime=' in listed.summary
+            assert 'd sub/ size=' in listed.summary
+            listed_entries = {entry["name"]: entry for entry in listed.metadata["entries"]}
+            assert listed_entries["a.txt"]["type"] == "file"
+            assert listed_entries["a.txt"]["size"] == 5
+            assert listed_entries["sub"]["type"] == "directory"
 
             read_file = await file_read({'path': str(root / 'a.txt')}, ctx)
             assert read_file.error is None

@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+from datetime import datetime
 from difflib import get_close_matches
 from pathlib import Path
 from typing import Any
@@ -32,6 +33,55 @@ from tools.registry import (
 
 _log = logging.getLogger("lingzhou.tools.file")
 DEFAULT_READ_MAX_CHARS = 12_000
+
+
+def _file_list_entry(child: Path) -> dict[str, Any]:
+    try:
+        stat = child.lstat()
+    except OSError:
+        stat = None
+
+    if child.is_symlink():
+        kind = "symlink"
+        type_code = "l"
+    elif child.is_dir():
+        kind = "directory"
+        type_code = "d"
+    elif child.is_file():
+        kind = "file"
+        type_code = "f"
+    else:
+        kind = "other"
+        type_code = "o"
+
+    name = child.name + ("/" if kind == "directory" else "")
+    entry: dict[str, Any] = {
+        "name": child.name,
+        "display_name": name,
+        "path": str(child),
+        "type": kind,
+        "type_code": type_code,
+    }
+    if stat is not None:
+        entry["size"] = stat.st_size
+        entry["mtime"] = datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds")
+    if kind == "symlink":
+        try:
+            entry["target"] = os.readlink(child)
+        except OSError:
+            pass
+    return entry
+
+
+def _file_list_line(entry: dict[str, Any]) -> str:
+    parts = [str(entry.get("type_code") or "?"), str(entry.get("display_name") or entry.get("name") or "")]
+    if "size" in entry:
+        parts.append(f"size={entry['size']}")
+    if entry.get("mtime"):
+        parts.append(f"mtime={entry['mtime']}")
+    if entry.get("target"):
+        parts.append(f"-> {entry['target']}")
+    return " ".join(parts)
 
 
 def _nearest_existing_parent(path: Path) -> Path | None:
@@ -191,7 +241,7 @@ def _clip_read_text_with_recovery(
 
 @tool(ToolManifest(
     name="file.list",
-    description="列出目录内容。支持 shallow list，用于替代 shell.run 的 ls/find 场景。",
+    description="列出目录内容，返回每项类型、大小和修改时间。支持 shallow list，用于替代 shell.run 的 ls/find 场景。",
     prefer_tier="reader",
     progress_category="info",
     capabilities=("ask_evidence", *CAPS_EXEMPT, "completion_info_only", "result_streak_only"),
@@ -216,14 +266,20 @@ async def file_list(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
         for child in sorted(path.iterdir(), key=lambda p: p.name.lower()):
             if not include_hidden and child.name.startswith('.'):
                 continue
-            suffix = "/" if child.is_dir() else ""
-            entries.append(child.name + suffix)
+            entries.append(_file_list_entry(child))
         clipped = entries[:max(0, limit)]
         remaining = max(0, len(entries) - len(clipped))
-        body = "\n".join(clipped)
+        body = "\n".join(_file_list_line(entry) for entry in clipped)
         if remaining:
             body += f"\n... (+{remaining} more)"
-        payload = {"path": str(path), "count": len(entries), "returned": len(clipped)}
+        payload = {
+            "path": str(path),
+            "count": len(entries),
+            "returned": len(clipped),
+            "entries": clipped,
+            "truncated": remaining > 0,
+            "remaining": remaining,
+        }
         return ToolResult(
             summary=body or "（空目录）",
             evidence=json.dumps(payload, ensure_ascii=False),
@@ -231,6 +287,13 @@ async def file_list(params: dict[str, Any], ctx: ToolContext) -> ToolResult:
             fingerprint=f"list:{hashlib.md5((body or '（空目录）').encode()).hexdigest()[:12]}",
             artifact_paths=[str(path)],
             metadata=payload,
+            state_delta={
+                "path": str(path),
+                "entry_count": len(entries),
+                "returned": len(clipped),
+                "entries": clipped,
+                "truncated": remaining > 0,
+            },
         )
     except Exception as e:
         _log.exception("列出目录失败: %s", path)
