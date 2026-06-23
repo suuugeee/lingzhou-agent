@@ -1,6 +1,37 @@
 """logs 命令回归测试。"""
 
 
+def test_logs_files_identifies_daily_and_stdout_roles(monkeypatch, tmp_path):
+    from cli import logs as logs_mod
+
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    daily = log_dir / "lingzhou-2026-06-23.log"
+    stdout = log_dir / "daemon-stdout.log"
+    daily.write_text("run=1 status=succeeded\n", encoding="utf-8")
+    stdout.write_text("stdout only\n", encoding="utf-8")
+
+    monkeypatch.setattr(logs_mod, "LOG_DIR", log_dir)
+    monkeypatch.setattr(logs_mod, "_latest_log", lambda: daily)
+
+    printed: list[str] = []
+
+    def _capture_print(message):
+        printed.append(str(message))
+
+    monkeypatch.setattr(logs_mod.console, "print", _capture_print)
+
+    logs_mod.logs_files()
+
+    output = "\n".join(printed)
+    assert "daily" in output
+    assert str(daily) in output
+    assert "gateway logs/tail 默认读取这里" in output
+    assert "stdout" in output
+    assert str(stdout) in output
+    assert "不保证包含结构化工具结果" in output
+
+
 
 def test_logs_stats_includes_judgment_overflow_metrics(monkeypatch, tmp_path):
     from cli import logs as logs_mod

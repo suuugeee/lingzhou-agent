@@ -19,7 +19,7 @@ import typer
 from channels import describe_channel_runtime, start_channel_runtime
 from cli.bootstrap import onboarding_status
 from cli.common import DEFAULT_CONFIG_PATH, console, load_cfg
-from cli.logs import logs_crash, logs_errors, logs_stats, logs_tail, logs_wechat
+from cli.logs import logs_crash, logs_errors, logs_files, logs_stats, logs_tail, logs_wechat
 from cli.plugin import plugin_app
 
 _PID_FILE = Path("~/.lingzhou/lingzhou.pid").expanduser()
@@ -285,6 +285,7 @@ logs_group.command("tail")(logs_tail)
 logs_group.command("errors")(logs_errors)
 logs_group.command("crash")(logs_crash)
 logs_group.command("wechat")(logs_wechat)
+logs_group.command("files")(logs_files)
 logs_group.command("stats")(logs_stats)
 gateway_app.add_typer(logs_group)
 gateway_app.add_typer(plugin_app)

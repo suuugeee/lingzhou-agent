@@ -154,6 +154,25 @@ def logs_wechat(
             console.print(line, end="")
 
 
+def logs_files() -> None:
+    """列出各类日志文件路径，避免把 daily log 与 stdout/crash 混淆。"""
+    daily_log = _latest_log()
+    files = [
+        ("daily", daily_log, "结构化运行日志；gateway logs/tail 默认读取这里"),
+        ("console", LOG_DIR / "console.log", "当前进程 console handler"),
+        ("stdout", LOG_DIR / "daemon-stdout.log", "daemon stdout 重定向；不保证包含结构化工具结果"),
+        ("crash", LOG_DIR / "crash.log", "stderr/traceback"),
+    ]
+    for name, path, note in files:
+        if path.exists():
+            stat = path.stat()
+            console.print(
+                f"{name:<7} {path} size={stat.st_size} mtime={stat.st_mtime:.0f}  {note}"
+            )
+        else:
+            console.print(f"{name:<7} {path} missing  {note}")
+
+
 def logs_stats() -> None:
     """日志统计概览。"""
     log_file = _latest_log()
