@@ -167,11 +167,11 @@ class LoopConfig(BaseModel):
         ),
     )
     tick_job_timeout: float | None = Field(
-        default=None,
+        default=180.0,
         gt=0,
         description=(
-            "单个 tick job 的外层保护超时（秒）。None=不加 dispatcher 外层超时，"
-            "由 LLM/provider/tool 自身超时自然结束；设为正数时才启用外层保护。"
+            "单个 tick job 的外层保护超时（秒）。默认 180 秒，防止一次工具调度、"
+            "run 写入或模型调用卡住后永久占住 chain；可设为更大的正数放宽保护。"
         ),
     )
     # ── 事件驱动时序（替代固定 interval 概念）───────────────────────────────

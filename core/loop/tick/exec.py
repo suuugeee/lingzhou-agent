@@ -112,6 +112,13 @@ async def _execute_tick_action(
                 except Exception as _exc:
                     _log.debug("[tick] judge/chat_reply run 写入失败（不影响主流程）: %s", _exc)
 
+    if action.decision == "act":
+        _log.info(
+            "[tick-exec] dispatch action tool=%s task=%s key=%s",
+            action.chosen_action_id or "",
+            getattr(active_task, "id", "") if active_task is not None else "",
+            action_key_param(action.params),
+        )
     result = await loop._run_driver.dispatch(action, ctx)
     tool_history: list[dict[str, Any]] = []
     if action.decision == "act":
