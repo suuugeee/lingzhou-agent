@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 _log = logging.getLogger("lingzhou.loop")
+_DEFAULT_TICK_JOB_TIMEOUT_SEC = 180.0
 
 
 @dataclass(slots=True)
@@ -140,13 +141,18 @@ class ConcurrentTickDispatcher:
 
 
 def _tick_job_guard_seconds(cfg: Any | None) -> float | None:
-    """Return explicit dispatcher timeout, or None to let inner timeouts own cancellation."""
+    """Return dispatcher timeout.
+
+    A tick can stall before the tool's own timeout is reached, for example while
+    writing the run-start row or waiting on a leaked worker slot. Keep a generous
+    outer guard so one dead tick cannot permanently occupy a chain.
+    """
     try:
         loop_cfg = getattr(cfg, "loop", None)
         explicit = getattr(loop_cfg, "tick_job_timeout", None) if loop_cfg is not None else None
     except Exception:
         explicit = None
-    return _positive_float_or_none(explicit)
+    return _positive_float_or_none(explicit) or _DEFAULT_TICK_JOB_TIMEOUT_SEC
 
 
 def _positive_float_or_none(value: Any) -> float | None:

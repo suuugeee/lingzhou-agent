@@ -72,10 +72,10 @@ async def test_dispatcher_rejects_when_queue_is_full():
     assert await dispatcher.enqueue(TickJob(cycle=2, chain_key="chain:b")) is False
 
 
-def test_tick_job_guard_defaults_to_no_outer_timeout():
+def test_tick_job_guard_defaults_to_outer_timeout():
     cfg = SimpleNamespace(timeout=60.0, loop=SimpleNamespace(tick_job_timeout=None))
 
-    assert _tick_job_guard_seconds(cfg) is None
+    assert _tick_job_guard_seconds(cfg) == 180.0
 
 
 def test_tick_job_guard_uses_explicit_loop_override():
