@@ -271,15 +271,37 @@ def _dedupe_reply_lines(reply: str) -> str:
     # LLMs sometimes append a numbered point after a sentence without a newline.
     text = re.sub(r"(?<=[。！？.!?])\s+(\d+[.．、]\s+)", r"\n\1", text)
 
+    def _key(value: str) -> str:
+        stripped = value.strip()
+        stripped = re.sub(r"^\s*(?:[-*]|\d+[.．、])\s*", "", stripped)
+        return re.sub(r"\s+", " ", stripped).strip("。；;，,、 ")
+
+    def _trim_repeated_suffix(raw_lines: list[str]) -> list[str]:
+        keys = [_key(line) for line in raw_lines]
+        non_empty = [(idx, key) for idx, key in enumerate(keys) if key]
+        if len(non_empty) < 6:
+            return raw_lines
+        first_key = non_empty[0][1]
+        for pos in range(1, len(non_empty)):
+            if non_empty[pos][1] != first_key:
+                continue
+            matched = 0
+            for offset in range(min(pos, len(non_empty) - pos)):
+                if non_empty[offset][1] != non_empty[pos + offset][1]:
+                    break
+                matched += 1
+            if matched >= 3:
+                return raw_lines[:non_empty[pos][0]]
+        return raw_lines
+
     seen: set[str] = set()
     lines: list[str] = []
-    for line in text.splitlines():
+    for line in _trim_repeated_suffix(text.splitlines()):
         stripped = line.strip()
         if not stripped:
             lines.append(line)
             continue
-        key = re.sub(r"^\s*(?:[-*]|\d+[.．、])\s*", "", stripped)
-        key = re.sub(r"\s+", " ", key).strip("。；;，,、 ")
+        key = _key(stripped)
         if key and key in seen:
             continue
         seen.add(key)
