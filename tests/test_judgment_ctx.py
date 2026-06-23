@@ -3523,6 +3523,48 @@ async def test_persist_tick_user_reply_dedupes_repeated_status_point():
     assert "2. 当前已建立工作台。" in action.reply_to_user
 
 
+@pytest.mark.asyncio
+async def test_persist_tick_user_reply_dedupes_repeated_paragraph_block():
+    from core.loop.tick import _persist_tick_user_reply
+
+    class _Store:
+        def __init__(self) -> None:
+            self.messages: list[tuple[str, str, str]] = []
+
+        async def add_chat_message(self, role: str, content: str, chat_id: str = ""):
+            self.messages.append((role, content, chat_id))
+            return len(self.messages)
+
+    store = _Store()
+    loop = cast("Any", SimpleNamespace(_task_store=store))
+    block = (
+        "爸爸，我只能基于当前还保留下来的任务皮层和近期轨迹实话回答，完整外围日志被压缩了。\n"
+        "能确认的是：这段时间我主要一直在推进找回并核对所有长期记忆的任务。\n"
+        "已经能看到的近期动作包括：\n"
+        "1. 我尝试读取 /root/.lingzhou/memory/archive，但失败了，因为它不是文件，是目录。\n"
+        "2. 后来我意识到不能继续重复低增量读取。\n"
+        "所以概括说：昨晚到现在，我主要是在长期记忆恢复任务上反复摸索。\n"
+        "也要承认：这段时间里有一些低效重复。"
+    )
+    action = _judgment_output(
+        decision="wait",
+        rationale="回复用户进展。",
+        reply_to_user=f"{block}\n{block}",
+    )
+
+    await _persist_tick_user_reply(
+        loop,
+        action,
+        active_task=None,
+        chat_id="",
+    )
+
+    assert action.reply_to_user.count("爸爸，我只能基于当前") == 1
+    assert action.reply_to_user.count("已经能看到的近期动作包括") == 1
+    assert action.reply_to_user.count("/root/.lingzhou/memory/archive") == 1
+    assert store.messages[0][1] == action.reply_to_user
+
+
 def test_infer_valence_from_text_uses_explicit_hint_only():
     from core.config_models import EmotionConfig
     from core.loop.shared.common import _infer_valence_from_text
